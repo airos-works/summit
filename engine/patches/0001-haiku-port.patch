@@ -15243,7 +15243,7 @@ index b7cc6b07caf172c2c167a081bd963c0c0a894842..1303442c7820d596d0253cd46eba6b70
  }
  
 diff --git a/Source/WebCore/dom/ViewTransition.cpp b/Source/WebCore/dom/ViewTransition.cpp
-index 0d080489846058c7981fd45c760edca8e7fb4880..002aec79d2731940a7b79516e6257d1b170cdb12 100644
+index 0d080489846058c7981fd45c760edca8e7fb4880..62d26addf72663f7f8bc72152ac6913da5040494 100644
 --- a/Source/WebCore/dom/ViewTransition.cpp
 +++ b/Source/WebCore/dom/ViewTransition.cpp
 @@ -72,6 +72,13 @@
@@ -15308,8 +15308,17 @@ index 0d080489846058c7981fd45c760edca8e7fb4880..002aec79d2731940a7b79516e6257d1b
      if (!buffer)
          return nullptr;
  
-@@ -512,6 +549,14 @@ static RefPtr<ImageBuffer> snapshotElementVisualOverflowClippedToViewport(LocalF
+@@ -510,8 +547,23 @@ static RefPtr<ImageBuffer> snapshotElementVisualOverflowClippedToViewport(LocalF
+     paintFlags.add(RenderLayer::PaintLayerFlag::AppliedTransform);
+     paintFlags.add(RenderLayer::PaintLayerFlag::PaintingSkipDescendantViewTransition);
      layerRenderer->layer()->paint(buffer->context(), paintRect, subpixelOffset, frameView->paintBehavior(), nullptr, paintFlags);
++#if PLATFORM(HAIKU)
++    // Overlay scroll bars paint in a pass of their own after everything
++    // else (LocalFrameView::paintContents and RenderLayerBacking run it);
++    // without it the snapshot of a scroller had none where the page showed
++    // them (scroller.html, scroller-child.html, #195).
++    layerRenderer->layer()->paintOverlayScrollbarsHaiku(buffer->context(), paintRect, subpixelOffset, frameView->paintBehavior(), paintFlags);
++#endif
  
      frameView->setPaintBehavior(oldPaintBehavior);
 +#if PLATFORM(HAIKU)
@@ -15323,7 +15332,7 @@ index 0d080489846058c7981fd45c760edca8e7fb4880..002aec79d2731940a7b79516e6257d1b
      return buffer;
  }
  
-@@ -1118,8 +1163,19 @@ void ViewTransition::visibilityStateChanged()
+@@ -1118,8 +1170,19 @@ void ViewTransition::visibilityStateChanged()
  
      Ref document = *this->document();
      if (document->hidden()) {
@@ -23079,6 +23088,25 @@ index ce4e0d940167703a010a3d14f8a51ee98b93fc47..194ed6288d965f9734f7d39afbc80efd
      IntRect m_frame; // Not used when a native widget exists.
  };
  
+diff --git a/Source/WebCore/platform/adwaita/ScrollbarThemeAdwaita.cpp b/Source/WebCore/platform/adwaita/ScrollbarThemeAdwaita.cpp
+index dd4409073c1db7e0fad87272d1d4f883fd60e350..1b883b83a6d617dd6b86236f84d7faaeed7fff3e 100644
+--- a/Source/WebCore/platform/adwaita/ScrollbarThemeAdwaita.cpp
++++ b/Source/WebCore/platform/adwaita/ScrollbarThemeAdwaita.cpp
+@@ -110,7 +110,13 @@ bool ScrollbarThemeAdwaita::paint(Scrollbar& scrollbar, GraphicsContext& graphic
+ {
+ #if USE(COORDINATED_GRAPHICS_ASYNC_SCROLLBAR)
+     if (auto scrollableArea = protect(scrollbar.scrollableArea())) {
+-        if (scrollableArea->usesCompositedScrolling()) {
++        if (scrollableArea->usesCompositedScrolling()
++#if PLATFORM(HAIKU)
++            // A snapshot (a view transition's picture of the scroller, #195)
++            // has no scrolling thread to draw them: paint them here.
++            && !scrollbar.paintingIntoSnapshot()
++#endif
++            ) {
+             // Painting is done by ScrollerCoordinated in the scrolling thread.
+             return true;
+         }
 diff --git a/Source/WebCore/platform/adwaita/ScrollbarThemeAdwaita.h b/Source/WebCore/platform/adwaita/ScrollbarThemeAdwaita.h
 index fea966a8bfaea4858264833bf1c29028d56d8658..9be25c0a8c7fbc18552d571ffb0da4a5adbd904c 100644
 --- a/Source/WebCore/platform/adwaita/ScrollbarThemeAdwaita.h
@@ -27256,6 +27284,32 @@ index aacc92d2633ea786c620125aa9cb8203f85e7e06..02363d59ed1c6a78d8d7120ec8bb67f1
      void requestLicense(LicenseType, KeyGroupingStrategy, const String& initDataType, Ref<SharedBuffer>&& initData, LicenseCallback&&) final;
      void updateLicense(const String&, LicenseType, Ref<SharedBuffer>&&, LicenseUpdateCallback&&) final;
      void loadSession(LicenseType, const String&, const String&, LoadSessionCallback&&) final;
+diff --git a/Source/WebCore/platform/generic/ScrollbarsControllerGeneric.cpp b/Source/WebCore/platform/generic/ScrollbarsControllerGeneric.cpp
+index e676526cdb47d83fd2c77566c0f016029f149377..a5d45fc3e138005956577b34e8ff42b239913f3a 100644
+--- a/Source/WebCore/platform/generic/ScrollbarsControllerGeneric.cpp
++++ b/Source/WebCore/platform/generic/ScrollbarsControllerGeneric.cpp
+@@ -166,6 +166,21 @@ void ScrollbarsControllerGeneric::showOverlayScrollbars()
+     if (!m_horizontalOverlayScrollbar && !m_verticalOverlayScrollbar)
+         return;
+ 
++#if PLATFORM(HAIKU)
++    // Overlay scroll bars show at once, as macOS's and GTK 4's do, and
++    // only fade away. Faded in over a second, the frame in which a page
++    // scrolled had none: a view transition started then pictured the
++    // scroller without them (scroller.html, #195), and the bars lagged the
++    // scrolling they report.
++    if (m_overlayScrollbarAnimationCurrent != 1) {
++        m_overlayScrollbarAnimationCurrent = 1;
++        updateOverlayScrollbarsOpacity();
++    }
++    m_overlayScrollbarAnimationSource = 1;
++    m_overlayScrollbarAnimationTarget = 1;
++    hideOverlayScrollbars();
++    return;
++#endif
+     m_overlayScrollbarAnimationSource = m_overlayScrollbarAnimationCurrent;
+     m_overlayScrollbarAnimationTarget = 1;
+     if (m_overlayScrollbarAnimationTarget != m_overlayScrollbarAnimationCurrent) {
 diff --git a/Source/WebCore/platform/graphics/BitmapImageDescriptor.cpp b/Source/WebCore/platform/graphics/BitmapImageDescriptor.cpp
 index ca354c1055ee4465976d2f7046ed16a6c457aee3..9cd622e52c033ad61ae48127123d8c0aeca163a4 100644
 --- a/Source/WebCore/platform/graphics/BitmapImageDescriptor.cpp
@@ -86164,7 +86218,7 @@ index e4016aa11263c14ff1ece803b6abdb2d697c2f75..4c4a7d020e2a91fbbe39ab92bc99ae05
      } else if (canCreateIntrinsicLogicalHeightsCacheForRowSizingFirstPass)
          m_intrinsicLogicalHeightsForRowSizingFirstPass.emplace();
 diff --git a/Source/WebCore/rendering/RenderLayer.cpp b/Source/WebCore/rendering/RenderLayer.cpp
-index 4bd303aa17e5da8a780da294d7a1337b8978d6ea..f725a2e04a1a94b4af059db4abc884a6fc5758bc 100644
+index 4bd303aa17e5da8a780da294d7a1337b8978d6ea..2c3ccf819dc789c9874a9d0725b92ced2abed609 100644
 --- a/Source/WebCore/rendering/RenderLayer.cpp
 +++ b/Source/WebCore/rendering/RenderLayer.cpp
 @@ -173,6 +173,9 @@
@@ -86177,7 +86231,23 @@ index 4bd303aa17e5da8a780da294d7a1337b8978d6ea..f725a2e04a1a94b4af059db4abc884a6
  #include <wtf/TZoneMallocInlines.h>
  #include <wtf/text/CString.h>
  #include <wtf/text/MakeString.h>
-@@ -3570,6 +3573,20 @@ RenderLayerFilters* RenderLayer::filtersForPainting(GraphicsContext& context, Op
+@@ -3276,6 +3279,15 @@ void RenderLayer::paint(GraphicsContext& context, const LayoutRect& damageRect,
+         widget->setOverlapTestResult(false);
+ }
+ 
++#if PLATFORM(HAIKU)
++void RenderLayer::paintOverlayScrollbarsHaiku(GraphicsContext& context, const LayoutRect& damageRect, const LayoutSize& subpixelOffset, OptionSet<PaintBehavior> paintBehavior, OptionSet<PaintLayerFlag> paintFlags)
++{
++    LayerPaintingInfo paintingInfo(this, enclosingIntRect(damageRect), paintBehavior, subpixelOffset);
++    paintFlags.add(PaintLayerFlag::PaintingOverlayScrollbars);
++    paintLayer(context, paintingInfo, paintFlags);
++}
++#endif
++
+ void RenderLayer::clipToRect(GraphicsContext& context, GraphicsContextStateSaver& stateSaver, RegionContextStateSaver& regionContextStateSaver, const LayerPaintingInfo& paintingInfo, OptionSet<PaintBehavior> paintBehavior, const ClipRect& clipRect, BorderRadiusClippingRule rule)
+ {
+     bool needsClipping = !clipRect.isInfinite() && clipRect.rect() != paintingInfo.paintDirtyRect;
+@@ -3570,6 +3582,20 @@ RenderLayerFilters* RenderLayer::filtersForPainting(GraphicsContext& context, Op
      return &ensureLayerFilters();
  }
  
@@ -86198,7 +86268,7 @@ index 4bd303aa17e5da8a780da294d7a1337b8978d6ea..f725a2e04a1a94b4af059db4abc884a6
  GraphicsContext* RenderLayer::setupFilters(GraphicsContext& destinationContext, LayerPaintingInfo& paintingInfo, OptionSet<PaintLayerFlag>& paintFlags, const LayoutSize& offsetFromRoot, const ClipRect& backgroundRect)
  {
      auto* paintingFilters = filtersForPainting(destinationContext, paintFlags, paintingInfo.paintBehavior);
-@@ -3579,6 +3596,13 @@ GraphicsContext* RenderLayer::setupFilters(GraphicsContext& destinationContext,
+@@ -3579,6 +3605,13 @@ GraphicsContext* RenderLayer::setupFilters(GraphicsContext& destinationContext,
      LayoutRect filterRepaintRect = paintingFilters->dirtySourceRect();
      filterRepaintRect.move(offsetFromRoot);
  
@@ -86212,7 +86282,7 @@ index 4bd303aa17e5da8a780da294d7a1337b8978d6ea..f725a2e04a1a94b4af059db4abc884a6
      auto rootRelativeBounds = calculateLayerBounds(paintingInfo.rootLayer, offsetFromRoot, { });
  
      // When the filter is applied via a transparency layer directly on the destination context (e.g. CG drop-shadow),
-@@ -5752,6 +5776,14 @@ LayoutRect RenderLayer::calculateLayerBounds(const RenderLayer* ancestorLayer, c
+@@ -5752,6 +5785,14 @@ LayoutRect RenderLayer::calculateLayerBounds(const RenderLayer* ancestorLayer, c
          // FIXME: border-radius not accounted for.
          // FIXME: Regions not accounted for.
          const RenderLayer* clippingRootLayer = flags & UseLocalClipRectExcludingCompositingIfPossible ? this : clippingRootForPainting();
@@ -86227,8 +86297,24 @@ index 4bd303aa17e5da8a780da294d7a1337b8978d6ea..f725a2e04a1a94b4af059db4abc884a6
          LayoutSize offsetFromRoot = offsetFromAncestor(clippingRootLayer);
          LayoutRect clipRect = clipRectRelativeToAncestor(clippingRootLayer, offsetFromRoot, infiniteRect);
          if (clipRect.isInfinite())
+diff --git a/Source/WebCore/rendering/RenderLayer.h b/Source/WebCore/rendering/RenderLayer.h
+index 1e30286a668e800d272ca12deeadb625631465ec..0d6a6e3058c34cecaeb18e90134d79daf6fd1336 100644
+--- a/Source/WebCore/rendering/RenderLayer.h
++++ b/Source/WebCore/rendering/RenderLayer.h
+@@ -731,6 +731,11 @@ public:
+     // layers that intersect the point from front to back.
+     void paint(GraphicsContext&, const LayoutRect& damageRect, const LayoutSize& subpixelOffset = LayoutSize(), OptionSet<PaintBehavior> = PaintBehavior::Normal,
+         RenderObject* subtreePaintRoot = nullptr, OptionSet<PaintLayerFlag> = { }, SecurityOriginPaintPolicy = SecurityOriginPaintPolicy::AnyOrigin, RegionContext* = nullptr);
++#if PLATFORM(HAIKU)
++    // The second pass of a paint() of this layer's subtree: overlay scroll
++    // bars over what the first painted (a view transition's snapshot, #195).
++    void paintOverlayScrollbarsHaiku(GraphicsContext&, const LayoutRect& damageRect, const LayoutSize& subpixelOffset, OptionSet<PaintBehavior>, OptionSet<PaintLayerFlag>);
++#endif
+     WEBCORE_EXPORT bool hitTest(const HitTestRequest&, HitTestResult&);
+     bool hitTest(const HitTestRequest&, const HitTestLocation&, HitTestResult&);
+ 
 diff --git a/Source/WebCore/rendering/RenderLayerBacking.cpp b/Source/WebCore/rendering/RenderLayerBacking.cpp
-index 95122a10cacc10b498c40d3447599bd2cd4d2795..6c05ae6ea64ea1cb7fd790f15fe697c2a56b5730 100644
+index 95122a10cacc10b498c40d3447599bd2cd4d2795..707bcce8d8ad1ca8819f2cd9c5007694562810ad 100644
 --- a/Source/WebCore/rendering/RenderLayerBacking.cpp
 +++ b/Source/WebCore/rendering/RenderLayerBacking.cpp
 @@ -137,6 +137,15 @@
@@ -86380,7 +86466,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..6c05ae6ea64ea1cb7fd790f15fe697c2
      return LayoutRect(encloseRectToDevicePixels(LayoutRect(toLayoutPoint(compositedBoundsOffset.fromParentGraphicsLayer()), compositedBounds().size()),
          pixelSnappingScaleFactor()));
  }
-@@ -1678,6 +1797,14 @@ void RenderLayerBacking::updateGeometry(const RenderLayer* compositedAncestor)
+@@ -1678,6 +1797,22 @@ void RenderLayerBacking::updateGeometry(const RenderLayer* compositedAncestor)
      updateBackdropRoot();
      updateBlendMode(style);
      updateContentsScalingFilters(style);
@@ -86388,14 +86474,22 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..6c05ae6ea64ea1cb7fd790f15fe697c2
 +    // A layer that stays where it is in the viewport while the page scrolls
 +    // gets no tiles ahead of the scroll (CoordinatedBackingStoreProxy): only
 +    // what shows is ever painted. Not in a subframe, which the page around it
-+    // scrolls.
-+    if (auto* coordinatedLayer = dynamicDowncast<GraphicsLayerCoordinated>(m_graphicsLayer.get()))
-+        coordinatedLayer->setStaysInViewportHaiku(m_owningLayer.behavesAsFixed() && renderer().frame().isMainFrame());
++    // scrolls, and not while animations run on it: a transform or a
++    // scroll-driven animation moves it to parts it had no tiles for
++    // (scroll-timelines/custom-property.html showed it unpainted).
++    if (auto* coordinatedLayer = dynamicDowncast<GraphicsLayerCoordinated>(m_graphicsLayer.get())) {
++        bool animated = false;
++        if (auto styleable = Styleable::fromRenderer(renderer())) {
++            auto* effects = styleable->keyframeEffectStack();
++            animated = effects && effects->hasEffects();
++        }
++        coordinatedLayer->setStaysInViewportHaiku(m_owningLayer.behavesAsFixed() && renderer().frame().isMainFrame() && !animated);
++    }
 +#endif
  
  #if ENABLE(VIDEO)
      updateVideoGravity(style);
-@@ -1935,8 +2062,18 @@ void RenderLayerBacking::updateGeometry(const RenderLayer* compositedAncestor)
+@@ -1935,8 +2070,18 @@ void RenderLayerBacking::updateGeometry(const RenderLayer* compositedAncestor)
  
      positionOverflowControlsLayers();
  
@@ -86415,7 +86509,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..6c05ae6ea64ea1cb7fd790f15fe697c2
  
  #if ENABLE(MODEL_ELEMENT)
      if (is<RenderModel>(renderer()))
-@@ -3543,6 +3680,56 @@ void RenderLayerBacking::updateDirectlyCompositedBackgroundColor(PaintedContents
+@@ -3543,6 +3688,56 @@ void RenderLayerBacking::updateDirectlyCompositedBackgroundColor(PaintedContents
      didUpdateContentsRect = true;
  }
  
@@ -86472,7 +86566,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..6c05ae6ea64ea1cb7fd790f15fe697c2
  // Only bitmap images are directly composited, so the layer shows the image's current frame at its natural size.
  static RefPtr<NativeImage> nativeImageForDirectlyCompositedImage(Image& image)
  {
-@@ -3585,7 +3772,14 @@ void RenderLayerBacking::updateDirectlyCompositedBackgroundImage(PaintedContents
+@@ -3585,7 +3780,14 @@ void RenderLayerBacking::updateDirectlyCompositedBackgroundImage(PaintedContents
      m_graphicsLayer->setContentsTilePhase(geometry.phase);
      m_graphicsLayer->setContentsRect(geometry.destinationRect);
      m_graphicsLayer->setContentsClippingRect(FloatRoundedRect(geometry.destinationRect));
@@ -86488,7 +86582,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..6c05ae6ea64ea1cb7fd790f15fe697c2
          m_graphicsLayer->setContentsToNativeImage(nativeImage.get());
  
      didUpdateContentsRect = true;
-@@ -4093,6 +4287,11 @@ void RenderLayerBacking::updateImageContents(PaintedContentsInfo& contentsInfo)
+@@ -4093,6 +4295,11 @@ void RenderLayerBacking::updateImageContents(PaintedContentsInfo& contentsInfo)
          if (!cachedImage->isLoaded())
              return;
  
@@ -86500,7 +86594,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..6c05ae6ea64ea1cb7fd790f15fe697c2
          if (RefPtr nativeImage = nativeImageForDirectlyCompositedImage(*image))
              m_graphicsLayer->setContentsToNativeImage(nativeImage.get());
  
-@@ -4133,7 +4332,11 @@ LayoutRect RenderLayerBacking::contentsBox() const
+@@ -4133,7 +4340,11 @@ LayoutRect RenderLayerBacking::contentsBox() const
  #endif
  
      if (CheckedPtr renderViewTransitionCapture = dynamicDowncast<RenderViewTransitionCapture>(*renderBox))
