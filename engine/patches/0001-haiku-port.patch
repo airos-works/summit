@@ -63500,7 +63500,7 @@ index 6cc3e9febb8c00ec5829ca476fc21b1b693c81a3..fc5107b6ced726a345ccd053cbc48fca
  } // namespace WebCore
  
 diff --git a/Source/WebCore/platform/graphics/skia/ComplexTextControllerSkia.cpp b/Source/WebCore/platform/graphics/skia/ComplexTextControllerSkia.cpp
-index 34d8abe7e20ce6253a0b968d52c127c65871f37d..75cb26417f81f03150fa86142d7b1f2437df807d 100644
+index 34d8abe7e20ce6253a0b968d52c127c65871f37d..83e014793498e84a2b4dc891371e77eaeeee94a3 100644
 --- a/Source/WebCore/platform/graphics/skia/ComplexTextControllerSkia.cpp
 +++ b/Source/WebCore/platform/graphics/skia/ComplexTextControllerSkia.cpp
 @@ -35,6 +35,8 @@
@@ -63512,7 +63512,7 @@ index 34d8abe7e20ce6253a0b968d52c127c65871f37d..75cb26417f81f03150fa86142d7b1f24
  
  namespace WebCore {
  
-@@ -252,7 +254,18 @@ void ComplexTextController::collectComplexTextRunsForCharacters(std::span<const
+@@ -252,7 +254,21 @@ void ComplexTextController::collectComplexTextRunsForCharacters(std::span<const
      // The computed "locale" equals the "lang" attribute. The latter must be a valid BCP 47 language tag,
      // according to <https://html.spec.whatwg.org/multipage/dom.html#attr-lang>.
      // This is exactly what hb_language_from_string() expects, so we can pass directly.
@@ -63520,8 +63520,11 @@ index 34d8abe7e20ce6253a0b968d52c127c65871f37d..75cb26417f81f03150fa86142d7b1f24
 +    // HarfBuzz keeps its languages for the life of the process; looking one
 +    // up searches a list of strings, and every shaped run did that after
 +    // converting the locale to UTF-8 (1 % of a Wikipedia load).
++    // Text without a lang attribute has a null locale, which as a key is
++    // the table's empty value: it stands in as the empty string.
 +    static thread_local NeverDestroyed<HashMap<AtomString, hb_language_t>> languages;
-+    const auto& locale = m_fontCascade->fontDescription().usedLocale();
++    const auto& usedLocale = m_fontCascade->fontDescription().usedLocale();
++    const AtomString& locale = usedLocale.isNull() ? emptyAtom() : usedLocale;
 +    auto language = languages->ensure(locale, [&] {
 +        return hb_language_from_string(locale.string().utf8().legacyCStringPointer(), -1);
 +    }).iterator->value;
@@ -64688,7 +64691,7 @@ index c2d6ac748ed19ad7daf8887b9678a32eef10e3f5..e1edefcf3bb920ab49e1bd244577ff75
      bool isColorBitmapFont() const { return m_isColorBitmapFont; }
  
 diff --git a/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.cpp b/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.cpp
-index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..4179c08f3d3464d64d48fdcbf4652c4e14314201 100644
+index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..a57b677e4885f57accded68ad8f6602c29a4298b 100644
 --- a/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.cpp
 +++ b/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.cpp
 @@ -58,6 +58,13 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
@@ -64896,16 +64899,21 @@ index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..4179c08f3d3464d64d48fdcbf4652c4e
  
      return buffer;
  }
-@@ -310,7 +453,15 @@ unsigned SkiaPaintingEngine::numberOfCPUPaintingThreads()
+@@ -310,7 +453,20 @@ unsigned SkiaPaintingEngine::numberOfCPUPaintingThreads()
      static unsigned numberOfThreads = 0;
  
      std::call_once(onceFlag, [] {
 +#if PLATFORM(HAIKU)
 +        // The shared-memory compositor leaves layout and script work on the
 +        // WebProcess main thread. On the 32-logical-core workstation two tile
-+        // painters avoid the severe Speedometer stalls seen with eight, while
-+        // keeping the 400-card scroll probe at display cadence.
-+        numberOfThreads = std::max(1, std::min(2, WTF::numberOfProcessorCores() / 2));
++        // painters avoided the severe Speedometer stalls seen with eight
++        // (October). On 6 Nov four kept Speedometer level (8.45, 7.89 against
++        // 8.02, 8.48 with two) and raised MotionMark 344 -> 371, whose Design
++        // test is bound by tile painting (six: 390, Speedometer 7.9): a
++        // quarter of the logical cores, two to four. The Pi and the ROCK 5
++        // keep two.
++        numberOfThreads = std::max(2, std::min(4, WTF::numberOfProcessorCores() / 4));
++        numberOfThreads = std::min<unsigned>(numberOfThreads, std::max(1, WTF::numberOfProcessorCores() / 2));
 +#else
          numberOfThreads = std::max(1, std::min(8, WTF::numberOfProcessorCores() / 2)); // By default, use half the CPU cores, capped at 8.
 +#endif
