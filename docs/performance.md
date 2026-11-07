@@ -48,6 +48,22 @@ tiling after four writes. MotionMark 1.3.1: 115-150 -> 255-270 (Multiply 28
 canvas tests. Frames there are still read back from the GPU (no direct
 present for Panfrost: airos-works/haiku#71).
 
+**After each page load (7 Nov).** Summit runs two probes in the page once it
+has loaded: reader mode (Readability's `isProbablyReaderable`, about 12 ms on
+a ROCK 5 Wikipedia article) and the translation language sample. The
+sample walked up to 64 KiB of visible text, 41 ms on the ROCK 5; 16 KiB
+(cd53958) takes 18 ms and still identifies German and French pages.
+
+**Animated backdrop filters (7a76297).** The compositor applied an animated
+`backdrop-filter` as the layer's own filter, with no backdrop layer when the
+unanimated style had none: a running grayscale(1) -> grayscale(0) drew about
+grayscale(0.75) at its midpoint. They now animate on the main thread.
+
+**New tabs.** From the request to the first frame of the start page: 106-118
+ms on the X399, about 155 ms on the ROCK 5 (40 ms until the spare process has
+the page, 45 ms from commit to first layout, 60 ms to the first frame). Warming
+fonts and the EGL display in the spare process changed nothing measurable.
+
 **Fallback fonts (0df519e).** A page in many languages made fontconfig
 build a fallback font set per locale, checking every system font file with
 `stat` each time (Wikipedia's 200 language links: 11 % of the main thread).
