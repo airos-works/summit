@@ -39054,7 +39054,7 @@ index 2b1b31403c0b4c1f894c374d576ee2e79ddcd751..da0b36c0555a007ed33f74c6d8a7dace
  
      enum class PaintingState {
 diff --git a/Source/WebCore/platform/graphics/coordinated/GraphicsLayerCoordinated.cpp b/Source/WebCore/platform/graphics/coordinated/GraphicsLayerCoordinated.cpp
-index be3145e2dc5a248c932f24023c37029290825571..d10398e2e9ae6d73ac259786b0c8a4c148a76fe9 100644
+index be3145e2dc5a248c932f24023c37029290825571..5f95f03e67afcab773dd57481c5a29416ee50217 100644
 --- a/Source/WebCore/platform/graphics/coordinated/GraphicsLayerCoordinated.cpp
 +++ b/Source/WebCore/platform/graphics/coordinated/GraphicsLayerCoordinated.cpp
 @@ -43,6 +43,11 @@
@@ -39198,7 +39198,29 @@ index be3145e2dc5a248c932f24023c37029290825571..d10398e2e9ae6d73ac259786b0c8a4c1
  void GraphicsLayerCoordinated::setContentsToSolidColor(const Color& color)
  {
      if (m_contentsColor == color)
-@@ -1276,6 +1367,7 @@ void GraphicsLayerCoordinated::recursiveCommitChanges(CommitState& commitState,
+@@ -697,8 +788,21 @@ bool GraphicsLayerCoordinated::addAnimation(const GraphicsLayerKeyframeValueList
+         return false;
+ 
+     switch (valueList.property()) {
++#if PLATFORM(HAIKU)
++    case AnimatedProperty::WebkitBackdropFilter:
++        // The compositor applies an animated backdrop-filter as the layer's
++        // own filter (TextureMapperLayer::syncAnimations has one filter
++        // result for both properties) and makes no backdrop layer when the
++        // unanimated style has none: a running grayscale(1) -> grayscale(0)
++        // drew about grayscale(0.75) at its midpoint, and a blur fading in
++        // over a modal came out wrong. Animated on the main thread instead,
++        // each frame sets the backdrop filters (paused ones already were).
++        return false;
++    case AnimatedProperty::Filter: {
++#else
+     case AnimatedProperty::WebkitBackdropFilter:
+     case AnimatedProperty::Filter: {
++#endif
+         int listIndex = validateFilterOperations(valueList);
+         if (listIndex < 0)
+             return false;
+@@ -1276,6 +1380,7 @@ void GraphicsLayerCoordinated::recursiveCommitChanges(CommitState& commitState,
      if (!needsCommit(commitState))
          return;
  
