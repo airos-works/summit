@@ -63635,18 +63635,23 @@ index 34d8abe7e20ce6253a0b968d52c127c65871f37d..83e014793498e84a2b4dc891371e77ea
      auto shapeFunction = [&](const HBRun& run) {
          hb_buffer_set_cluster_level(buffer.get(), HB_BUFFER_CLUSTER_LEVEL_CHARACTERS);
 diff --git a/Source/WebCore/platform/graphics/skia/FontCacheSkia.cpp b/Source/WebCore/platform/graphics/skia/FontCacheSkia.cpp
-index 74cfeb60ac3daa537785693be3917358aa26a2b5..88ff5686da7145336f8b00b868fb5b61008e0ff5 100644
+index 74cfeb60ac3daa537785693be3917358aa26a2b5..035df9451d9769ae74abb10c34c3591803d014a6 100644
 --- a/Source/WebCore/platform/graphics/skia/FontCacheSkia.cpp
 +++ b/Source/WebCore/platform/graphics/skia/FontCacheSkia.cpp
-@@ -30,6 +30,7 @@
+@@ -30,7 +30,12 @@
  #include "FontCustomPlatformData.h"
  #include "FontDescription.h"
  #include "StyleFontSizeFunctions.h"
 +#include <limits>
  #include <wtf/Assertions.h>
++#include <wtf/HashSet.h>
++#include <wtf/Lock.h>
++#include <wtf/NeverDestroyed.h>
++#include <wtf/text/StringHash.h>
  #include <wtf/text/CString.h>
  #include <wtf/text/CharacterProperties.h>
-@@ -39,6 +40,10 @@
+ #include <wtf/unicode/CharacterNames.h>
+@@ -39,6 +44,10 @@
  #include "SystemSettings.h"
  #endif
  
@@ -63657,7 +63662,7 @@ index 74cfeb60ac3daa537785693be3917358aa26a2b5..88ff5686da7145336f8b00b868fb5b61
  WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
  #include <skia/ports/SkFontScanner_FreeType.h>
  
-@@ -111,6 +116,13 @@ static SkFontStyle skiaFontStyle(const FontDescription& fontDescription)
+@@ -111,6 +120,13 @@ static SkFontStyle skiaFontStyle(const FontDescription& fontDescription)
      return SkFontStyle(skWeight, skWidth, skSlant);
  }
  
@@ -63671,7 +63676,7 @@ index 74cfeb60ac3daa537785693be3917358aa26a2b5..88ff5686da7145336f8b00b868fb5b61
  static std::pair<bool, bool> computeSynthesisProperties(const SkTypeface& typeface, const FontDescription& fontDescription, OptionSet<FontLookupOptions> synthesisOptions)
  {
      if (FontPlatformData::skiaTypefaceHasAnySupportedColorTable(typeface))
-@@ -181,6 +193,10 @@ Ref<Font> FontCache::lastResortFallbackFont(const FontDescription& fontDescripti
+@@ -181,6 +197,10 @@ Ref<Font> FontCache::lastResortFallbackFont(const FontDescription& fontDescripti
  {
  #if PLATFORM(WIN)
      const auto defaultFontName = "Times New Roman"_s;
@@ -63682,7 +63687,7 @@ index 74cfeb60ac3daa537785693be3917358aa26a2b5..88ff5686da7145336f8b00b868fb5b61
  #else
      const auto defaultFontName = "serif"_s;
  #endif
-@@ -189,13 +205,29 @@ Ref<Font> FontCache::lastResortFallbackFont(const FontDescription& fontDescripti
+@@ -189,13 +209,29 @@ Ref<Font> FontCache::lastResortFallbackFont(const FontDescription& fontDescripti
  
      // Passing nullptr as family name makes Skia use a weak match.
      auto typeface = fontManager().matchFamilyStyle(nullptr, skiaFontStyle(fontDescription));
@@ -63713,7 +63718,7 @@ index 74cfeb60ac3daa537785693be3917358aa26a2b5..88ff5686da7145336f8b00b868fb5b61
          fontDescription.orientation(), fontDescription.widthVariant(), fontDescription.textRenderingMode(), computeFeatures(fontDescription, { }));
      return fontForPlatformData(platformData);
  }
-@@ -411,13 +443,88 @@ static bool isUnsupportedFamilyFont(const AtomString& family)
+@@ -411,13 +447,123 @@ static bool isUnsupportedFamilyFont(const AtomString& family)
          || family == "-apple-system-font";
  }
  
@@ -63762,6 +63767,41 @@ index 74cfeb60ac3daa537785693be3917358aa26a2b5..88ff5686da7145336f8b00b868fb5b61
 +    return { };
 +}
 +
++// Families no installed font has, by name or through fontconfig's aliases.
++// fontconfig's match scores every installed font (4-5 ms a call on the ROCK
++// 5), and a page's font stack names several missing families (-apple-system,
++// "Segoe UI", Roboto, ...) at each weight and style it uses: a new web
++// process took 283 ms from commit to first layout on such a page, 64 with
++// this. A family missing at one style is missing at all, so each is looked
++// for once.
++static Lock s_missingFamiliesLockHaiku;
++static HashSet<String, ASCIICaseInsensitiveHash>& missingFamiliesHaiku() WTF_REQUIRES_LOCK(s_missingFamiliesLockHaiku)
++{
++    static NeverDestroyed<HashSet<String, ASCIICaseInsensitiveHash>> families;
++    return families;
++}
++
++static sk_sp<SkTypeface> haikuMatchKnownFamilyStyle(SkFontMgr& manager, const String& family, const SkFontStyle& style)
++{
++    {
++        Locker locker { s_missingFamiliesLockHaiku };
++        if (missingFamiliesHaiku().contains(family))
++            return nullptr;
++    }
++    auto typeface = manager.matchFamilyStyle(family.utf8().legacyCStringPointer(), style);
++    if (!typeface) {
++        Locker locker { s_missingFamiliesLockHaiku };
++        missingFamiliesHaiku().add(family);
++    }
++    return typeface;
++}
++
++static void forgetMissingFamiliesHaiku()
++{
++    Locker locker { s_missingFamiliesLockHaiku };
++    missingFamiliesHaiku().clear();
++}
++
 +static sk_sp<SkTypeface> haikuMatchFamilyStyle(SkFontMgr& manager, const String& family, const SkFontStyle& style)
 +{
 +    // A system family stands for the system's font, whatever fontconfig says.
@@ -63771,13 +63811,13 @@ index 74cfeb60ac3daa537785693be3917358aa26a2b5..88ff5686da7145336f8b00b868fb5b61
 +            systemFamily = true;
 +    }
 +    if (!systemFamily) {
-+        if (auto typeface = manager.matchFamilyStyle(family.utf8().legacyCStringPointer(), style))
++        if (auto typeface = haikuMatchKnownFamilyStyle(manager, family, style))
 +            return typeface;
 +    }
 +    for (auto& candidate : haikuFamilyCandidates(family)) {
 +        if (candidate.isEmpty() || equalIgnoringASCIICase(candidate, family))
 +            continue;
-+        if (auto typeface = manager.matchFamilyStyle(candidate.utf8().legacyCStringPointer(), style))
++        if (auto typeface = haikuMatchKnownFamilyStyle(manager, candidate, style))
 +            return typeface;
 +    }
 +    return nullptr;
@@ -63803,11 +63843,14 @@ index 74cfeb60ac3daa537785693be3917358aa26a2b5..88ff5686da7145336f8b00b868fb5b61
      if (!typeface)
          return nullptr;
  
-@@ -449,6 +556,7 @@ void FontCache::platformReleaseNoncriticalMemory()
+@@ -449,6 +595,10 @@ void FontCache::platformReleaseNoncriticalMemory()
  
  void FontCache::platformInvalidate()
  {
 +    m_skiaMatchedTypefaceCache.clear();
++#if PLATFORM(HAIKU)
++    forgetMissingFamiliesHaiku();
++#endif
  }
  
  void FontCache::platformPurgeInactiveFontData()
@@ -94949,7 +94992,7 @@ index 1e30286a668e800d272ca12deeadb625631465ec..0d6a6e3058c34cecaeb18e90134d79da
      bool hitTest(const HitTestRequest&, const HitTestLocation&, HitTestResult&);
  
 diff --git a/Source/WebCore/rendering/RenderLayerBacking.cpp b/Source/WebCore/rendering/RenderLayerBacking.cpp
-index 95122a10cacc10b498c40d3447599bd2cd4d2795..73157e160f6799e243fadb62c992ebd45d306602 100644
+index 95122a10cacc10b498c40d3447599bd2cd4d2795..6d42c0bfa02a4ef1c98a4eaf66322754c9143016 100644
 --- a/Source/WebCore/rendering/RenderLayerBacking.cpp
 +++ b/Source/WebCore/rendering/RenderLayerBacking.cpp
 @@ -137,6 +137,15 @@
@@ -94984,7 +95027,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..73157e160f6799e243fadb62c992ebd4
  WTF_MAKE_TZONE_ALLOCATED_IMPL(RenderLayerBacking);
  
  using namespace HTMLNames;
-@@ -910,8 +928,76 @@ void RenderLayerBacking::updateChildrenTransformAndAnchorPoint(const LayoutRect&
+@@ -910,13 +928,93 @@ void RenderLayerBacking::updateChildrenTransformAndAnchorPoint(const LayoutRect&
      removeChildrenTransformFromLayers(layerForPerspective);
  }
  
@@ -95061,7 +95104,24 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..73157e160f6799e243fadb62c992ebd4
      m_canCompositeFilters = !style.filter().hasReferenceFilter() && m_graphicsLayer->setFilters(Style::toPlatform(style.filter(), style));
  }
  
-@@ -1218,6 +1304,10 @@ void RenderLayerBacking::updateAfterLayout(bool needsClippingUpdate, bool needsF
+ void RenderLayerBacking::updateBackdropFilters(const Style::ComputedStyle& style)
+ {
++#if PLATFORM(HAIKU)
++    // While the element is captured in a view transition, its backdrop-filter
++    // is drawn by its ::view-transition-group, which copies it. Drawing it on
++    // the element's own layer too puts a second backdrop over the group's,
++    // sampled from a different backdrop root, so the group's filter seems to
++    // be missing (#195, backdrop-filter-animated).
++    if (renderer().effectiveCapturedInViewTransition()) {
++        m_graphicsLayer->setBackdropFilters({ });
++        m_canCompositeBackdropFilters = false;
++        return;
++    }
++#endif
+     m_canCompositeBackdropFilters = !style.backdropFilter().hasReferenceFilter() && m_graphicsLayer->setBackdropFilters(Style::toPlatform(style.backdropFilter(), style));
+ }
+ 
+@@ -1218,6 +1316,10 @@ void RenderLayerBacking::updateAfterLayout(bool needsClippingUpdate, bool needsF
          m_owningLayer.setNeedsCompositingGeometryUpdate();
      }
      
@@ -95072,7 +95132,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..73157e160f6799e243fadb62c992ebd4
      if (needsFullRepaint && canIssueSetNeedsDisplay())
          setContentsNeedDisplay();
  }
-@@ -1581,6 +1671,44 @@ private:
+@@ -1581,6 +1683,44 @@ private:
  LayoutRect RenderLayerBacking::computePrimaryGraphicsLayerRect(const RenderLayer* compositedAncestor, const LayoutRect& parentGraphicsLayerRect) const
  {
      ComputedOffsets compositedBoundsOffset(m_owningLayer, compositedAncestor, compositedBounds(), parentGraphicsLayerRect, { });
@@ -95117,7 +95177,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..73157e160f6799e243fadb62c992ebd4
      return LayoutRect(encloseRectToDevicePixels(LayoutRect(toLayoutPoint(compositedBoundsOffset.fromParentGraphicsLayer()), compositedBounds().size()),
          pixelSnappingScaleFactor()));
  }
-@@ -1678,6 +1806,22 @@ void RenderLayerBacking::updateGeometry(const RenderLayer* compositedAncestor)
+@@ -1678,6 +1818,22 @@ void RenderLayerBacking::updateGeometry(const RenderLayer* compositedAncestor)
      updateBackdropRoot();
      updateBlendMode(style);
      updateContentsScalingFilters(style);
@@ -95140,7 +95200,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..73157e160f6799e243fadb62c992ebd4
  
  #if ENABLE(VIDEO)
      updateVideoGravity(style);
-@@ -1935,8 +2079,18 @@ void RenderLayerBacking::updateGeometry(const RenderLayer* compositedAncestor)
+@@ -1935,8 +2091,18 @@ void RenderLayerBacking::updateGeometry(const RenderLayer* compositedAncestor)
  
      positionOverflowControlsLayers();
  
@@ -95160,7 +95220,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..73157e160f6799e243fadb62c992ebd4
  
  #if ENABLE(MODEL_ELEMENT)
      if (is<RenderModel>(renderer()))
-@@ -3543,6 +3697,56 @@ void RenderLayerBacking::updateDirectlyCompositedBackgroundColor(PaintedContents
+@@ -3543,6 +3709,56 @@ void RenderLayerBacking::updateDirectlyCompositedBackgroundColor(PaintedContents
      didUpdateContentsRect = true;
  }
  
@@ -95217,7 +95277,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..73157e160f6799e243fadb62c992ebd4
  // Only bitmap images are directly composited, so the layer shows the image's current frame at its natural size.
  static RefPtr<NativeImage> nativeImageForDirectlyCompositedImage(Image& image)
  {
-@@ -3585,7 +3789,14 @@ void RenderLayerBacking::updateDirectlyCompositedBackgroundImage(PaintedContents
+@@ -3585,7 +3801,14 @@ void RenderLayerBacking::updateDirectlyCompositedBackgroundImage(PaintedContents
      m_graphicsLayer->setContentsTilePhase(geometry.phase);
      m_graphicsLayer->setContentsRect(geometry.destinationRect);
      m_graphicsLayer->setContentsClippingRect(FloatRoundedRect(geometry.destinationRect));
@@ -95233,7 +95293,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..73157e160f6799e243fadb62c992ebd4
          m_graphicsLayer->setContentsToNativeImage(nativeImage.get());
  
      didUpdateContentsRect = true;
-@@ -4093,6 +4304,11 @@ void RenderLayerBacking::updateImageContents(PaintedContentsInfo& contentsInfo)
+@@ -4093,6 +4316,11 @@ void RenderLayerBacking::updateImageContents(PaintedContentsInfo& contentsInfo)
          if (!cachedImage->isLoaded())
              return;
  
@@ -95245,7 +95305,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..73157e160f6799e243fadb62c992ebd4
          if (RefPtr nativeImage = nativeImageForDirectlyCompositedImage(*image))
              m_graphicsLayer->setContentsToNativeImage(nativeImage.get());
  
-@@ -4133,7 +4349,11 @@ LayoutRect RenderLayerBacking::contentsBox() const
+@@ -4133,7 +4361,11 @@ LayoutRect RenderLayerBacking::contentsBox() const
  #endif
  
      if (CheckedPtr renderViewTransitionCapture = dynamicDowncast<RenderViewTransitionCapture>(*renderBox))
@@ -205352,10 +205412,10 @@ index 0000000000000000000000000000000000000000..a150bd67553ae6f1864c655cd04be661
 +} // namespace WebKit
 diff --git a/Source/WebKit/WebProcess/haiku/WebProcessHaiku.cpp b/Source/WebKit/WebProcess/haiku/WebProcessHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..8e6627597a7b4cc9be3dd313306cc7b0eed4f25f
+index 0000000000000000000000000000000000000000..8706eb849b16a310b364b43a65a8d62f44454528
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/haiku/WebProcessHaiku.cpp
-@@ -0,0 +1,190 @@
+@@ -0,0 +1,228 @@
 +/*
 + * Copyright (C) 2014,2019 Haiku, Inc.
 + *
@@ -205393,7 +205453,12 @@ index 0000000000000000000000000000000000000000..8e6627597a7b4cc9be3dd313306cc7b0
 +#include <WebCore/PlatformDisplayHaiku.h>
 +#include "StartupTraceHaiku.h"
 +#endif
++#include <WebCore/FontCache.h>
++#include <WebCore/FontCascadeDescription.h>
++#include <WebCore/Font.h>
 +#include <wtf/Assertions.h>
++#include <wtf/MonotonicTime.h>
++#include <wtf/RunLoop.h>
 +#include <cstdio>
 +#include <cstdlib>
 +#include <cstring>
@@ -205443,6 +205508,33 @@ index 0000000000000000000000000000000000000000..8e6627597a7b4cc9be3dd313306cc7b0
 +    RELEASE_ASSERT(be_app->LockingThread() == find_thread(nullptr));
 +}
 +
++// SUMMIT_PREWARM_FONTS=0: the spare process leaves fonts to its first page.
++static void warmFontsHaiku()
++{
++    static const bool enabled = [] {
++        const char* value = getenv("SUMMIT_PREWARM_FONTS");
++        return !value || strcmp(value, "0");
++    }();
++    if (!enabled)
++        return;
++    auto start = MonotonicTime::now();
++    WebCore::FontCascadeDescription description;
++    description.setUsedSize(16);
++    // The families and weights of the start page (resources/start.html) and
++    // of most pages' body text.
++    auto warm = [&](ASCIILiteral family, WebCore::FontSelectionValue weight) {
++        description.setWeight(weight);
++        if (RefPtr font = WebCore::FontCache::forCurrentThread().fontForFamily(description, family))
++            font->glyphDataForCharacter('a');
++    };
++    for (int weight : { 400, 500, 600, 700 })
++        warm("sans-serif"_s, WebCore::FontSelectionValue(weight));
++    warm("serif"_s, WebCore::normalWeightValue());
++    warm("monospace"_s, WebCore::normalWeightValue());
++    if (getenv("SUMMIT_NAV_TRACE"))
++        fprintf(stderr, "Summit nav: spare web process %d warmed its fonts in %.1f ms\n", getpid(), (MonotonicTime::now() - start).milliseconds());
++}
++
 +void WebProcess::platformInitializeWebProcess(WebProcessCreationParameters& parameters)
 +{
 +    SUMMIT_STARTUP_TRACE("initializing the web process");
@@ -205468,6 +205560,12 @@ index 0000000000000000000000000000000000000000..8e6627597a7b4cc9be3dd313306cc7b0
 +    if (s_isPrewarmedHaiku || eager)
 +        initializePlatformDisplayIfNeededHaiku();
 +#endif
++    // The spare process takes the next new tab, whose first layout would
++    // otherwise start fontconfig in this process (read its configuration,
++    // list every family) and match the default families: 25-30 ms of a new
++    // tab's 155 ms on the ROCK 5. Done here, while the spare waits.
++    if (s_isPrewarmedHaiku)
++        RunLoop::mainSingleton().dispatch(warmFontsHaiku);
 +    // The browser's debugging tools (BWebKitProcessDiagnostics) ask a thread
 +    // of this process about its pages, memory, media and compositors.
 +    startWebProcessDiagnosticsHaiku();

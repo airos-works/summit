@@ -64,6 +64,33 @@ ms on the X399, about 155 ms on the ROCK 5 (40 ms until the spare process has
 the page, 45 ms from commit to first layout, 60 ms to the first frame). Warming
 fonts and the EGL display in the spare process changed nothing measurable.
 
+**Font lookups in a new web process.** Every family a page names is matched
+by fontconfig at every weight and style the page uses, and each match scores
+every installed font: 4-5 ms on the ROCK 5. A family that is not installed
+(-apple-system, "Segoe UI", Roboto, Helvetica Neue in a typical font stack)
+was looked for again at each weight. Now a missing family is remembered for
+the process, and the spare process resolves sans-serif (400-700), serif and
+monospace while it waits. From commit to first layout in a fresh web process
+on the ROCK 5 (three fresh launches each):
+
+| page | before | after |
+|---|---|---|
+| system font stack (-apple-system ... sans-serif, 4 weights + italic + code) | 282-284 ms | 64 ms |
+| the same page with sans-serif and monospace only | 143-144 ms | 41 ms |
+
+New tabs on the ROCK 5: 141-147 ms against 154-173 ms (interleaved). The
+start page now asks for sans-serif at 400-700 (it named "Noto Sans", the same
+font on air/OS, and weight 650), which the spare has resolved.
+Measurement trap: a fresh test profile downloads and parses the safe-browsing
+lists (250,000 entries) in its first seconds; timings taken then were 2-3x
+slower and misled one experiment. Wait 30 s after launch.
+
+**View-transition backdrop filters (#195).** A captured element kept drawing
+its own backdrop filter on its layer while its ::view-transition-group drew
+the copied one; the element's layer was composited on top, so the group's
+filter seemed missing (backdrop-filter-animated). The element's own backdrop
+filter is now off while it is captured.
+
 **Fallback fonts (0df519e).** A page in many languages made fontconfig
 build a fallback font set per locale, checking every system font file with
 `stat` each time (Wikipedia's 200 language links: 11 % of the main thread).
