@@ -85,6 +85,14 @@ Measurement trap: a fresh test profile downloads and parses the safe-browsing
 lists (250,000 entries) in its first seconds; timings taken then were 2-3x
 slower and misled one experiment. Wait 30 s after launch.
 
+**Link-time optimized JavaScriptCore.** `SUMMIT_LTO_JAVASCRIPTCORE` (on by
+default) builds libJavaScriptCore, with the WTF and bmalloc objects that only
+it links, with GCC's `-flto`. ROCK 5, Speedometer 3.1, PGO build, three
+interleaved pairs: 5.81, 5.79, 5.83 without against 6.00, 5.95, 5.91 with
+(+2.4 %); the library shrinks from 47.6 to 41.0 MB. libWebKit is left out:
+its LTO link would need far more memory and time than the CI runners have.
+x86_64 not measured yet.
+
 **The compositor's GL context no longer holds up a new page.** Creating a
 page waited for its compositor's GL context (13.5 ms on the ROCK 5), though
 the main thread needs only the GL maximum texture size from it. The spare

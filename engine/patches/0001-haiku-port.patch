@@ -13,6 +13,27 @@ index 3260f2d01b2fc823caa63ca0eee7df818e13ddcb..acc6f93adabe300c53d0ea2fe90c27a5
      add_subdirectory(WebGPU)
  endif ()
  
+diff --git a/Source/JavaScriptCore/CMakeLists.txt b/Source/JavaScriptCore/CMakeLists.txt
+index 73d141e5427eea2195010ae179be839bd0744485..e5f313a530690e62dd4ba6765d79f801397f2187 100644
+--- a/Source/JavaScriptCore/CMakeLists.txt
++++ b/Source/JavaScriptCore/CMakeLists.txt
+@@ -1895,6 +1895,16 @@ WEBKIT_DEFINE_SUBTARGET_WITH_PREFIX(JavaScriptCore JavaScriptCoreJIT
+ 
+ WEBKIT_FRAMEWORK(JavaScriptCore)
+ 
++if (PORT STREQUAL "Haiku" AND SUMMIT_LTO_JAVASCRIPTCORE AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
++    # Every object in libJavaScriptCore (OptionsHaiku.cmake).
++    foreach (_target WTF bmalloc LowLevelInterpreterLib JavaScriptCore JavaScriptCoreJIT)
++        if (TARGET ${_target})
++            target_compile_options(${_target} PRIVATE -flto=auto -fno-fat-lto-objects)
++        endif ()
++    endforeach ()
++    target_link_options(JavaScriptCore PRIVATE -flto=auto)
++endif ()
++
+ if (USE_APPLE_INTERNAL_SDK)
+     WEBKIT_TARGET_USE_PGO(JavaScriptCore PROFILE JavaScriptCore)
+ endif ()
 diff --git a/Source/JavaScriptCore/PlatformHaiku.cmake b/Source/JavaScriptCore/PlatformHaiku.cmake
 new file mode 100644
 index 0000000000000000000000000000000000000000..6d3d18801675659f02d850e3f437c384e333b50d
@@ -222025,10 +222046,10 @@ index 359c3765d3a41ba1c6cfdb6b44fa292cc7811a0d..18a4d1524bbb7a68b2bec420d013fd89
  endif ()
 diff --git a/Source/cmake/OptionsHaiku.cmake b/Source/cmake/OptionsHaiku.cmake
 new file mode 100644
-index 0000000000000000000000000000000000000000..9fbcf8f51843a556cb14a536930a9fe68f1fbcf2
+index 0000000000000000000000000000000000000000..994433aac1fd8ed55ccba8f2ae7c6aacebdc12d2
 --- /dev/null
 +++ b/Source/cmake/OptionsHaiku.cmake
-@@ -0,0 +1,451 @@
+@@ -0,0 +1,457 @@
 +include(GNUInstallDirs)
 +include(VersioningUtils)
 +
@@ -222071,6 +222092,12 @@ index 0000000000000000000000000000000000000000..9fbcf8f51843a556cb14a536930a9fe6
 +    add_compile_options(-fprofile-use=${SUMMIT_PROFILE_USE} -fprofile-prefix-path=${CMAKE_BINARY_DIR}
 +        -fprofile-partial-training -fprofile-correction -Wno-coverage-mismatch -Wno-missing-profile)
 +endif ()
++
++# Link-time optimization of libJavaScriptCore (with WTF and bmalloc, whose
++# objects only it links): Speedometer 3.1 on the ROCK 5 5.81 -> 5.95 (+2.4 %,
++# three interleaved pairs, PGO build). libWebKit is left out: its LTO link
++# would need far more memory and time than the CI runners have.
++option(SUMMIT_LTO_JAVASCRIPTCORE "Link-time optimize libJavaScriptCore (GCC)" ON)
 +
 +option(ENABLE_WEBKIT_LEGACY "Enable building the Haiku legacy embedding" ON)
 +SET_AND_EXPOSE_TO_BUILD(USE_UNIX_DOMAIN_SOCKETS ${ENABLE_WEBKIT})
