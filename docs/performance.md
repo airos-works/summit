@@ -85,6 +85,23 @@ Measurement trap: a fresh test profile downloads and parses the safe-browsing
 lists (250,000 entries) in its first seconds; timings taken then were 2-3x
 slower and misled one experiment. Wait 30 s after launch.
 
+**The compositor's GL context no longer holds up a new page.** Creating a
+page waited for its compositor's GL context (13.5 ms on the ROCK 5), though
+the main thread needs only the GL maximum texture size from it. The spare
+process now learns that size while it waits (from the display's sharing
+context) and the compositor makes its context on its own queue, ahead of
+everything that renders. ROCK 5, interleaved: page creation 19-21 -> 8-9 ms,
+new tabs 109-120 -> 95-108 ms. `SUMMIT_ASYNC_COMPOSITOR_CONTEXT=0` waits as
+before.
+
+**A new tab's first frame on the ROCK 5** (`SUMMIT_NAV_TRACE=1
+SUMMIT_COMPOSITOR_TIMING_TRACE=1`, ms after the commit): first layout ~21,
+first paint ~26, compositor frame starts ~35 and takes ~42 (tile upload
+10.4 ms for 0.86 Mpx, drawing 3.8, read-back 14), the view has the frame at
+~77. The read-back is haiku#71 (no direct present on Panfrost). The upload
+is AFBC: with `PAN_MESA_DEBUG=noafbc` it takes 2.3 ms and the frame arrives
+at ~66.
+
 **Extension popups, measured (8 Nov, ROCK 5).** uBlock Origin 1.75.4 in a
 fresh test profile, `SUMMIT_EXTENSION_TIMING=1`, clicked through the MCP
 (`click` with `extension`). After the pointer has been on the button (it

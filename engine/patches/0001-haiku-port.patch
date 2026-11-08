@@ -200390,7 +200390,7 @@ index 57163f65873e5a481e5ef5a4ec3beec4b40b7cea..e25b422d16049f5343d2f04c03e42428
      bool m_compositionRequired { false };
  #if ENABLE(SCROLLING_THREAD)
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp
-index c238029ad9c99c5028ea7e456520af85d1d85532..57e25b69210c78a33e327c0ab0fa5e95c0b8835f 100644
+index c238029ad9c99c5028ea7e456520af85d1d85532..f02c24bc55297cbf499a9a255f80f763400f967e 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp
 +++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp
 @@ -26,6 +26,11 @@
@@ -200435,7 +200435,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..57e25b69210c78a33e327c0ab0fa5e95
  #if USE(GLIB_EVENT_LOOP)
  #include <wtf/glib/RunLoopSourcePriority.h>
  #endif
-@@ -68,18 +87,88 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
+@@ -68,18 +87,98 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
  #include <GLES2/gl2.h>
  #endif
  
@@ -200509,6 +200509,16 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..57e25b69210c78a33e327c0ab0fa5e95
 +}
 +#endif
 +
++#if PLATFORM(HAIKU)
++std::atomic<int> ThreadedCompositor::s_maxTextureSizeHaiku { 0 };
++
++void ThreadedCompositor::noteMaxTextureSizeHaiku(int size)
++{
++    if (size > 0)
++        s_maxTextureSizeHaiku.store(size);
++}
++#endif
++
  Ref<ThreadedCompositor> ThreadedCompositor::create(WebPage& webPage, LayerTreeHost& layerTreeHost, CoordinatedSceneState& sceneState)
  {
      return adoptRef(*new ThreadedCompositor(webPage, layerTreeHost, sceneState));
@@ -200524,7 +200534,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..57e25b69210c78a33e327c0ab0fa5e95
      , m_layerTreeHost(&layerTreeHost)
      , m_surface(AcceleratedSurface::create(webPage, [this] { frameComplete(); }, AcceleratedSurface::RenderingPurpose::Composited))
      , m_sceneState(&sceneState)
-@@ -90,6 +179,19 @@ ThreadedCompositor::ThreadedCompositor(WebPage& webPage, LayerTreeHost& layerTre
+@@ -90,6 +189,19 @@ ThreadedCompositor::ThreadedCompositor(WebPage& webPage, LayerTreeHost& layerTre
  {
      ASSERT(RunLoop::isMain());
  
@@ -200544,20 +200554,44 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..57e25b69210c78a33e327c0ab0fa5e95
      lazyInitialize(m_didCompositeRunLoopObserver, makeUnique<RunLoopObserver>(RunLoopObserver::WellKnownOrder::GraphicsCommit, [this] {
          this->didCompositeRunLoopObserverFired();
      }));
-@@ -112,6 +214,9 @@ ThreadedCompositor::ThreadedCompositor(WebPage& webPage, LayerTreeHost& layerTre
+@@ -112,7 +224,28 @@ ThreadedCompositor::ThreadedCompositor(WebPage& webPage, LayerTreeHost& layerTre
  
      m_surface->didCreateCompositingRunLoop(m_workQueue->runLoop());
  
+-    m_workQueue->dispatchSync([this] {
 +#if PLATFORM(HAIKU)
 +    auto contextStart = MonotonicTime::now();
++    // The page's creation used to wait for the GL context (13.5 ms on the ROCK
++    // 5). The main thread needs only the maximum texture size from it (tile
++    // sizes), which the spare process learns ahead (noteMaxTextureSizeHaiku):
++    // then the context is made on the compositor's queue while the page's
++    // first document is built, and every task that renders is queued after it.
++    // SUMMIT_ASYNC_COMPOSITOR_CONTEXT=0 waits as before.
++    static const bool asyncContextAllowed = [] {
++        const char* value = getenv("SUMMIT_ASYNC_COMPOSITOR_CONTEXT");
++        return !value || strcmp(value, "0");
++    }();
++    const int knownMaxTextureSize = asyncContextAllowed ? s_maxTextureSizeHaiku.load() : 0;
++    if (knownMaxTextureSize)
++        m_maxTextureSize = knownMaxTextureSize;
 +#endif
-     m_workQueue->dispatchSync([this] {
++    #if PLATFORM(HAIKU)
++    const bool asyncContext = !!knownMaxTextureSize;
++#else
++    const bool asyncContext = false;
++#endif
++    auto createContext = [this, async = asyncContext] {
          // GLNativeWindowType depends on the EGL implementation: reinterpret_cast works
          // for pointers (only if they are 64-bit wide and not for other cases), and static_cast for
-@@ -127,6 +232,11 @@ ThreadedCompositor::ThreadedCompositor(WebPage& webPage, LayerTreeHost& layerTre
+         // numeric types (and when needed they get extended to 64-bit) but not for pointers. Using
+@@ -126,7 +259,14 @@ ThreadedCompositor::ThreadedCompositor(WebPage& webPage, LayerTreeHost& layerTre
+             return;
          }
  
-         glGetIntegerv(GL_MAX_TEXTURE_SIZE, &m_maxTextureSize);
+-        glGetIntegerv(GL_MAX_TEXTURE_SIZE, &m_maxTextureSize);
++        // Made asynchronously, the size is already known and the main thread may be reading it.
++        if (!async)
++            glGetIntegerv(GL_MAX_TEXTURE_SIZE, &m_maxTextureSize);
 +#if PLATFORM(HAIKU)
 +        SUMMIT_STARTUP_TRACE("compositor GL context ready");
 +        ProcessDiagnosticsHaiku::setGLStrings(reinterpret_cast<const char*>(glGetString(GL_RENDERER)),
@@ -200566,13 +200600,26 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..57e25b69210c78a33e327c0ab0fa5e95
  
  #if USE(TEXTURE_MAPPER)
          m_context = WTF::move(context);
-@@ -136,9 +246,327 @@ ThreadedCompositor::ThreadedCompositor(WebPage& webPage, LayerTreeHost& layerTre
+@@ -135,10 +275,340 @@ ThreadedCompositor::ThreadedCompositor(WebPage& webPage, LayerTreeHost& layerTre
+         PlatformDisplay::sharedDisplay().setSkiaGLContextForCurrentThread(WTF::move(context));
          m_threadSafeGrContext = PlatformDisplay::sharedDisplay().skiaGrContext()->threadSafeProxy();
  #endif
-     });
++    };
 +#if PLATFORM(HAIKU)
-+    // The page's creation waits for this (SUMMIT_NAV_TRACE=1).
-+    SUMMIT_NAV_TRACE("compositor GL context made in %.1f ms", (MonotonicTime::now() - contextStart).milliseconds());
++    if (knownMaxTextureSize) {
++        m_workQueue->dispatch([createContext = WTF::move(createContext), protectedThis = Ref { *this }, contextStart]() mutable {
++            createContext();
++            SUMMIT_NAV_TRACE("compositor GL context made in %.1f ms (the page did not wait)", (MonotonicTime::now() - contextStart).milliseconds());
++        });
++    } else {
++        m_workQueue->dispatchSync(WTF::move(createContext));
++        if (m_maxTextureSize > 0)
++            noteMaxTextureSizeHaiku(m_maxTextureSize);
++        // The page's creation waits for this (SUMMIT_NAV_TRACE=1).
++        SUMMIT_NAV_TRACE("compositor GL context made in %.1f ms", (MonotonicTime::now() - contextStart).milliseconds());
++    }
++#else
++    m_workQueue->dispatchSync(WTF::move(createContext));
 +#endif
 +
 +#if PLATFORM(HAIKU) && USE(TEXTURE_MAPPER)
@@ -200676,8 +200723,8 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..57e25b69210c78a33e327c0ab0fa5e95
 +    } else
 +        WTFLogAlways("Summit compositor: replacement ready at=%.6f", MonotonicTime::now().secondsSinceEpoch().seconds());
 +    return ready;
- }
- 
++}
++
 +void ThreadedCompositor::resumeAfterContextLossHaiku()
 +{
 +    ASSERT(RunLoop::isMain());
@@ -200879,10 +200926,10 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..57e25b69210c78a33e327c0ab0fa5e95
 +    m_textureMapper->warmShaderProgramsHaiku();
 +    m_workQueue->dispatch([this, protectedThis = Ref { *this }, remaining, waitsForQuiet] {
 +        warmShaderProgramsHaiku(remaining - 1, waitsForQuiet);
-+    });
-+}
+     });
+ }
 +#endif
-+
+ 
 +#if PLATFORM(HAIKU)
 +ThreadedCompositor::~ThreadedCompositor()
 +{
@@ -200894,7 +200941,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..57e25b69210c78a33e327c0ab0fa5e95
  
  uint64_t ThreadedCompositor::surfaceID() const
  {
-@@ -160,11 +588,20 @@ void ThreadedCompositor::invalidate()
+@@ -160,11 +630,20 @@ void ThreadedCompositor::invalidate()
      m_didCompositeRunLoopObserver->invalidate();
      m_workQueue->dispatchSync([this] {
  #if USE(TEXTURE_MAPPER)
@@ -200915,7 +200962,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..57e25b69210c78a33e327c0ab0fa5e95
          flushCompositingState(CompositionReason::RenderingUpdate);
  
          m_sceneState->invalidateCommittedLayers();
-@@ -184,6 +621,59 @@ void ThreadedCompositor::invalidate()
+@@ -184,6 +663,59 @@ void ThreadedCompositor::invalidate()
      m_surface = nullptr;
  }
  
@@ -200975,7 +201022,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..57e25b69210c78a33e327c0ab0fa5e95
  void ThreadedCompositor::startRenderTimer()
  {
      assertIsHeld(m_state.lock);
-@@ -216,8 +706,37 @@ void ThreadedCompositor::updateRenderTimer()
+@@ -216,8 +748,37 @@ void ThreadedCompositor::updateRenderTimer()
      }
  
      if (m_state.isRenderTimerActive) {
@@ -201015,7 +201062,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..57e25b69210c78a33e327c0ab0fa5e95
      } else
          m_renderTimer.stop();
  }
-@@ -284,6 +803,10 @@ void ThreadedCompositor::pendingTilesDidChange()
+@@ -284,6 +845,10 @@ void ThreadedCompositor::pendingTilesDidChange()
          return;
  
      m_state.isWaitingForTiles = false;
@@ -201026,7 +201073,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..57e25b69210c78a33e327c0ab0fa5e95
      scheduleUpdateLocked();
  }
  
-@@ -364,6 +887,10 @@ TargetContents ThreadedCompositor::paintToCurrentGLContext(const TransformationM
+@@ -364,6 +929,10 @@ TargetContents ThreadedCompositor::paintToCurrentGLContext(const TransformationM
  #if USE(TEXTURE_MAPPER)
  void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix, const IntSize& size, const OptionSet<CompositionReason>& reasons)
  {
@@ -201037,7 +201084,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..57e25b69210c78a33e327c0ab0fa5e95
      FloatRect clipRect(FloatPoint { }, size);
      TextureMapperLayer& currentRootLayer = m_sceneState->rootLayer().ensureTarget();
      if (currentRootLayer.transform() != matrix)
-@@ -371,11 +898,23 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
+@@ -371,11 +940,23 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
  
      bool sceneHasRunningAnimations = currentRootLayer.applyAnimationsRecursively(MonotonicTime::now());
  
@@ -201061,7 +201108,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..57e25b69210c78a33e327c0ab0fa5e95
      currentRootLayer.prepareForPainting(*m_textureMapper);
      if (m_damage.flags) {
          Damage frameDamage(size, m_damage.flags->contains(DamagePropagationFlags::Unified) ? Damage::Mode::BoundingBox : Damage::Mode::Rectangles);
-@@ -383,7 +922,29 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
+@@ -383,7 +964,29 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
          WTFBeginSignpost(this, CollectDamage);
          currentRootLayer.collectDamage(*m_textureMapper, frameDamage);
          WTFEndSignpost(this, CollectDamage);
@@ -201091,7 +201138,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..57e25b69210c78a33e327c0ab0fa5e95
          recordFrameDamage(WTF::move(frameDamage));
  
          if (m_damage.flags->contains(DamagePropagationFlags::UseForCompositing)) {
-@@ -392,23 +953,62 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
+@@ -392,23 +995,62 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
                  m_textureMapper->setDamage(std::nullopt);
              } else {
                  const auto& damageSinceLastSurfaceUse = m_surface->renderTargetDamage();
@@ -201154,7 +201201,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..57e25b69210c78a33e327c0ab0fa5e95
  
  #if ENABLE(DAMAGE_TRACKING)
      if (rectContainingRegionThatActuallyChanged)
-@@ -426,6 +1026,21 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
+@@ -426,6 +1068,21 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
  
      m_textureMapper->endClip();
      m_textureMapper->endPainting();
@@ -201176,7 +201223,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..57e25b69210c78a33e327c0ab0fa5e95
  
      if (sceneHasRunningAnimations)
          requestComposition(CompositionReason::Animation);
-@@ -525,8 +1140,17 @@ void ThreadedCompositor::recordFrameDamage(Damage&& damage)
+@@ -525,8 +1182,17 @@ void ThreadedCompositor::recordFrameDamage(Damage&& damage)
  
      // Nothing changed this frame: an empty damage contributes nothing to the targets, since Damage::add()
      // ignores empty damage. Skip it rather than replace the recorded frame damage with an empty one.
@@ -201195,7 +201242,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..57e25b69210c78a33e327c0ab0fa5e95
  
      m_surface->setFrameDamage(WTF::move(damage));
  }
-@@ -555,6 +1179,53 @@ void ThreadedCompositor::renderLayerTree()
+@@ -555,6 +1221,53 @@ void ThreadedCompositor::renderLayerTree()
  
      if (m_suspendedCount > 0)
          return;
@@ -201249,7 +201296,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..57e25b69210c78a33e327c0ab0fa5e95
  
      OptionSet<CompositionReason> reasons;
      bool shouldNotifiyDidComposite = false;
-@@ -580,11 +1251,36 @@ void ThreadedCompositor::renderLayerTree()
+@@ -580,11 +1293,36 @@ void ThreadedCompositor::renderLayerTree()
  
          ASSERT(m_state.state == State::Scheduled);
          m_state.state = State::InProgress;
@@ -201287,7 +201334,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..57e25b69210c78a33e327c0ab0fa5e95
  #endif
  
      // Retrieve the scene attributes in a thread-safe manner.
-@@ -599,29 +1295,119 @@ void ThreadedCompositor::renderLayerTree()
+@@ -599,29 +1337,119 @@ void ThreadedCompositor::renderLayerTree()
      if (viewportSize.isEmpty())
          return;
  
@@ -201410,7 +201457,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..57e25b69210c78a33e327c0ab0fa5e95
      WTFEmitSignpost(this, DidRenderFrame, "reasons: %s", reasonsToString(reasons).utf8());
  
  #if USE(TEXTURE_MAPPER)
-@@ -631,8 +1417,84 @@ void ThreadedCompositor::renderLayerTree()
+@@ -631,8 +1459,84 @@ void ThreadedCompositor::renderLayerTree()
      PlatformDisplay::sharedDisplay().skiaGLContext()->swapBuffers();
  #endif
  
@@ -201495,7 +201542,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..57e25b69210c78a33e327c0ab0fa5e95
  
      RunLoop::mainSingleton().dispatch([this, protectedThis = Ref { *this }] {
          if (m_layerTreeHost)
-@@ -649,6 +1511,13 @@ void ThreadedCompositor::requestCompositionForRenderingUpdate(Function<void()>&&
+@@ -649,6 +1553,13 @@ void ThreadedCompositor::requestCompositionForRenderingUpdate(Function<void()>&&
      m_state.didCompositeRenderingUpdateFunction = WTF::move(didCompositeFunction);
      if (m_sceneState->pendingTiles())
          m_state.isWaitingForTiles = true;
@@ -201509,7 +201556,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..57e25b69210c78a33e327c0ab0fa5e95
      scheduleUpdateLocked();
  }
  
-@@ -656,6 +1525,13 @@ void ThreadedCompositor::requestComposition(CompositionReason reason)
+@@ -656,6 +1567,13 @@ void ThreadedCompositor::requestComposition(CompositionReason reason)
  {
      Locker locker { m_state.lock };
      m_state.reasons.add(reason);
@@ -201523,7 +201570,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..57e25b69210c78a33e327c0ab0fa5e95
      scheduleUpdateLocked();
  }
  
-@@ -679,6 +1555,10 @@ ASCIILiteral ThreadedCompositor::stateToString(ThreadedCompositor::State state)
+@@ -679,6 +1597,10 @@ ASCIILiteral ThreadedCompositor::stateToString(ThreadedCompositor::State state)
  void ThreadedCompositor::scheduleUpdateLocked()
  {
      assertIsHeld(m_state.lock);
@@ -201534,7 +201581,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..57e25b69210c78a33e327c0ab0fa5e95
      WTFEmitSignpost(this, ScheduleComposition, "reasons: %s, state: %s, waiting for tiles: %s, render timer active: %s", reasonsToString(m_state.reasons).utf8(), stateToString(m_state.state).characters(), m_state.isWaitingForTiles ? "yes" : "no", m_state.isRenderTimerActive ? "yes" : "no");
  
      switch (m_state.state) {
-@@ -703,6 +1583,10 @@ void ThreadedCompositor::scheduleUpdateLocked()
+@@ -703,6 +1625,10 @@ void ThreadedCompositor::scheduleUpdateLocked()
  void ThreadedCompositor::frameComplete()
  {
      ASSERT(m_workQueue->runLoop().isCurrent());
@@ -201545,7 +201592,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..57e25b69210c78a33e327c0ab0fa5e95
  
      Locker locker { m_state.lock };
      WTFEmitSignpost(this, FrameComplete, "reasons: %s, state: %s, waiting for tiles: %s", reasonsToString(m_state.reasons).utf8(), stateToString(m_state.state).characters(), m_state.isWaitingForTiles ? "yes" : "no");
-@@ -726,6 +1610,112 @@ void ThreadedCompositor::frameComplete()
+@@ -726,6 +1652,112 @@ void ThreadedCompositor::frameComplete()
      }
  }
  
@@ -201658,7 +201705,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..57e25b69210c78a33e327c0ab0fa5e95
  RunLoop* ThreadedCompositor::runLoop()
  {
      return m_surface ? &m_workQueue->runLoop() : nullptr;
-@@ -747,7 +1737,15 @@ void ThreadedCompositor::updateSceneAttributes(const IntSize& size, float device
+@@ -747,7 +1779,15 @@ void ThreadedCompositor::updateSceneAttributes(const IntSize& size, float device
  {
      m_attributes.viewportSize = size;
      m_attributes.deviceScaleFactor = deviceScaleFactor;
@@ -201675,7 +201722,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..57e25b69210c78a33e327c0ab0fa5e95
  
  void ThreadedCompositor::initializeFPSCounter()
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.h b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.h
-index 350699338bff55157709efd32e703513e9ce6486..1277bc494b17240efdb8f9169fb947b8a397d683 100644
+index 350699338bff55157709efd32e703513e9ce6486..e4b93cb444be4dbeaaa8d954346a8f584cfc8b89 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.h
 +++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.h
 @@ -57,6 +57,7 @@ class SkCanvas;
@@ -201686,7 +201733,20 @@ index 350699338bff55157709efd32e703513e9ce6486..1277bc494b17240efdb8f9169fb947b8
  class TransformationMatrix;
  }
  
-@@ -97,6 +98,47 @@ public:
+@@ -82,6 +83,12 @@ public:
+ 
+     uint64_t surfaceID() const;
+     int maxTextureSize() const { return m_maxTextureSize; }
++#if PLATFORM(HAIKU)
++    // The GL limit of this process's display, learnt by the spare process
++    // before its first page or by the first compositor: later compositors
++    // make their GL context without making the page wait for it.
++    static void noteMaxTextureSizeHaiku(int);
++#endif
+ 
+     void backgroundColorDidChange();
+ #if PLATFORM(WPE) && ENABLE(WPE_PLATFORM) && (USE(GBM) || OS(ANDROID))
+@@ -97,6 +104,47 @@ public:
      void invalidate();
      void suspend();
      void resume();
@@ -201734,7 +201794,7 @@ index 350699338bff55157709efd32e703513e9ce6486..1277bc494b17240efdb8f9169fb947b8
  
      bool isActive() const;
  
-@@ -137,6 +179,9 @@ private:
+@@ -137,6 +185,9 @@ private:
      TargetContents paintToSkiaCanvas(const WebCore::TransformationMatrix&, const WebCore::IntSize&, const OptionSet<WebCore::CompositionReason>&);
  #endif
      void frameComplete();
@@ -201744,7 +201804,17 @@ index 350699338bff55157709efd32e703513e9ce6486..1277bc494b17240efdb8f9169fb947b8
  
      void didCompositeRunLoopObserverFired();
  
-@@ -194,6 +239,48 @@ private:
+@@ -167,6 +218,9 @@ private:
+ #endif
+ 
+     int m_maxTextureSize { 0 };
++#if PLATFORM(HAIKU)
++    static std::atomic<int> s_maxTextureSizeHaiku;
++#endif
+     std::atomic<unsigned> m_suspendedCount { 0 };
+ 
+     enum class State {
+@@ -194,6 +248,48 @@ private:
      } m_attributes;
  
      RunLoop::Timer m_renderTimer;
@@ -201793,7 +201863,7 @@ index 350699338bff55157709efd32e703513e9ce6486..1277bc494b17240efdb8f9169fb947b8
  #if USE(TEXTURE_MAPPER)
      std::unique_ptr<WebCore::TextureMapper> m_textureMapper;
  #endif
-@@ -234,4 +321,3 @@ private:
+@@ -234,4 +330,3 @@ private:
  } // namespace WebKit
  
  #endif // USE(COORDINATED_GRAPHICS)
@@ -205565,10 +205635,10 @@ index 0000000000000000000000000000000000000000..a150bd67553ae6f1864c655cd04be661
 +} // namespace WebKit
 diff --git a/Source/WebKit/WebProcess/haiku/WebProcessHaiku.cpp b/Source/WebKit/WebProcess/haiku/WebProcessHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..0df234e097a31295686af8d495ca455057477365
+index 0000000000000000000000000000000000000000..ddaa147dc62cbd26579ceb1e1319d2844a67f5a5
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/haiku/WebProcessHaiku.cpp
-@@ -0,0 +1,241 @@
+@@ -0,0 +1,258 @@
 +/*
 + * Copyright (C) 2014,2019 Haiku, Inc.
 + *
@@ -205608,6 +205678,15 @@ index 0000000000000000000000000000000000000000..0df234e097a31295686af8d495ca4550
 +#endif
 +#include <WebCore/FontCache.h>
 +#include <WebCore/ProcessWarming.h>
++#if USE(COORDINATED_GRAPHICS)
++#include "ThreadedCompositor.h"
++#include <WebCore/GLContext.h>
++#if USE(LIBEPOXY)
++#include <epoxy/gl.h>
++#else
++#include <GLES2/gl2.h>
++#endif
++#endif
 +#include <WebCore/FontCascadeDescription.h>
 +#include <WebCore/Font.h>
 +#include <wtf/Assertions.h>
@@ -205679,8 +205758,16 @@ index 0000000000000000000000000000000000000000..0df234e097a31295686af8d495ca4550
 +#if USE(COORDINATED_GRAPHICS)
 +    // The GL context every page's compositor shares its resources with: made
 +    // on the first page's creation otherwise, which waits for it.
-+    if (auto* display = WebCore::PlatformDisplay::sharedDisplayIfExists())
-+        display->sharingGLContext();
++    // Its GL limit lets the next page's compositor make its own context
++    // without the page waiting (ThreadedCompositor::noteMaxTextureSizeHaiku).
++    if (auto* display = WebCore::PlatformDisplay::sharedDisplayIfExists()) {
++        if (auto sharing = display->sharingGLContext()) {
++            WebCore::GLContext::ScopedGLContextCurrent current(*sharing);
++            GLint maxTextureSize = 0;
++            glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maxTextureSize);
++            ThreadedCompositor::noteMaxTextureSizeHaiku(maxTextureSize);
++        }
++    }
 +#endif
 +    WebCore::ProcessWarming::prewarmGlobally();
 +    auto fontsStart = MonotonicTime::now();
