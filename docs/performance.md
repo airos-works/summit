@@ -85,6 +85,30 @@ Measurement trap: a fresh test profile downloads and parses the safe-browsing
 lists (250,000 entries) in its first seconds; timings taken then were 2-3x
 slower and misled one experiment. Wait 30 s after launch.
 
+**Default font families.** WebKit's defaults (standard and serif "Times",
+sans-serif "Helvetica", fixed "Courier New", cursive "Comic Sans MS",
+fantasy "Impact") are not installed on air/OS, so a page's generic families
+first failed in fontconfig (40-65 ms each for Times, Times New Roman and
+Helvetica on the ROCK 5), and then fell back to Noto Serif, Noto Sans and
+Noto Sans Mono anyway. The Haiku defaults are now the generic names
+themselves, which resolve to the same fonts (text widths unchanged).
+`SUMMIT_FONT_MATCH_TRACE=1` prints each fontconfig match and its time.
+Commit to first layout in a fresh ROCK 5 web process, page using only
+generic families: 64-67 -> 8-9 ms. New tabs: 143-158 -> 107-122 ms.
+
+**Canvas MSAA, measured, still off.** Speedometer's Perf-Dashboard and the
+chart suites draw canvas paths that Skia rasterises on the CPU into masks
+(no MSAA, so no GPU path renderer). WEBKIT_SKIA_ENABLE_DYNAMIC_MSAA=1 with 8
+samples (GTK's default) moves them to the GPU but is slower on the X399
+(Chart.js 6.8 -> 5.1-5.6, Perf-Dashboard 4.7 -> 4.4).
+
+**Against Chromium on the same machine.** Falkon (QtWebEngine 5.15, a
+Chromium 87 base) on the X399, each default Speedometer 3.1 suite alone (3
+iterations): Summit is 2.45x faster (geomean of the 19 suites Falkon runs;
+it stalls on Lit), from 1.8x (CodeMirror, Svelte, Backbone) to 8x (TipTap),
+and level on Perf-Dashboard. This says Summit is the fastest engine on
+air/OS, not how close it is to Safari: Falkon is an old Chromium in a port.
+
 **View-transition backdrop filters (#195).** A captured element kept drawing
 its own backdrop filter on its layer while its ::view-transition-group drew
 the copied one; the element's layer was composited on top, so the group's
