@@ -77,6 +77,19 @@ of the Summit to test in `SUMMIT_REMOTE_DIR` (default `xh`; e.g. a copy
 with a test engine's libraries in `lib/summit-webkit/lib`) and
 `SUMMIT_REMOTE_ENV` extra `NAME=VALUE` settings for it (its stderr lands in
 the wpt log).
+Every run also gets `SUMMIT_TEST_ENV` (default `SUMMIT_OVERLAY_SCROLLBARS=0`:
+classic scroll bars, which never fade; set it empty for the overlay ones).
+
+Without a board, a local air/OS VM works too (it reproduces the X399's
+reftest pictures): make one from the latest x86_64 image with
+`tools/haiku-vm/make-stock-vm.sh`, boot it with `run-stock-vm.sh`, set its
+screen to 2560x1600 (`echo y | screenmode 2560 1600 24 60`), link
+`/boot/home/interop` to the data volume, append `hosts.txt` with the build
+host as `10.0.2.2`, and run with `SUMMIT_SSH` set to an ssh command for the
+VM and `WPT_SERVER_HOST=127.0.0.1` (QEMU forwards 10.0.2.2 to the host's
+loopback). For 2x runs give the window twice the frame (`size.sh` multiplies
+by the number in `$SUMMIT_REMOTE_DIR/scale`, if present). A blank picture
+passes every reftest, so check that failures and passes show real pages.
 
 ## What the wpt patch changes, and why
 

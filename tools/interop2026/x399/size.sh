@@ -5,7 +5,8 @@ T=$(ps | grep "${SUMMIT_REMOTE_DIR:-/boot/home/interop}/[a-z0-9]*/apps/Summit" |
 [ -n "$T" ] || exit 1
 for i in 0 1 2 3 4; do
 	if hey $T get Title of Window $i 2>/dev/null | grep -q "(Automated)"; then
-		hey $T set Frame of Window $i to "BRect(100,100,899,842)" >/dev/null
+		K=$(cat "${SUMMIT_REMOTE_DIR:-/boot/home/interop}/scale" 2>/dev/null || echo 1)
+		hey $T set Frame of Window $i to "BRect(100,100,$((99+800*K)),$((242+600*K)))" >/dev/null
 		echo "window $i"
 		exit 0
 	fi
