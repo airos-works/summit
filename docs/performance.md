@@ -85,6 +85,19 @@ Measurement trap: a fresh test profile downloads and parses the safe-browsing
 lists (250,000 entries) in its first seconds; timings taken then were 2-3x
 slower and misled one experiment. Wait 30 s after launch.
 
+**Extension popups, measured (8 Nov, ROCK 5).** uBlock Origin 1.75.4 in a
+fresh test profile, `SUMMIT_EXTENSION_TIMING=1`, clicked through the MCP
+(`click` with `extension`). After the pointer has been on the button (it
+pre-loads the popup): the first frame 4 ms after the click. A click without
+it: first frame 48-58 ms, the final size at 69 ms. The cold first frame is
+25 px wide for about 5 ms while the window grows to the page's width.
+Test profiles can carry an extension without the install prompt:
+`Extensions/catalog.json` plus `Extensions/packages/pkg-XXXXXX/package`
+(the XPI); the catalog's fingerprint is WebExtensionPackageSnapshotHaiku's
+digest of the unpacked files (SHA-256 of "Kunanyi-WebExtension-Package-v1",
+then per sorted entry a type byte 'D'/'F', the path length and path, the
+size, and the file's bytes; uppercase hex).
+
 **The spare process prepares a page (new tabs).** A new tab's web page took
 38-43 ms to create in the spare process on the ROCK 5, waiting 21-27 ms of
 it for the compositor's GL context (and the display's sharing context, made
