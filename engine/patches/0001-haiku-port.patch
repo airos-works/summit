@@ -68175,7 +68175,7 @@ index 271b076b101e307f8e4dc09ec7450da3c7bc898e..456d4f10287f138ba068510b504fcb6d
      void setClient(TextureMapperPlatformLayer::Client* client) { m_client = client; }
  
 diff --git a/Source/WebCore/platform/graphics/texmap/TextureMapperShaderProgram.cpp b/Source/WebCore/platform/graphics/texmap/TextureMapperShaderProgram.cpp
-index 9cc95ada9f61a23ec22e73313ea6bb16de4b062d..98e5f835f63a17e8e3d1e8e06a887582f6773385 100644
+index 9cc95ada9f61a23ec22e73313ea6bb16de4b062d..2e06e5bd357e55e6b37c91f673a79027b9e06c9f 100644
 --- a/Source/WebCore/platform/graphics/texmap/TextureMapperShaderProgram.cpp
 +++ b/Source/WebCore/platform/graphics/texmap/TextureMapperShaderProgram.cpp
 @@ -21,6 +21,9 @@
@@ -68197,7 +68197,58 @@ index 9cc95ada9f61a23ec22e73313ea6bb16de4b062d..98e5f835f63a17e8e3d1e8e06a887582
  
          void applyPremultiply(inout vec4 color) { color = vec4(color.rgb * color.a, color.a); }
  
-@@ -697,6 +702,14 @@ Ref<TextureMapperShaderProgram> TextureMapperShaderProgram::create(TextureMapper
+@@ -575,10 +580,14 @@ static const char* fragmentTemplateCommon =
+             return clamp(0.5 - d, 0.0, 1.0);
+         }
+ 
+-        float roundedRectCoverage(highp vec2 p, highp vec4 bounds, highp vec2 topLeftRadii, highp vec2 topRightRadii, highp vec2 bottomLeftRadii, highp vec2 bottomRightRadii)
++        float roundedRectCoverage(highp vec2 p, highp vec4 bounds, highp vec2 topLeftRadii, highp vec2 topRightRadii, highp vec2 bottomLeftRadii, highp vec2 bottomRightRadii, highp float localUnitsPerPixel)
+         {
+-            if (p.x < bounds.x || p.y < bounds.y || p.x >= bounds.z || p.y >= bounds.w)
++            // The straight sides get a one pixel wide coverage ramp like the corners, so that a rotated
++            // clip has smooth edges (in device pixels: pixel centres of an axis-aligned clip stay 0 or 1).
++            highp float edgeDistance = min(min(p.x - bounds.x, bounds.z - p.x), min(p.y - bounds.y, bounds.w - p.y)) / localUnitsPerPixel;
++            if (edgeDistance <= -0.5)
+                 return 0.0;
++            float edgeCoverage = clamp(edgeDistance + 0.5, 0.0, 1.0);
+ 
+             highp vec2 topLeftCenter = bounds.xy + topLeftRadii;
+             highp vec2 topRightCenter = bounds.zy + (topRightRadii * vec2(-1, 1));
+@@ -586,18 +595,18 @@ static const char* fragmentTemplateCommon =
+             highp vec2 bottomRightCenter = bounds.zw + (bottomRightRadii * vec2(-1, -1));
+ 
+             if (p.x < topLeftCenter.x && p.y < topLeftCenter.y)
+-                return ellipsisCoverage(p, topLeftCenter, topLeftRadii);
++                return min(edgeCoverage, ellipsisCoverage(p, topLeftCenter, topLeftRadii));
+ 
+             if (p.x > topRightCenter.x && p.y < topRightCenter.y)
+-                return ellipsisCoverage(p, topRightCenter, topRightRadii);
++                return min(edgeCoverage, ellipsisCoverage(p, topRightCenter, topRightRadii));
+ 
+             if (p.x < bottomLeftCenter.x && p.y > bottomLeftCenter.y)
+-                return ellipsisCoverage(p, bottomLeftCenter, bottomLeftRadii);
++                return min(edgeCoverage, ellipsisCoverage(p, bottomLeftCenter, bottomLeftRadii));
+ 
+             if (p.x > bottomRightCenter.x && p.y > bottomRightCenter.y)
+-                return ellipsisCoverage(p, bottomRightCenter, bottomRightRadii);
++                return min(edgeCoverage, ellipsisCoverage(p, bottomRightCenter, bottomRightRadii));
+ 
+-            return 1.0;
++            return edgeCoverage;
+         }
+ 
+         void applyRoundedRectClip(inout vec4 color)
+@@ -629,7 +638,8 @@ static const char* fragmentTemplateCommon =
+                 highp vec2 topRightRadii = u_roundedRect[(rectIndex * 3) + 1].zw;
+                 highp vec2 bottomLeftRadii = u_roundedRect[(rectIndex * 3) + 2].xy;
+                 highp vec2 bottomRightRadii = u_roundedRect[(rectIndex * 3) + 2].zw;
+-                float coverage = roundedRectCoverage(fragCoord.xy, bounds, topLeftRadii, topRightRadii, bottomLeftRadii, bottomRightRadii);
++                highp float localUnitsPerPixel = max(length(u_roundedRectInverseTransformMatrix[rectIndex][0].xy), 0.000001);
++                float coverage = roundedRectCoverage(fragCoord.xy, bounds, topLeftRadii, topRightRadii, bottomLeftRadii, bottomRightRadii, localUnitsPerPixel);
+ 
+                 // Pixels outside the rect have coverage 0.0.
+                 // Pixels inside the rect have coverage 1.0.
+@@ -697,6 +707,14 @@ Ref<TextureMapperShaderProgram> TextureMapperShaderProgram::create(TextureMapper
  
      StringBuilder optionsApplierBuilder;
      SET_APPLIER_FROM_OPTIONS(TextureRGB);
@@ -68212,7 +68263,7 @@ index 9cc95ada9f61a23ec22e73313ea6bb16de4b062d..98e5f835f63a17e8e3d1e8e06a887582
      SET_APPLIER_FROM_OPTIONS(TextureYUV);
      SET_APPLIER_FROM_OPTIONS(TextureYUVA);
      SET_APPLIER_FROM_OPTIONS(TextureNV12);
-@@ -818,6 +831,9 @@ static UTF8CString getProgramLog(GLuint program)
+@@ -818,6 +836,9 @@ static UTF8CString getProgramLog(GLuint program)
  
  TextureMapperShaderProgram::TextureMapperShaderProgram(const String& vertex, const String& fragment)
  {
@@ -68222,7 +68273,7 @@ index 9cc95ada9f61a23ec22e73313ea6bb16de4b062d..98e5f835f63a17e8e3d1e8e06a887582
      m_vertexShader = glCreateShader(GL_VERTEX_SHADER);
      {
          auto vertexCString = vertex.utf8();
-@@ -851,6 +867,10 @@ TextureMapperShaderProgram::TextureMapperShaderProgram(const String& vertex, con
+@@ -851,6 +872,10 @@ TextureMapperShaderProgram::TextureMapperShaderProgram(const String& vertex, con
  
  TextureMapperShaderProgram::~TextureMapperShaderProgram()
  {
