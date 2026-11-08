@@ -91,7 +91,9 @@ it links, with GCC's `-flto`. ROCK 5, Speedometer 3.1, PGO build, three
 interleaved pairs: 5.81, 5.79, 5.83 without against 6.00, 5.95, 5.91 with
 (+2.4 %); the library shrinks from 47.6 to 41.0 MB. libWebKit is left out:
 its LTO link would need far more memory and time than the CI runners have.
-x86_64 not measured yet.
+X399 (x86_64, private non-PGO build, test kernel), three interleaved pairs:
+9.05, 8.93, 9.48 without against 8.90, 9.31, 9.42 with: no difference beyond
+noise there. Kept on for both: it costs nothing at run time.
 
 **The compositor's GL context no longer holds up a new page.** Creating a
 page waited for its compositor's GL context (13.5 ms on the ROCK 5), though
