@@ -106321,10 +106321,10 @@ index 0000000000000000000000000000000000000000..abdba4dff009ff314eecd9f825a128aa
 +} // namespace WebKit
 diff --git a/Source/WebKit/PlatformHaiku.cmake b/Source/WebKit/PlatformHaiku.cmake
 new file mode 100644
-index 0000000000000000000000000000000000000000..51c9790758bade32ed4f0c9092ca844b78f36ca2
+index 0000000000000000000000000000000000000000..5cc6a01fdcd7c87db9e0479155dd4f1eed20ccef
 --- /dev/null
 +++ b/Source/WebKit/PlatformHaiku.cmake
-@@ -0,0 +1,609 @@
+@@ -0,0 +1,612 @@
 +include(Headers.cmake)
 +include(Platform/Curl.cmake)
 +
@@ -106784,6 +106784,8 @@ index 0000000000000000000000000000000000000000..51c9790758bade32ed4f0c9092ca844b
 +        WebProcess/Extensions/Interfaces/WebExtensionAPIPrivacySetting
 +        WebProcess/Extensions/Interfaces/WebExtensionAPIScripting
 +        WebProcess/Extensions/Interfaces/WebExtensionAPIUserScripts
++        WebProcess/Extensions/Interfaces/WebExtensionAPIContentScriptsHaiku
++        WebProcess/Extensions/Interfaces/WebExtensionAPIRegisteredContentScriptHaiku
 +        WebProcess/Extensions/Interfaces/WebExtensionAPIHistory
 +        WebProcess/Extensions/Interfaces/WebExtensionAPIBookmarksHaiku
 +        WebProcess/Extensions/Interfaces/WebExtensionAPISearch
@@ -106829,6 +106831,7 @@ index 0000000000000000000000000000000000000000..51c9790758bade32ed4f0c9092ca844b
 +        UIProcess/Extensions/haiku/WebExtensionTabCommandsHaiku.cpp
 +        WebProcess/Extensions/API/WebExtensionAPIScripting.cpp
 +        WebProcess/Extensions/API/WebExtensionAPIUserScripts.cpp
++        WebProcess/Extensions/API/WebExtensionAPIContentScriptsHaiku.cpp
 +        WebProcess/Extensions/API/WebExtensionAPIHistory.cpp
 +        WebProcess/Extensions/API/WebExtensionAPIBookmarksHaiku.cpp
 +        WebProcess/Extensions/API/WebExtensionAPISearch.cpp
@@ -135998,10 +136001,10 @@ index 0000000000000000000000000000000000000000..87f9f3f91adb4d6506770a637f90eca0
 +#endif
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPIScriptingHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPIScriptingHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..b1a9c244eddfba7b0b369b8576656c224339fcda
+index 0000000000000000000000000000000000000000..67b9a564d1a9d9f3b74e28476295e1d27b028d12
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPIScriptingHaiku.cpp
-@@ -0,0 +1,832 @@
+@@ -0,0 +1,834 @@
 +/*
 + * Copyright (C) 2023-2024 Apple Inc. All rights reserved.
 + *
@@ -136407,8 +136410,10 @@ index 0000000000000000000000000000000000000000..b1a9c244eddfba7b0b369b8576656c22
 +
 +bool WebExtensionContext::isScriptingMessageAllowed(IPC::Decoder& message)
 +{
-+    // userScripts registers its scripts through the same messages.
-+    return isLoadedAndPrivilegedMessage(message) && (hasPermission(WebExtensionPermission::scripting()) || hasPermission("userScripts"_s));
++    // userScripts registers its scripts through the same messages, and so do
++    // Firefox's contentScripts, which every Manifest V2 extension has.
++    return isLoadedAndPrivilegedMessage(message) && (hasPermission(WebExtensionPermission::scripting()) || hasPermission("userScripts"_s)
++        || !extension().supportsManifestVersion(3));
 +}
 +
 +void WebExtensionContext::scriptingInsertCSS(const WebExtensionScriptInjectionParameters& parameters, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&& completionHandler)
@@ -178083,6 +178088,203 @@ index 50355b88656007ccd2b3fa9710b5bc1079e6582c..3dcbef42ab33c5a9d1648408ac0ce5b2
  };
  
  } // namespace WebKit
+diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIContentScriptsHaiku.cpp b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIContentScriptsHaiku.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..3c85cddb768dd1782c5bf320d124afe94217bb8d
+--- /dev/null
++++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIContentScriptsHaiku.cpp
+@@ -0,0 +1,158 @@
++/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
++#include "config.h"
++#include "WebExtensionAPIContentScriptsHaiku.h"
++
++#if ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
++
++#include "MessageSenderInlines.h"
++#include "WebExtensionAPIRegisteredContentScriptHaiku.h"
++#include "WebExtensionContextMessages.h"
++#include "WebExtensionContextProxy.h"
++#include "WebExtensionRegisteredScriptParameters.h"
++#include "WebExtensionRegisteredScriptParser.h"
++#include "WebExtensionUtilities.h"
++#include "WebProcess.h"
++#include <wtf/URL.h>
++#include <wtf/UUID.h>
++#include <wtf/text/Base64.h>
++#include <wtf/text/MakeString.h>
++
++namespace WebKit {
++
++// Registrations share the scripting messages with scripting and userScripts
++// under their own prefix: never stored (persistAcrossSessions is false) and
++// never listed by userScripts.getScripts(). It is as long as
++// webExtensionUserScriptPrefix, whose length the browser process strips from
++// identifiers when it names inline sources.
++static constexpr auto contentScriptsPrefix = "_cs:"_s;
++static_assert(contentScriptsPrefix.length() == webExtensionUserScriptPrefix.length());
++
++void WebExtensionAPIContentScriptsHaiku::registerScript(RefPtr<JSON::Value> options, Ref<WebExtensionCallbackHandler>&& callback, String& outExceptionString)
++{
++    // Documentation: https://developer.mozilla.org/docs/Mozilla/Add-ons/WebExtensions/API/contentScripts/register
++
++    RefPtr object = options ? options->asObject() : nullptr;
++    if (!object) {
++        outExceptionString = toErrorString(nullString(), "contentScriptOptions"_s, "an object is expected"_s);
++        return;
++    }
++
++    // RegisteredContentScriptOptions as a userScripts RegisteredUserScript,
++    // whose parser already takes js as [{file} | {code}].
++    Ref script = JSON::Object::create();
++    script->setString("id"_s, "contentScript"_s);
++    for (auto key : { "matches"_s, "excludeMatches"_s, "includeGlobs"_s, "excludeGlobs"_s, "js"_s, "allFrames"_s, "runAt"_s })
++        if (RefPtr value = object->getValue(key))
++            script->setValue(key, value.releaseNonNull());
++    // ISOLATED (Firefox 128+) is the content script world, as no world is.
++    if (RefPtr world = object->getValue("world"_s)) {
++        if (world->type() != JSON::Value::Type::String || (world->asString() != "MAIN"_s && world->asString() != "ISOLATED"_s)) {
++            outExceptionString = toErrorString(nullString(), "world"_s, "it must specify either 'ISOLATED' or 'MAIN'"_s);
++            return;
++        }
++        if (world->asString() == "MAIN"_s)
++            script->setString("world"_s, "MAIN"_s);
++    }
++
++    // css: [{file} | {code}]. Inline style sheets go as data: URLs, which the
++    // extension's resource loader decodes.
++    std::optional<Vector<String>> styleSheets;
++    if (RefPtr css = object->getValue("css"_s)) {
++        RefPtr array = css->asArray();
++        if (!array) {
++            outExceptionString = toErrorString(nullString(), "css"_s, "an array of style sheet sources is expected"_s);
++            return;
++        }
++        Vector<String> paths;
++        for (auto& item : *array) {
++            RefPtr source = item->asObject();
++            RefPtr file = source ? source->getValue("file"_s) : nullptr;
++            RefPtr code = source ? source->getValue("code"_s) : nullptr;
++            if (!source || !file == !code || (file && file->type() != JSON::Value::Type::String) || (code && code->type() != JSON::Value::Type::String)) {
++                outExceptionString = toErrorString(nullString(), "css"_s, "each source must have exactly one of 'file' and 'code' as a string"_s);
++                return;
++            }
++            if (file)
++                paths.append(file->asString());
++            else
++                paths.append(makeString("data:text/css;charset=utf-8;base64,"_s, base64EncodeToString(byteCast<uint8_t>(code->asString().utf8().span()))));
++        }
++        styleSheets = WTF::move(paths);
++    }
++
++    bool hasScripts = false;
++    if (RefPtr js = script->getValue("js"_s)) {
++        RefPtr array = js->asArray();
++        hasScripts = array && array->length();
++    }
++    if (!hasScripts && (!styleSheets || styleSheets->isEmpty())) {
++        outExceptionString = toErrorString(nullString(), "contentScriptOptions"_s, "it must specify at least one script or style sheet"_s);
++        return;
++    }
++    // Without scripts, the registration-mode check that js is not empty does
++    // not apply; matches still has to name a page.
++    auto mode = hasScripts ? WebExtensionRegisteredScriptParseMode::Registration : WebExtensionRegisteredScriptParseMode::Update;
++    if (!hasScripts) {
++        RefPtr matches = script->getValue("matches"_s);
++        RefPtr array = matches ? matches->asArray() : nullptr;
++        if (!array || !array->length()) {
++            outExceptionString = toErrorString(nullString(), "matches"_s, "it must specify at least one match pattern"_s);
++            return;
++        }
++    }
++
++    auto parsed = parseWebExtensionUserScripts({ script }, mode, WebExtensionUserScriptIdentifiers::FromAPI);
++    if (!parsed) {
++        outExceptionString = parsed.error();
++        return;
++    }
++    auto parameters = WTF::move(parsed->first());
++    parameters.identifier = makeString(contentScriptsPrefix, createVersion4UUIDString());
++    parameters.persistent = false;
++    if (!parameters.world)
++        parameters.world = WebExtensionContentWorldType::ContentScript;
++    if (!hasScripts)
++        parameters.userScriptSources = std::nullopt;
++    parameters.css = WTF::move(styleSheets);
++    // matchOriginAsFallback (Firefox 128+) also covers about:blank, data:
++    // and blob: frames; matchAboutBlank covers about:blank and srcdoc.
++    if (object->getBoolean("matchOriginAsFallback"_s).value_or(false))
++        parameters.matchParentFrame = WebCore::UserContentMatchParentFrame::ForOpaqueOrigins;
++    else if (object->getBoolean("matchAboutBlank"_s).value_or(false))
++        parameters.matchParentFrame = WebCore::UserContentMatchParentFrame::ForAboutBlank;
++
++    auto identifier = parameters.identifier;
++    WebProcess::singleton().sendWithAsyncReply(Messages::WebExtensionContext::ScriptingRegisterContentScripts({ WTF::move(parameters) }),
++        [protectedThis = Ref { *this }, callback = WTF::move(callback), identifier = WTF::move(identifier)](std::expected<void, WebExtensionError>&& result) mutable {
++            if (!result) {
++                callback->reportError(result.error());
++                return;
++            }
++            Ref handle = WebExtensionAPIRegisteredContentScriptHaiku::create(protectedThis.get());
++            handle->setIdentifier(identifier);
++            callback->call(toJS(callback->globalContext(), handle.ptr()));
++        }, extensionContext().identifier());
++}
++
++void WebExtensionAPIRegisteredContentScriptHaiku::unregister(Ref<WebExtensionCallbackHandler>&& callback)
++{
++    // Documentation: https://developer.mozilla.org/docs/Mozilla/Add-ons/WebExtensions/API/contentScripts/RegisteredContentScript/unregister
++
++    // An empty list would mean every content script to the browser process.
++    if (m_identifier.isEmpty()) {
++        callback->call();
++        return;
++    }
++    WebProcess::singleton().sendWithAsyncReply(Messages::WebExtensionContext::ScriptingUnregisterContentScripts({ std::exchange(m_identifier, String { }) }),
++        [protectedThis = Ref { *this }, callback = WTF::move(callback)](std::expected<void, WebExtensionError>&& result) mutable {
++            if (!result) {
++                callback->reportError(result.error());
++                return;
++            }
++            callback->call();
++        }, extensionContext().identifier());
++}
++
++} // namespace WebKit
++
++#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
+diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIContentScriptsHaiku.h b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIContentScriptsHaiku.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..b9aed1e94798eeb364136445d2571b9c6f895afd
+--- /dev/null
++++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIContentScriptsHaiku.h
+@@ -0,0 +1,27 @@
++/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
++#pragma once
++
++#if ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
++
++#include "JSWebExtensionAPIContentScriptsHaiku.h"
++#include "WebExtensionAPIObject.h"
++#include <wtf/JSONValues.h>
++
++namespace WebKit {
++
++// Firefox's contentScripts for Manifest V2 extensions. A registration is a
++// registered content script that does not persist (as in Firefox, it lasts
++// while the extension is loaded), with inline code carried the way
++// userScripts carries it; the scripting messages and injection are shared.
++class WebExtensionAPIContentScriptsHaiku : public WebExtensionAPIObject, public JSWebExtensionWrappable {
++    WEB_EXTENSION_DECLARE_JS_WRAPPER_CLASS(WebExtensionAPIContentScriptsHaiku, contentScriptsHaiku, contentScripts);
++
++public:
++    void registerScript(RefPtr<JSON::Value> options, Ref<WebExtensionCallbackHandler>&&, String& outExceptionString);
++};
++
++} // namespace WebKit
++
++SPECIALIZE_TYPE_TRAITS_WEB_EXTENSION(WebExtensionAPIContentScriptsHaiku, contentScriptsHaiku);
++
++#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIContextualIdentities.cpp b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIContextualIdentities.cpp
 new file mode 100644
 index 0000000000000000000000000000000000000000..301a7b4e256bd27f26f100e0fd6e0066a31397a9
@@ -181363,7 +181565,7 @@ index 8f99137471c0c991d6ec6d0f865f7e0ccc282ce1..5f5011123e144b226f5136b40ebad739
  
  } // namespace WebKit
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPINamespace.cpp b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPINamespace.cpp
-index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..4f1a7aa02268173a64e9292bc804f91666247f19 100644
+index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..50f761ccff0b61dda2a5b4110433df3fc5931430 100644
 --- a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPINamespace.cpp
 +++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPINamespace.cpp
 @@ -32,7 +32,7 @@
@@ -181422,7 +181624,7 @@ index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..4f1a7aa02268173a64e9292bc804f916
  #if ENABLE(WK_WEB_EXTENSIONS_NOTIFICATIONS)
      if (name == "notifications"_s)
          return (extensionContext->inTestingMode() || (page && page->corePage() && page->corePage()->settings().webExtensionNotificationsEnabled())) && extensionContext->hasPermission("notifications"_s);
-@@ -116,6 +132,17 @@ bool WebExtensionAPINamespace::isPropertyAllowed(const ASCIILiteral& name, WebPa
+@@ -116,6 +132,21 @@ bool WebExtensionAPINamespace::isPropertyAllowed(const ASCIILiteral& name, WebPa
          return page && page->corePage() && page->corePage()->settings().webExtensionSidebarEnabled() && doesDictionaryExist(extensionContext->manifest(), "sidebar_action"_s, true);
  #endif // ENABLE(WK_WEB_EXTENSIONS_SIDEBAR)
  
@@ -181435,12 +181637,16 @@ index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..4f1a7aa02268173a64e9292bc804f916
 +        return extensionContext->hasPermission("sidePanel"_s);
 +    if (name == "menus"_s || name == "contextMenus"_s)
 +        return extensionContext->hasPermission("menus"_s) || extensionContext->hasPermission("contextMenus"_s);
++    // Firefox's contentScripts: every Manifest V2 extension has it (uBlock
++    // Origin 1.76 needs it to start).
++    if (name == "contentScripts"_s)
++        return !extensionContext->supportsManifestVersion(3);
 +#endif
 +
      if (name == "storage"_s)
          return extensionContext->hasPermission(name) || extensionContext->hasPermission("unlimitedStorage"_s);
  
-@@ -127,7 +154,6 @@ bool WebExtensionAPINamespace::isPropertyAllowed(const ASCIILiteral& name, WebPa
+@@ -127,7 +158,6 @@ bool WebExtensionAPINamespace::isPropertyAllowed(const ASCIILiteral& name, WebPa
      return extensionContext->hasPermission(name);
  }
  
@@ -181448,7 +181654,7 @@ index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..4f1a7aa02268173a64e9292bc804f916
  WebExtensionAPIAction& WebExtensionAPINamespace::action()
  {
      // Documentation: https://developer.mozilla.org/docs/Mozilla/Add-ons/WebExtensions/API/action
-@@ -137,7 +163,6 @@ WebExtensionAPIAction& WebExtensionAPINamespace::action()
+@@ -137,7 +167,6 @@ WebExtensionAPIAction& WebExtensionAPINamespace::action()
  
      return *m_action;
  }
@@ -181456,7 +181662,7 @@ index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..4f1a7aa02268173a64e9292bc804f916
  
  WebExtensionAPIAlarms& WebExtensionAPINamespace::alarms()
  {
-@@ -149,7 +174,6 @@ WebExtensionAPIAlarms& WebExtensionAPINamespace::alarms()
+@@ -149,7 +178,6 @@ WebExtensionAPIAlarms& WebExtensionAPINamespace::alarms()
      return *m_alarms;
  }
  
@@ -181464,7 +181670,7 @@ index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..4f1a7aa02268173a64e9292bc804f916
  WebExtensionAPICommands& WebExtensionAPINamespace::commands()
  {
      // Documentation: https://developer.mozilla.org/docs/Mozilla/Add-ons/WebExtensions/API/commands
-@@ -160,6 +184,16 @@ WebExtensionAPICommands& WebExtensionAPINamespace::commands()
+@@ -160,6 +188,16 @@ WebExtensionAPICommands& WebExtensionAPINamespace::commands()
      return *m_commands;
  }
  
@@ -181481,7 +181687,7 @@ index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..4f1a7aa02268173a64e9292bc804f916
  WebExtensionAPICookies& WebExtensionAPINamespace::cookies()
  {
      // Documentation: https://developer.mozilla.org/docs/Mozilla/Add-ons/WebExtensions/API/cookies
-@@ -170,6 +204,27 @@ WebExtensionAPICookies& WebExtensionAPINamespace::cookies()
+@@ -170,6 +208,27 @@ WebExtensionAPICookies& WebExtensionAPINamespace::cookies()
      return *m_cookies;
  }
  
@@ -181509,7 +181715,7 @@ index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..4f1a7aa02268173a64e9292bc804f916
  WebExtensionAPIDeclarativeNetRequest& WebExtensionAPINamespace::declarativeNetRequest()
  {
      // Documentation: https://developer.mozilla.org/docs/Mozilla/Add-ons/WebExtensions/API/declarativeNetRequest
-@@ -180,6 +235,7 @@ WebExtensionAPIDeclarativeNetRequest& WebExtensionAPINamespace::declarativeNetRe
+@@ -180,6 +239,7 @@ WebExtensionAPIDeclarativeNetRequest& WebExtensionAPINamespace::declarativeNetRe
      return *m_declarativeNetRequest;
  }
  
@@ -181517,7 +181723,7 @@ index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..4f1a7aa02268173a64e9292bc804f916
  #if ENABLE(INSPECTOR_EXTENSIONS)
  WebExtensionAPIDevTools& WebExtensionAPINamespace::devtools()
  {
-@@ -202,35 +258,20 @@ WebExtensionAPIDOM& WebExtensionAPINamespace::dom()
+@@ -202,35 +262,20 @@ WebExtensionAPIDOM& WebExtensionAPINamespace::dom()
      return *m_dom;
  }
  
@@ -181559,7 +181765,7 @@ index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..4f1a7aa02268173a64e9292bc804f916
  
  #if ENABLE(WK_WEB_EXTENSIONS_OFFSCREEN)
  WebExtensionAPIOffscreen& WebExtensionAPINamespace::offscreen()
-@@ -244,16 +285,154 @@ WebExtensionAPIOffscreen& WebExtensionAPINamespace::offscreen()
+@@ -244,16 +289,163 @@ WebExtensionAPIOffscreen& WebExtensionAPINamespace::offscreen()
  }
  #endif
  
@@ -181639,8 +181845,8 @@ index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..4f1a7aa02268173a64e9292bc804f916
 +    if (!m_search)
 +        lazyInitialize(m_search, WebExtensionAPISearch::create(*this));
 +    return *m_search;
- }
- 
++}
++
 +WebExtensionAPIBrowsingData& WebExtensionAPINamespace::browsingData()
 +{
 +    // Documentation: https://developer.chrome.com/docs/extensions/reference/api/browsingData
@@ -181695,8 +181901,8 @@ index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..4f1a7aa02268173a64e9292bc804f916
 +    if (!m_tabGroups)
 +        lazyInitialize(m_tabGroups, WebExtensionAPITabGroups::create(*this));
 +    return *m_tabGroups;
-+}
-+
+ }
+ 
 +WebExtensionAPIIdentity& WebExtensionAPINamespace::identity()
 +{
 +    // Documentation: https://developer.chrome.com/docs/extensions/reference/api/identity
@@ -181714,12 +181920,21 @@ index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..4f1a7aa02268173a64e9292bc804f916
 +        lazyInitialize(m_userScripts, WebExtensionAPIUserScripts::create(*this));
 +    return *m_userScripts;
 +}
++
++WebExtensionAPIContentScriptsHaiku& WebExtensionAPINamespace::contentScriptsHaiku()
++{
++    // Documentation: https://developer.mozilla.org/docs/Mozilla/Add-ons/WebExtensions/API/contentScripts
++
++    if (!m_contentScriptsHaiku)
++        lazyInitialize(m_contentScriptsHaiku, WebExtensionAPIContentScriptsHaiku::create(*this));
++    return *m_contentScriptsHaiku;
++}
 +#endif
 +
  WebExtensionAPIPermissions& WebExtensionAPINamespace::permissions()
  {
      // Documentation: https://developer.mozilla.org/docs/Mozilla/Add-ons/WebExtensions/API/permissions
-@@ -286,6 +465,7 @@ WebExtensionAPIScripting& WebExtensionAPINamespace::scripting()
+@@ -286,6 +478,7 @@ WebExtensionAPIScripting& WebExtensionAPINamespace::scripting()
      return *m_scripting;
  }
  
@@ -181727,7 +181942,7 @@ index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..4f1a7aa02268173a64e9292bc804f916
  #if ENABLE(WK_WEB_EXTENSIONS_SIDEBAR)
  WebExtensionAPISidePanel& WebExtensionAPINamespace::sidePanel()
  {
-@@ -320,15 +500,8 @@ WebExtensionAPIBookmarks& WebExtensionAPINamespace::bookmarks()
+@@ -320,15 +513,8 @@ WebExtensionAPIBookmarks& WebExtensionAPINamespace::bookmarks()
  }
  #endif
  
@@ -181744,19 +181959,19 @@ index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..4f1a7aa02268173a64e9292bc804f916
  
  WebExtensionAPITabs& WebExtensionAPINamespace::tabs()
  {
-@@ -339,27 +512,15 @@ WebExtensionAPITabs& WebExtensionAPINamespace::tabs()
+@@ -339,27 +525,15 @@ WebExtensionAPITabs& WebExtensionAPINamespace::tabs()
  
      return *m_tabs;
  }
 -#endif
- 
+-
 -WebExtensionAPITest& WebExtensionAPINamespace::test()
 -{
 -    // Documentation: None (Testing Only)
 -
 -    if (!m_test)
 -        lazyInitialize(m_test, WebExtensionAPITest::create(*this));
--
+ 
 -    return *m_test;
 -}
 -
@@ -181777,7 +181992,7 @@ index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..4f1a7aa02268173a64e9292bc804f916
  }
  
  WebExtensionAPIWebNavigation& WebExtensionAPINamespace::webNavigation()
-@@ -381,7 +542,28 @@ WebExtensionAPIWebRequest& WebExtensionAPINamespace::webRequest()
+@@ -381,7 +555,28 @@ WebExtensionAPIWebRequest& WebExtensionAPINamespace::webRequest()
  
      return *m_webRequest;
  }
@@ -181808,10 +182023,10 @@ index cdf7b6ed9b22a11f8ebdce34e1755607c892c4d1..4f1a7aa02268173a64e9292bc804f916
  } // namespace WebKit
  
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPINamespace.h b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPINamespace.h
-index fc3e8017564cf29eb647731205e00dc8500dd13d..01fb4788e209665fd6eed76bbff234b531eff990 100644
+index fc3e8017564cf29eb647731205e00dc8500dd13d..02b07a4a7205f8b29cb0dd9a71da7c1a1ffa5156 100644
 --- a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPINamespace.h
 +++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPINamespace.h
-@@ -45,6 +45,24 @@
+@@ -45,6 +45,25 @@
  #include "WebExtensionAPIObject.h"
  #include "WebExtensionAPIOffscreen.h"
  #include "WebExtensionAPIPermissions.h"
@@ -181823,6 +182038,7 @@ index fc3e8017564cf29eb647731205e00dc8500dd13d..01fb4788e209665fd6eed76bbff234b5
 +#include "WebExtensionAPINotificationsHaiku.h"
 +#include "WebExtensionAPIPrivacy.h"
 +#include "WebExtensionAPIUserScripts.h"
++#include "WebExtensionAPIContentScriptsHaiku.h"
 +#include "WebExtensionAPIHistory.h"
 +#include "WebExtensionAPIBookmarksHaiku.h"
 +#include "WebExtensionAPISearch.h"
@@ -181836,7 +182052,7 @@ index fc3e8017564cf29eb647731205e00dc8500dd13d..01fb4788e209665fd6eed76bbff234b5
  #include "WebExtensionAPIRuntime.h"
  #include "WebExtensionAPIScripting.h"
  #include "WebExtensionAPISidePanel.h"
-@@ -66,33 +84,52 @@ class WebExtensionAPINamespace : public WebExtensionAPIObject, public JSWebExten
+@@ -66,33 +85,53 @@ class WebExtensionAPINamespace : public WebExtensionAPIObject, public JSWebExten
  
  public:
      bool isPropertyAllowed(const ASCIILiteral& propertyName, WebPage*);
@@ -181880,6 +182096,7 @@ index fc3e8017564cf29eb647731205e00dc8500dd13d..01fb4788e209665fd6eed76bbff234b5
 +    WebExtensionAPINotificationsHaiku& notificationsHaiku();
 +    WebExtensionAPIPrivacy& privacy();
 +    WebExtensionAPIUserScripts& userScripts();
++    WebExtensionAPIContentScriptsHaiku& contentScriptsHaiku();
 +    WebExtensionAPIHistory& history();
 +    WebExtensionAPIBookmarksHaiku& bookmarks();
 +    WebExtensionAPISearch& search();
@@ -181898,7 +182115,7 @@ index fc3e8017564cf29eb647731205e00dc8500dd13d..01fb4788e209665fd6eed76bbff234b5
  #if ENABLE(WK_WEB_EXTENSIONS_SIDEBAR)
      WebExtensionAPISidePanel& sidePanel();
      WebExtensionAPISidebarAction& sidebarAction();
-@@ -100,15 +137,13 @@ public:
+@@ -100,15 +139,13 @@ public:
  #if ENABLE(WK_WEB_EXTENSIONS_BOOKMARKS)
      WebExtensionAPIBookmarks& bookmarks();
  #endif
@@ -181918,7 +182135,7 @@ index fc3e8017564cf29eb647731205e00dc8500dd13d..01fb4788e209665fd6eed76bbff234b5
  
  private:
      const RefPtr<WebExtensionAPIAction> m_action;
-@@ -127,7 +162,26 @@ private:
+@@ -127,7 +164,27 @@ private:
  #if ENABLE(WK_WEB_EXTENSIONS_OFFSCREEN)
      const RefPtr<WebExtensionAPIOffscreen> m_offscreen;
  #endif
@@ -181932,6 +182149,7 @@ index fc3e8017564cf29eb647731205e00dc8500dd13d..01fb4788e209665fd6eed76bbff234b5
 +    RefPtr<WebExtensionAPINotificationsHaiku> m_notificationsHaiku;
 +    RefPtr<WebExtensionAPIPrivacy> m_privacy;
 +    RefPtr<WebExtensionAPIUserScripts> m_userScripts;
++    RefPtr<WebExtensionAPIContentScriptsHaiku> m_contentScriptsHaiku;
 +    RefPtr<WebExtensionAPIHistory> m_history;
 +    RefPtr<WebExtensionAPIBookmarksHaiku> m_bookmarksHaiku;
 +    RefPtr<WebExtensionAPISearch> m_search;
@@ -183199,6 +183417,40 @@ index 0000000000000000000000000000000000000000..413f2e16107bcca192b92268f84c4d3d
 +}
 +SPECIALIZE_TYPE_TRAITS_WEB_EXTENSION(WebExtensionAPIPrivacySetting, privacySetting);
 +#endif
+diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIRegisteredContentScriptHaiku.h b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIRegisteredContentScriptHaiku.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..6d89a631edd459006e87ba4371a4d736cdd08381
+--- /dev/null
++++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIRegisteredContentScriptHaiku.h
+@@ -0,0 +1,28 @@
++/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
++#pragma once
++
++#if ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
++
++#include "JSWebExtensionAPIRegisteredContentScriptHaiku.h"
++#include "WebExtensionAPIObject.h"
++
++namespace WebKit {
++
++// The handle contentScripts.register() settles with; unregister() removes
++// the registration (once).
++class WebExtensionAPIRegisteredContentScriptHaiku : public WebExtensionAPIObject, public JSWebExtensionWrappable {
++    WEB_EXTENSION_DECLARE_JS_WRAPPER_CLASS(WebExtensionAPIRegisteredContentScriptHaiku, registeredContentScriptHaiku, registeredContentScript);
++
++public:
++    void setIdentifier(const String& identifier) { m_identifier = identifier; }
++    void unregister(Ref<WebExtensionCallbackHandler>&&);
++
++private:
++    String m_identifier;
++};
++
++} // namespace WebKit
++
++SPECIALIZE_TYPE_TRAITS_WEB_EXTENSION(WebExtensionAPIRegisteredContentScriptHaiku, registeredContentScriptHaiku);
++
++#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIRuntime.cpp b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIRuntime.cpp
 index 81412a7ab5e7f5845d4d19a813c2552c1cf361d6..ec65a9b46b92da70dc7e5261a109c39a07eb4563 100644
 --- a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIRuntime.cpp
@@ -187775,10 +188027,10 @@ index 6364873570f522b8cd1dcd453109729eb6a01f66..6dc9f80e6bc271725d4b6db0c040581a
  } // namespace WebKit
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIWebRequest.cpp b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIWebRequest.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..43a2983f850d8a4fafcd5160feaab70020897178
+index 0000000000000000000000000000000000000000..5d481b354db197df16b02f3a3d412e0112deb4af
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIWebRequest.cpp
-@@ -0,0 +1,677 @@
+@@ -0,0 +1,703 @@
 +/*
 + * Copyright (C) 2024 Apple Inc. All rights reserved.
 + *
@@ -188150,9 +188402,9 @@ index 0000000000000000000000000000000000000000..43a2983f850d8a4fafcd5160feaab700
 +// exactly once, at the latest when the collector is destroyed.
 +class BlockingWebRequestReplies : public RefCounted<BlockingWebRequestReplies> {
 +public:
-+    static Ref<BlockingWebRequestReplies> create(CompletionHandler<void(Vector<String>&&)>&& completionHandler)
++    static Ref<BlockingWebRequestReplies> create(WebExtensionContextProxy& context, CompletionHandler<void(Vector<String>&&)>&& completionHandler)
 +    {
-+        return adoptRef(*new BlockingWebRequestReplies(WTF::move(completionHandler)));
++        return adoptRef(*new BlockingWebRequestReplies(context, WTF::move(completionHandler)));
 +    }
 +
 +    ~BlockingWebRequestReplies()
@@ -188174,8 +188426,11 @@ index 0000000000000000000000000000000000000000..43a2983f850d8a4fafcd5160feaab700
 +            return;
 +        m_settled[slot] = true;
 +        m_replies[slot] = WTF::move(reply);
-+        if (!--m_pending && m_dispatchFinished)
++        if (!--m_pending && m_dispatchFinished) {
++            if (m_deadline.isActive())
++                m_context->noteBlockingWebRequestListenersSettledHaiku(true);
 +            complete();
++        }
 +    }
 +
 +    void dispatchFinished()
@@ -188184,14 +188439,16 @@ index 0000000000000000000000000000000000000000..43a2983f850d8a4fafcd5160feaab700
 +        if (!m_pending)
 +            complete();
 +        else if (!m_completed)
-+            m_deadline.startOneShot(webExtensionWebRequestListenerTimeoutHaiku);
++            m_deadline.startOneShot(m_context->blockingWebRequestListenerTimeoutHaiku());
 +    }
 +
 +private:
-+    explicit BlockingWebRequestReplies(CompletionHandler<void(Vector<String>&&)>&& completionHandler)
-+        : m_completionHandler(WTF::move(completionHandler))
++    explicit BlockingWebRequestReplies(WebExtensionContextProxy& context, CompletionHandler<void(Vector<String>&&)>&& completionHandler)
++        : m_context(context)
++        , m_completionHandler(WTF::move(completionHandler))
 +        , m_deadline(RunLoop::mainSingleton(), "WebExtensionWebRequestListenerDeadline"_s, [this] {
 +            RELEASE_LOG_ERROR(Extensions, "A blocking webRequest listener did not settle in time; treating it as no decision");
++            m_context->noteBlockingWebRequestListenersSettledHaiku(false);
 +            complete();
 +        })
 +    {
@@ -188206,6 +188463,7 @@ index 0000000000000000000000000000000000000000..43a2983f850d8a4fafcd5160feaab700
 +        m_completionHandler(WTF::move(m_replies));
 +    }
 +
++    const Ref<WebExtensionContextProxy> m_context;
 +    CompletionHandler<void(Vector<String>&&)> m_completionHandler;
 +    Vector<String> m_replies;
 +    Vector<bool> m_settled;
@@ -188336,7 +188594,7 @@ index 0000000000000000000000000000000000000000..43a2983f850d8a4fafcd5160feaab700
 +    }
 +    }
 +
-+    auto replies = BlockingWebRequestReplies::create(WTF::move(completionHandler));
++    auto replies = BlockingWebRequestReplies::create(*this, WTF::move(completionHandler));
 +    WebRequestListenerInvokerHaiku invoker = [&](WebExtensionCallbackHandler& listener, const Vector<String>& extraInfo, JSContextRef context, JSObjectRef argument) {
 +        auto slot = replies->reserve();
 +        if (extraInfo.contains("asyncBlocking"_s)) {
@@ -188361,6 +188619,26 @@ index 0000000000000000000000000000000000000000..43a2983f850d8a4fafcd5160feaab700
 +            deliverWebRequest(*event, *details, tab, window, resource, headerKey, headers, body, contentType, WebRequestListenerSelectionHaiku::Blocking, &invoker);
 +    });
 +    replies->dispatchFinished();
++}
++
++Seconds WebExtensionContextProxy::blockingWebRequestListenerTimeoutHaiku() const
++{
++    static constexpr unsigned timeoutsBeforeShortDeadline = 3;
++    static constexpr Seconds shortDeadline = 250_ms;
++    return m_blockingWebRequestTimeoutsInARowHaiku >= timeoutsBeforeShortDeadline ? shortDeadline : webExtensionWebRequestListenerTimeoutHaiku;
++}
++
++void WebExtensionContextProxy::noteBlockingWebRequestListenersSettledHaiku(bool inTime)
++{
++    if (inTime) {
++        if (m_blockingWebRequestTimeoutsInARowHaiku)
++            RELEASE_LOG(Extensions, "Blocking webRequest listeners answer in time again after %u missed deadlines", m_blockingWebRequestTimeoutsInARowHaiku);
++        m_blockingWebRequestTimeoutsInARowHaiku = 0;
++        return;
++    }
++    if (++m_blockingWebRequestTimeoutsInARowHaiku == 3)
++        std::fprintf(stderr, "Summit extensions: %s's blocking webRequest listeners missed 3 deadlines in a row; loads wait for them at most 250 ms until one answers in time\n",
++            uniqueIdentifier().utf8().data());
 +}
 +
 +void WebExtensionContextProxy::noteBlockingWebRequestDeliveryHaiku(uint64_t resourceLoadID, uint8_t phase)
@@ -191861,6 +192139,27 @@ index a7907ee1aeea5f7c5fb86a6f7d99e83b69aa2640..4b6be127113d8a81a2f6114642776a14
  
      readonly attribute WebExtensionAPIEvent onCommand;
      readonly attribute WebExtensionAPIEvent onChanged;
+diff --git a/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPIContentScriptsHaiku.idl b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPIContentScriptsHaiku.idl
+new file mode 100644
+index 0000000000000000000000000000000000000000..f3192ff59fbcff94127421b68a7a153ef285b74b
+--- /dev/null
++++ b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPIContentScriptsHaiku.idl
+@@ -0,0 +1,15 @@
++/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
++
++// Firefox's contentScripts, for Manifest V2 extensions (uBlock Origin 1.76
++// registers its scriptlets per host with it):
++// https://developer.mozilla.org/docs/Mozilla/Add-ons/WebExtensions/API/contentScripts
++[
++    Conditional=WK_WEB_EXTENSIONS,
++    MainWorldOnly,
++    ReturnsPromiseWhenCallbackIsOmitted,
++    UseCPPAPI,
++] interface WebExtensionAPIContentScriptsHaiku {
++
++    [RaisesStringException, ImplementedAs=registerScript] void register([JSONValue] any contentScriptOptions, [Optional, CallbackHandler] function callback);
++
++};
 diff --git a/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPIContextualIdentities.idl b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPIContextualIdentities.idl
 new file mode 100644
 index 0000000000000000000000000000000000000000..bc1b773c0abfcf0369bc8a219bfce9cef622e414
@@ -192325,10 +192624,10 @@ index 2868b8c1b322da84dda89344451196e063c4264d..701eab20681dee6d7595f0a57f9df7c7
  
  };
 diff --git a/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPINamespace.idl b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPINamespace.idl
-index cf3a76d37a4d9379d4191ac666ba4bc97bd9013d..ca58e1e6f564a71c03cf6d1a39cfd3b3907ec2af 100644
+index cf3a76d37a4d9379d4191ac666ba4bc97bd9013d..3f3592261bfd276c05f24dbe8a24a9a6eb1c4e9e 100644
 --- a/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPINamespace.idl
 +++ b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPINamespace.idl
-@@ -33,57 +33,78 @@
+@@ -33,57 +33,80 @@
      * in the offscreen web view context) - and automatically grant it in WebExtensionAPINamespace::isPropertyAllowed.
      */
  
@@ -192381,19 +192680,21 @@ index cf3a76d37a4d9379d4191ac666ba4bc97bd9013d..ca58e1e6f564a71c03cf6d1a39cfd3b3
 +    [MainWorldOnly, Dynamic, Platform=HAIKU, ImplementedAs=notificationsHaiku] readonly attribute WebExtensionAPINotificationsHaiku notifications;
 +
 +    [MainWorldOnly, Dynamic, Conditional=WK_WEB_EXTENSIONS_OFFSCREEN] readonly attribute WebExtensionAPIOffscreen offscreen;
- 
--    [MainWorldOnly, Dynamic, Platform=COCOA, Conditional=WK_WEB_EXTENSIONS_OFFSCREEN] readonly attribute WebExtensionAPIOffscreen offscreen;
++
 +    [MainWorldOnly, Dynamic] readonly attribute WebExtensionAPIAction pageAction;
  
--    [MainWorldOnly, Dynamic, Platform=COCOA] readonly attribute WebExtensionAPIAction pageAction;
+-    [MainWorldOnly, Dynamic, Platform=COCOA, Conditional=WK_WEB_EXTENSIONS_OFFSCREEN] readonly attribute WebExtensionAPIOffscreen offscreen;
 +    [MainWorldOnly, Dynamic] readonly attribute WebExtensionAPIPermissions permissions;
 +    [MainWorldOnly, Dynamic, Platform=HAIKU] readonly attribute WebExtensionAPIPrivacy privacy;
  
--    [MainWorldOnly, Dynamic, Platform=COCOA] readonly attribute WebExtensionAPIPermissions permissions;
+-    [MainWorldOnly, Dynamic, Platform=COCOA] readonly attribute WebExtensionAPIAction pageAction;
 +    [MainWorldOnly, Dynamic] readonly attribute WebExtensionAPIScripting scripting;
  
--    [MainWorldOnly, Dynamic, Platform=COCOA] readonly attribute WebExtensionAPIScripting scripting;
+-    [MainWorldOnly, Dynamic, Platform=COCOA] readonly attribute WebExtensionAPIPermissions permissions;
 +    [MainWorldOnly, Dynamic, Platform=HAIKU] readonly attribute WebExtensionAPIUserScripts userScripts;
+ 
+-    [MainWorldOnly, Dynamic, Platform=COCOA] readonly attribute WebExtensionAPIScripting scripting;
++    [MainWorldOnly, Dynamic, Platform=HAIKU, ImplementedAs=contentScriptsHaiku] readonly attribute WebExtensionAPIContentScriptsHaiku contentScripts;
 +    [MainWorldOnly, Dynamic, Platform=HAIKU] readonly attribute WebExtensionAPIHistory history;
 +    [MainWorldOnly, Dynamic, Platform=HAIKU] readonly attribute WebExtensionAPIBookmarksHaiku bookmarks;
 +    [MainWorldOnly, Dynamic, Platform=HAIKU] readonly attribute WebExtensionAPISearch search;
@@ -192577,6 +192878,26 @@ index 0000000000000000000000000000000000000000..56290af91f7eec2eb9a056c0a43a165c
 +    [RaisesStringException] void set([JSONValue] any details, [Optional, CallbackHandler] function callback);
 +    [RaisesStringException] void clear([JSONValue] any details, [Optional, CallbackHandler] function callback);
 +    readonly attribute WebExtensionAPIEvent onChange;
++};
+diff --git a/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPIRegisteredContentScriptHaiku.idl b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPIRegisteredContentScriptHaiku.idl
+new file mode 100644
+index 0000000000000000000000000000000000000000..cc6373ce986e8875d6d0d2edff3487f4534c8b13
+--- /dev/null
++++ b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPIRegisteredContentScriptHaiku.idl
+@@ -0,0 +1,14 @@
++/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
++
++// What Firefox's contentScripts.register() settles with:
++// https://developer.mozilla.org/docs/Mozilla/Add-ons/WebExtensions/API/contentScripts/RegisteredContentScript
++[
++    Conditional=WK_WEB_EXTENSIONS,
++    MainWorldOnly,
++    ReturnsPromiseWhenCallbackIsOmitted,
++    UseCPPAPI,
++] interface WebExtensionAPIRegisteredContentScriptHaiku {
++
++    void unregister([Optional, CallbackHandler] function callback);
++
 +};
 diff --git a/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPIRuntime.idl b/Source/WebKit/WebProcess/Extensions/Interfaces/WebExtensionAPIRuntime.idl
 index 4b75480574369d609ccee902e1ee45e72e521f53..7daa47e40c18f1266e49844609d31219e77fcd10 100644
@@ -193407,7 +193728,7 @@ index 2b2ff5395e73b7978dc8b610d62ffe835fc1a886..a14c2094bbc2b2522027d9f40b70ddd0
  
  #endif // ENABLE(WK_WEB_EXTENSIONS)
 diff --git a/Source/WebKit/WebProcess/Extensions/WebExtensionContextProxy.h b/Source/WebKit/WebProcess/Extensions/WebExtensionContextProxy.h
-index d6d7467a810b4fa585e99e9ad58711f17a7084bf..6410ca3918f537e405ed44f4ccbc22f058ca28bf 100644
+index d6d7467a810b4fa585e99e9ad58711f17a7084bf..8a3d98797f15e853aaedc7e636eeb64864c5bdb0 100644
 --- a/Source/WebKit/WebProcess/Extensions/WebExtensionContextProxy.h
 +++ b/Source/WebKit/WebProcess/Extensions/WebExtensionContextProxy.h
 @@ -41,9 +41,12 @@
@@ -193464,7 +193785,7 @@ index d6d7467a810b4fa585e99e9ad58711f17a7084bf..6410ca3918f537e405ed44f4ccbc22f0
      Inspector::ExtensionAppearance inspectorAppearance() const { return m_inspectorAppearance; }
      void setInspectorAppearance(Inspector::ExtensionAppearance appearance) { m_inspectorAppearance = appearance; }
  #endif
-@@ -151,6 +170,14 @@ public:
+@@ -151,6 +170,20 @@ public:
          });
      }
  
@@ -193474,12 +193795,18 @@ index d6d7467a810b4fa585e99e9ad58711f17a7084bf..6410ca3918f537e405ed44f4ccbc22f0
 +    void noteBlockingWebRequestDeliveryHaiku(uint64_t resourceLoadID, uint8_t phase);
 +    bool consumeBlockingWebRequestDeliveryHaiku(uint64_t resourceLoadID, uint8_t phase);
 +    void forgetBlockingWebRequestDeliveriesHaiku(uint64_t resourceLoadID);
++    // How long this extension's blocking webRequest listeners may take: the
++    // full deadline, or a short one once several in a row missed it (a stuck
++    // extension, such as uBlock Origin 1.76 that failed to start, held every
++    // load for the full deadline), until one answers in time again.
++    Seconds blockingWebRequestListenerTimeoutHaiku() const;
++    void noteBlockingWebRequestListenersSettledHaiku(bool inTime);
 +
 +#endif
  private:
      explicit WebExtensionContextProxy(const WebExtensionContextParameters&);
  
-@@ -170,17 +197,26 @@ private:
+@@ -170,17 +203,26 @@ private:
      void dispatchCommandsChangedEvent(const String& identifier, const String& oldShortcut, const String& newShortcut);
  
      // Cookies
@@ -193507,7 +193834,7 @@ index d6d7467a810b4fa585e99e9ad58711f17a7084bf..6410ca3918f537e405ed44f4ccbc22f0
      void dispatchDevToolsExtensionPanelShownEvent(Inspector::ExtensionTabID, WebCore::FrameIdentifier);
      void dispatchDevToolsExtensionPanelHiddenEvent(Inspector::ExtensionTabID);
      void dispatchDevToolsNetworkNavigatedEvent(const URL&);
-@@ -198,7 +234,25 @@ private:
+@@ -198,7 +240,25 @@ private:
  #endif
  
      // Menus
@@ -193533,7 +193860,7 @@ index d6d7467a810b4fa585e99e9ad58711f17a7084bf..6410ca3918f537e405ed44f4ccbc22f0
  
  #if ENABLE(WK_WEB_EXTENSIONS_NOTIFICATIONS)
      // Notifications
-@@ -213,10 +267,10 @@ private:
+@@ -213,10 +273,10 @@ private:
  
      // Port
      void dispatchPortMessageEvent(std::optional<WebPageProxyIdentifier>, WebExtensionPortChannelIdentifier, const String& messageJSON, bool userGesture);
@@ -193546,7 +193873,7 @@ index d6d7467a810b4fa585e99e9ad58711f17a7084bf..6410ca3918f537e405ed44f4ccbc22f0
      void internalDispatchRuntimeConnectEvent(WebExtensionContentWorldType, WebExtensionPortChannelIdentifier, const String& name, const std::optional<WebExtensionMessageTargetParameters>&, const WebExtensionMessageSenderParameters&, bool userGesture, CompletionHandler<void(HashCountedSet<WebPageProxyIdentifier>&&)>&&);
      void dispatchRuntimeMessageEvent(WebExtensionContentWorldType, const String& messageJSON, const std::optional<WebExtensionMessageTargetParameters>&, const WebExtensionMessageSenderParameters&, bool userGesture, CompletionHandler<void(String&& replyJSON)>&&);
      void dispatchRuntimeConnectEvent(WebExtensionContentWorldType, WebExtensionPortChannelIdentifier, const String& name, const std::optional<WebExtensionMessageTargetParameters>&, const WebExtensionMessageSenderParameters&, bool userGesture, CompletionHandler<void(HashCountedSet<WebPageProxyIdentifier>&&)>&&);
-@@ -229,8 +283,21 @@ private:
+@@ -229,8 +289,21 @@ private:
      void dispatchStorageChangedEvent(const Vector<String>& onChangedJSON, WebExtensionDataType, WebExtensionContentWorldType);
  
      // Tabs
@@ -193568,7 +193895,7 @@ index d6d7467a810b4fa585e99e9ad58711f17a7084bf..6410ca3918f537e405ed44f4ccbc22f0
      void dispatchTabsReplacedEvent(WebExtensionTabIdentifier replacedTabIdentifier, WebExtensionTabIdentifier newTabIdentifier);
      void dispatchTabsDetachedEvent(WebExtensionTabIdentifier, WebExtensionWindowIdentifier oldWindowIdentifier, uint64_t oldIndex);
      void dispatchTabsMovedEvent(WebExtensionTabIdentifier, WebExtensionWindowIdentifier, uint64_t oldIndex, uint64_t newIndex);
-@@ -246,14 +313,22 @@ private:
+@@ -246,14 +319,22 @@ private:
  
      // Web Navigation
      void dispatchWebNavigationEvent(WebExtensionEventListenerType, WebExtensionTabIdentifier, const WebExtensionFrameParameters&, WallTime);
@@ -193597,7 +193924,7 @@ index d6d7467a810b4fa585e99e9ad58711f17a7084bf..6410ca3918f537e405ed44f4ccbc22f0
  
      // Windows
      void dispatchWindowsEvent(WebExtensionEventListenerType, const std::optional<WebExtensionWindowParameters>&);
-@@ -275,14 +350,28 @@ private:
+@@ -275,14 +356,29 @@ private:
      mutable PermissionsMap m_grantedPermissions;
      mutable WallTime m_nextGrantedPermissionsExpirationDate { WallTime::nan() };
      RefPtr<WebCore::DOMWrapperWorld> m_contentScriptWorld;
@@ -193611,6 +193938,7 @@ index d6d7467a810b4fa585e99e9ad58711f17a7084bf..6410ca3918f537e405ed44f4ccbc22f0
      WeakPtr<WebPage> m_backgroundPage;
 +#if PLATFORM(HAIKU)
 +    Vector<std::pair<uint64_t, uint8_t>> m_blockingWebRequestDeliveriesHaiku;
++    unsigned m_blockingWebRequestTimeoutsInARowHaiku { 0 };
 +#endif
  #if ENABLE(WK_WEB_EXTENSIONS_OFFSCREEN)
      WeakPtr<WebPage> m_offscreenPage;
