@@ -112,6 +112,12 @@ first paint ~26, compositor frame starts ~35 and takes ~42 (tile upload
 is AFBC: with `PAN_MESA_DEBUG=noafbc` it takes 2.3 ms and the frame arrives
 at ~66. Kept on: without AFBC MotionMark 1.3.1 falls from 287.6 to 257.7
 (Images 147 -> 104, Design 22.5 -> 11.6) on the same build and kernel.
+Instead, a texture whose first CPU write fills it (a compositor tile) now
+leaves AFBC at once, which costs no copy (airos-works/mesa 7343494, airos-ci
+3c6066a; `PAN_HAIKU_FIRST_UPLOAD_UNTILED=0` restores AFBC): first frame
+73 -> 62 ms after the commit, new tabs 95 -> 84 ms, MotionMark 303.0 without
+against 306.1 with, on the same Mesa build. Installed on the ROCK 5 as its
+non-packaged Mesa (mesa-7343494).
 
 **Extension popups, measured (8 Nov, ROCK 5).** uBlock Origin 1.75.4 in a
 fresh test profile, `SUMMIT_EXTENSION_TIMING=1`, clicked through the MCP
