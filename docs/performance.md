@@ -100,7 +100,8 @@ first paint ~26, compositor frame starts ~35 and takes ~42 (tile upload
 10.4 ms for 0.86 Mpx, drawing 3.8, read-back 14), the view has the frame at
 ~77. The read-back is haiku#71 (no direct present on Panfrost). The upload
 is AFBC: with `PAN_MESA_DEBUG=noafbc` it takes 2.3 ms and the frame arrives
-at ~66.
+at ~66. Kept on: without AFBC MotionMark 1.3.1 falls from 287.6 to 257.7
+(Images 147 -> 104, Design 22.5 -> 11.6) on the same build and kernel.
 
 **Extension popups, measured (8 Nov, ROCK 5).** uBlock Origin 1.75.4 in a
 fresh test profile, `SUMMIT_EXTENSION_TIMING=1`, clicked through the MCP
