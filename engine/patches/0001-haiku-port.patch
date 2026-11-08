@@ -64953,7 +64953,7 @@ index c2d6ac748ed19ad7daf8887b9678a32eef10e3f5..e1edefcf3bb920ab49e1bd244577ff75
      bool isColorBitmapFont() const { return m_isColorBitmapFont; }
  
 diff --git a/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.cpp b/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.cpp
-index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..a57b677e4885f57accded68ad8f6602c29a4298b 100644
+index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..48b32c51137c19e28e01d84dfad4dc0ab9b6a186 100644
 --- a/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.cpp
 +++ b/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.cpp
 @@ -58,6 +58,13 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
@@ -64970,7 +64970,7 @@ index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..a57b677e4885f57accded68ad8f6602c
  #include <wtf/SystemTracing.h>
  #include <wtf/text/StringToIntegerConversion.h>
  
-@@ -67,11 +74,67 @@ WTF_MAKE_TZONE_ALLOCATED_IMPL(SkiaPaintingEngine);
+@@ -67,11 +74,97 @@ WTF_MAKE_TZONE_ALLOCATED_IMPL(SkiaPaintingEngine);
  
  static bool canPerformAcceleratedRendering()
  {
@@ -64995,50 +64995,80 @@ index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..a57b677e4885f57accded68ad8f6602c
 +// rendering update waited for all of them.
 +class SkiaTileJobsHaiku : public ThreadSafeRefCounted<SkiaTileJobsHaiku> {
 +public:
-+    static Ref<SkiaTileJobsHaiku> create() { return adoptRef(*new SkiaTileJobsHaiku); }
++    static Ref<SkiaTileJobsHaiku> create(unsigned maxRunners) { return adoptRef(*new SkiaTileJobsHaiku(maxRunners)); }
 +
++    // A pool task runs jobs until none is left, and a new one is started only
++    // while fewer run than the pool has threads: each started task wakes a
++    // worker (ParkingLot), and with one task per tile that was 5 % of the web
++    // process's main thread in MotionMark on the ROCK 5, hundreds of wakeups
++    // a frame. SUMMIT_TILE_JOB_RUNNERS=0: one pool task per job, as before.
 +    void post(WorkerPool& pool, Function<void()>&& job, bool inView)
 +    {
++        bool startRunner;
 +        {
 +            Locker locker { m_lock };
 +            (inView ? m_inView : m_ahead).append(WTF::move(job));
++            startRunner = !m_drains || m_runners < m_maxRunners;
++            if (startRunner && m_drains)
++                ++m_runners;
 +        }
-+        // One pool task per job; each runs the most urgent job waiting then.
++        if (!startRunner)
++            return;
 +        pool.postTask([jobs = Ref { *this }] {
-+            jobs->runNext();
++            jobs->run();
 +        });
 +    }
 +
 +private:
-+    void runNext()
++    explicit SkiaTileJobsHaiku(unsigned maxRunners)
++        : m_maxRunners(std::max(1u, maxRunners))
 +    {
-+        Function<void()> job;
-+        {
-+            Locker locker { m_lock };
-+            if (!m_inView.isEmpty())
-+                job = m_inView.takeFirst();
-+            else if (!m_ahead.isEmpty())
-+                job = m_ahead.takeFirst();
-+        }
-+        if (job)
++        const char* value = getenv("SUMMIT_TILE_JOB_RUNNERS");
++        m_drains = !value || strcmp(value, "0");
++    }
++
++    void run()
++    {
++        while (true) {
++            Function<void()> job;
++            {
++                Locker locker { m_lock };
++                if (!m_inView.isEmpty())
++                    job = m_inView.takeFirst();
++                else if (!m_ahead.isEmpty())
++                    job = m_ahead.takeFirst();
++                else {
++                    // Decided under the lock: a job posted after this sees
++                    // one runner fewer and starts another.
++                    if (m_drains)
++                        --m_runners;
++                    return;
++                }
++            }
 +            job();
++            if (!m_drains)
++                return;
++        }
 +    }
 +
 +    Lock m_lock;
 +    Deque<Function<void()>> m_inView WTF_GUARDED_BY_LOCK(m_lock);
 +    Deque<Function<void()>> m_ahead WTF_GUARDED_BY_LOCK(m_lock);
++    unsigned m_runners WTF_GUARDED_BY_LOCK(m_lock) { 0 };
++    const unsigned m_maxRunners;
++    bool m_drains { true };
 +};
 +#endif
 +
  SkiaPaintingEngine::SkiaPaintingEngine(sk_sp<GrContextThreadSafeProxy>&& threadSafeGrContext)
      : m_threadSafeGrContext(WTF::move(threadSafeGrContext))
 +#if PLATFORM(HAIKU)
-+    , m_tileJobsHaiku(SkiaTileJobsHaiku::create())
++    , m_tileJobsHaiku(SkiaTileJobsHaiku::create(canPerformAcceleratedRendering() ? numberOfGPUPaintingThreads() : numberOfCPUPaintingThreads()))
 +#endif
  {
  #if USE(TEXTURE_MAPPER)
      if (canPerformAcceleratedRendering()) {
-@@ -109,7 +172,18 @@ void SkiaPaintingEngine::paintIntoGraphicsContext(const GraphicsLayer& layer, Gr
+@@ -109,7 +202,18 @@ void SkiaPaintingEngine::paintIntoGraphicsContext(const GraphicsLayer& layer, Gr
  
      context.translate(-dirtyRect.x(), -dirtyRect.y());
      context.scale(contentsScale);
@@ -65057,7 +65087,7 @@ index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..a57b677e4885f57accded68ad8f6602c
  }
  
  Ref<CoordinatedTileBuffer> SkiaPaintingEngine::createBuffer(RenderingMode renderingMode, const IntSize& size, bool contentsOpaque) const
-@@ -247,11 +321,20 @@ Ref<SkiaRecordingResult> SkiaPaintingEngine::record(const GraphicsLayerCoordinat
+@@ -247,11 +351,20 @@ Ref<SkiaRecordingResult> SkiaPaintingEngine::record(const GraphicsLayerCoordinat
      return result;
  }
  
@@ -65078,7 +65108,7 @@ index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..a57b677e4885f57accded68ad8f6602c
  
      auto renderingMode = recording->renderingMode();
  #if USE(TEXTURE_MAPPER)
-@@ -259,10 +342,38 @@ Ref<CoordinatedTileBuffer> SkiaPaintingEngine::replay(const GraphicsLayerCoordin
+@@ -259,10 +372,38 @@ Ref<CoordinatedTileBuffer> SkiaPaintingEngine::replay(const GraphicsLayerCoordin
  #else
      auto bufferSize = renderingMode == RenderingMode::Accelerated ? tileRect.size() : dirtyRect.size();
  #endif
@@ -65118,7 +65148,7 @@ index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..a57b677e4885f57accded68ad8f6602c
          if (auto* canvas = buffer->canvas()) {
              auto replayPicture = [](const sk_sp<SkPicture>& picture, SkCanvas* canvas, const IntRect& recordRect, const IntRect& tileRect, const IntRect& dirtyRect, bool isDDLBuffer) {
                  canvas->save();
-@@ -297,9 +408,41 @@ Ref<CoordinatedTileBuffer> SkiaPaintingEngine::replay(const GraphicsLayerCoordin
+@@ -297,9 +438,41 @@ Ref<CoordinatedTileBuffer> SkiaPaintingEngine::replay(const GraphicsLayerCoordin
              WTFEndSignpost(canvas, PaintTile);
          }
  
@@ -65161,7 +65191,7 @@ index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..a57b677e4885f57accded68ad8f6602c
  
      return buffer;
  }
-@@ -310,7 +453,20 @@ unsigned SkiaPaintingEngine::numberOfCPUPaintingThreads()
+@@ -310,7 +483,20 @@ unsigned SkiaPaintingEngine::numberOfCPUPaintingThreads()
      static unsigned numberOfThreads = 0;
  
      std::call_once(onceFlag, [] {
