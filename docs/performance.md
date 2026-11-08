@@ -85,6 +85,19 @@ Measurement trap: a fresh test profile downloads and parses the safe-browsing
 lists (250,000 entries) in its first seconds; timings taken then were 2-3x
 slower and misled one experiment. Wait 30 s after launch.
 
+**The spare process prepares a page (new tabs).** A new tab's web page took
+38-43 ms to create in the spare process on the ROCK 5, waiting 21-27 ms of
+it for the compositor's GL context (and the display's sharing context, made
+lazily by the first page) and most of the rest building the first empty
+document (WebKit's user agent style sheet). The spare now does, while it
+waits, what Cocoa's prewarmed processes do (ProcessWarming::prewarmGlobally:
+the style sheet, media query schemas, the JavaScript VM, the default
+language), makes the sharing GL context and resolves the default fonts.
+ROCK 5, same kernel, interleaved: page creation 38-43 -> 21 ms, GL wait
+21-27 -> 13.5 ms, new tabs 166-169 ms (before today's font changes) ->
+109-120 ms. `SUMMIT_PREWARM_SPARE=0` turns it off; `SUMMIT_NAV_TRACE=1` now
+also prints "web page created in" and "compositor GL context made in".
+
 **Default font families.** WebKit's defaults (standard and serif "Times",
 sans-serif "Helvetica", fixed "Courier New", cursive "Comic Sans MS",
 fantasy "Impact") are not installed on air/OS, so a page's generic families
