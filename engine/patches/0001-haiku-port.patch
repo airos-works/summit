@@ -31594,10 +31594,28 @@ index ce4e0d940167703a010a3d14f8a51ee98b93fc47..194ed6288d965f9734f7d39afbc80efd
  };
  
 diff --git a/Source/WebCore/platform/adwaita/ScrollbarThemeAdwaita.cpp b/Source/WebCore/platform/adwaita/ScrollbarThemeAdwaita.cpp
-index dd4409073c1db7e0fad87272d1d4f883fd60e350..1b883b83a6d617dd6b86236f84d7faaeed7fff3e 100644
+index dd4409073c1db7e0fad87272d1d4f883fd60e350..c3cbaa03115652e772c2b78192fd57a2641250bf 100644
 --- a/Source/WebCore/platform/adwaita/ScrollbarThemeAdwaita.cpp
 +++ b/Source/WebCore/platform/adwaita/ScrollbarThemeAdwaita.cpp
-@@ -110,7 +110,13 @@ bool ScrollbarThemeAdwaita::paint(Scrollbar& scrollbar, GraphicsContext& graphic
+@@ -62,7 +62,16 @@ bool ScrollbarThemeAdwaita::usesOverlayScrollbars() const
+     if (!g_strcmp0(g_getenv("GTK_OVERLAY_SCROLLING"), "0"))
+         return false;
+ #endif
+-#if PLATFORM(GTK) || PLATFORM(WPE)
++#if PLATFORM(HAIKU)
++    // SUMMIT_OVERLAY_SCROLLBARS=0: classic scroll bars that take layout space
++    // and never fade, like GTK_OVERLAY_SCROLLING=0. Reftests whose reference is
++    // captured while the scroll bar still shows from a scroll need it (#195).
++    static const bool overlay = [] {
++        const char* value = getenv("SUMMIT_OVERLAY_SCROLLBARS");
++        return !value || strcmp(value, "0");
++    }();
++    return overlay;
++#elif PLATFORM(GTK) || PLATFORM(WPE)
+     return SystemSettings::singleton().overlayScrolling().value_or(true);
+ #else
+     return true;
+@@ -110,7 +119,13 @@ bool ScrollbarThemeAdwaita::paint(Scrollbar& scrollbar, GraphicsContext& graphic
  {
  #if USE(COORDINATED_GRAPHICS_ASYNC_SCROLLBAR)
      if (auto scrollableArea = protect(scrollbar.scrollableArea())) {
@@ -38156,7 +38174,7 @@ index 100e61c99fcc079ca9b363aab12482437ef928c7..c4a67dde3a5846b566a25d6d109e452a
  }
  
 diff --git a/Source/WebCore/platform/graphics/coordinated/CoordinatedBackingStoreProxy.cpp b/Source/WebCore/platform/graphics/coordinated/CoordinatedBackingStoreProxy.cpp
-index 160ba4f2623722caaf670da2b6eb3f4b1d3f2f5f..f327d85c3bb8d00fa46c44bb4d6222a9a75dde97 100644
+index 160ba4f2623722caaf670da2b6eb3f4b1d3f2f5f..dba24c950c70f584b5dc19338d08004e20750d75 100644
 --- a/Source/WebCore/platform/graphics/coordinated/CoordinatedBackingStoreProxy.cpp
 +++ b/Source/WebCore/platform/graphics/coordinated/CoordinatedBackingStoreProxy.cpp
 @@ -33,6 +33,10 @@
@@ -38170,7 +38188,22 @@ index 160ba4f2623722caaf670da2b6eb3f4b1d3f2f5f..f327d85c3bb8d00fa46c44bb4d6222a9
  
  #if USE(SKIA)
  #include "SkiaPaintingEngine.h"
-@@ -143,6 +147,20 @@ OptionSet<CoordinatedBackingStoreProxy::UpdateResult> CoordinatedBackingStorePro
+@@ -131,7 +135,14 @@ OptionSet<CoordinatedBackingStoreProxy::UpdateResult> CoordinatedBackingStorePro
+     Vector<uint32_t> tilesToCreate;
+     Vector<uint32_t> tilesToRemove;
+     if (shouldCreateAndDestroyTiles)
++#if PLATFORM(HAIKU)
++        // Rounded up: a layer 65.5 CSS pixels tall is 131 device pixels at 2x,
++        // and truncating left its last row without tiles, so never painted
++        // (a box shadow's last row in the view transition tests, #195).
++        createOrDestroyTiles(unscaledVisibleRect, IntRect { { }, expandedIntSize(unscaledSize) }, enclosingIntRect(unscaledViewportRect).size(), contentsScale, layer.maxTextureSize(), damage, tilesToCreate, tilesToRemove);
++#else
+         createOrDestroyTiles(unscaledVisibleRect, IntRect { { }, IntSize(unscaledSize) }, enclosingIntRect(unscaledViewportRect).size(), contentsScale, layer.maxTextureSize(), damage, tilesToCreate, tilesToRemove);
++#endif
+ 
+     if (m_animatedBackingStoreClient)
+         m_animatedBackingStoreClient->update(layer.owner(), unscaledViewportRect, m_coverRect, unscaledSize, contentsScale);
+@@ -143,6 +154,20 @@ OptionSet<CoordinatedBackingStoreProxy::UpdateResult> CoordinatedBackingStorePro
      if (m_pendingTileCreation)
          result.add(UpdateResult::TilesPending);
  
@@ -38191,7 +38224,7 @@ index 160ba4f2623722caaf670da2b6eb3f4b1d3f2f5f..f327d85c3bb8d00fa46c44bb4d6222a9
      // Update the dirty tiles.
      IntRect tileDirtyRectUnion;
      unsigned dirtyTilesCount = 0;
-@@ -173,7 +191,20 @@ OptionSet<CoordinatedBackingStoreProxy::UpdateResult> CoordinatedBackingStorePro
+@@ -173,7 +198,20 @@ OptionSet<CoordinatedBackingStoreProxy::UpdateResult> CoordinatedBackingStorePro
              WTFBeginSignpost(this, UpdateTile, "%u/%u, id: %d, rect: %ix%i+%i+%i, dirty: %ix%i+%i+%i", ++dirtyTileIndex, dirtyTilesCount, tile.id,
                  tile.rect.x(), tile.rect.y(), tile.rect.width(), tile.rect.height(), tile.dirtyRect.x(), tile.dirtyRect.y(), tile.dirtyRect.width(), tile.dirtyRect.height());
  
@@ -38213,7 +38246,7 @@ index 160ba4f2623722caaf670da2b6eb3f4b1d3f2f5f..f327d85c3bb8d00fa46c44bb4d6222a9
              auto buffer = paintingEngine.replay(*layer.owner(), recording.copyRef(), tile.rect, tile.dirtyRect);
  #else
              FloatRect scaledDirtyRect(tile.dirtyRect);
-@@ -247,6 +278,9 @@ void CoordinatedBackingStoreProxy::createOrDestroyTiles(const IntRect& unscaledV
+@@ -247,6 +285,9 @@ void CoordinatedBackingStoreProxy::createOrDestroyTiles(const IntRect& unscaledV
      IntRect visibleRect = mapFromContents(unscaledVisibleRect);
      bool contentsRectChanged = contentsScaleChanged || m_contentsRect != contentsRect;
      bool geometryChanged = contentsRectChanged || m_visibleRect != visibleRect || m_coverAreaMultiplier != coverAreaMultiplier;
@@ -38223,7 +38256,7 @@ index 160ba4f2623722caaf670da2b6eb3f4b1d3f2f5f..f327d85c3bb8d00fa46c44bb4d6222a9
      if (!geometryChanged && !m_pendingTileCreation)
          return;
  
-@@ -254,6 +288,9 @@ void CoordinatedBackingStoreProxy::createOrDestroyTiles(const IntRect& unscaledV
+@@ -254,6 +295,9 @@ void CoordinatedBackingStoreProxy::createOrDestroyTiles(const IntRect& unscaledV
          m_contentsRect = contentsRect;
          m_visibleRect = visibleRect;
          m_coverAreaMultiplier = coverAreaMultiplier;
@@ -38233,7 +38266,7 @@ index 160ba4f2623722caaf670da2b6eb3f4b1d3f2f5f..f327d85c3bb8d00fa46c44bb4d6222a9
  
          bool tileSizeChanged = false;
          if (!m_contentsRect.isEmpty()) {
-@@ -407,11 +444,14 @@ IntSize CoordinatedBackingStoreProxy::computeTileSize(const IntSize& viewportSiz
+@@ -407,11 +451,14 @@ IntSize CoordinatedBackingStoreProxy::computeTileSize(const IntSize& viewportSiz
          return overridenTileSize;
  
      IntSize tileSize;
@@ -38251,7 +38284,7 @@ index 160ba4f2623722caaf670da2b6eb3f4b1d3f2f5f..f327d85c3bb8d00fa46c44bb4d6222a9
          static constexpr int minGPUTileHeight = 256;
  
          auto gpuTileSize = [&](const IntSize& baseSize) -> IntSize {
-@@ -434,9 +474,25 @@ IntSize CoordinatedBackingStoreProxy::computeTileSize(const IntSize& viewportSiz
+@@ -434,9 +481,25 @@ IntSize CoordinatedBackingStoreProxy::computeTileSize(const IntSize& viewportSiz
              tileSize = gpuTileSize(baseSize);
          }
      } else {
@@ -38277,7 +38310,7 @@ index 160ba4f2623722caaf670da2b6eb3f4b1d3f2f5f..f327d85c3bb8d00fa46c44bb4d6222a9
          // If the contents width is small, increase tile size vertically.
          if (m_contentsRect.width() < tileSize.width())
              tileSize.setHeight(maxUntiledContentSize);
-@@ -499,6 +555,30 @@ void CoordinatedBackingStoreProxy::adjustForContentsRect(IntRect& rect) const
+@@ -499,6 +562,30 @@ void CoordinatedBackingStoreProxy::adjustForContentsRect(IntRect& rect) const
  
  std::pair<IntRect, IntRect> CoordinatedBackingStoreProxy::computeCoverAndKeepRect() const
  {
@@ -38308,7 +38341,7 @@ index 160ba4f2623722caaf670da2b6eb3f4b1d3f2f5f..f327d85c3bb8d00fa46c44bb4d6222a9
      IntRect coverRect = m_visibleRect;
      IntRect keepRect = m_visibleRect;
  
-@@ -513,6 +593,31 @@ std::pair<IntRect, IntRect> CoordinatedBackingStoreProxy::computeCoverAndKeepRec
+@@ -513,6 +600,31 @@ std::pair<IntRect, IntRect> CoordinatedBackingStoreProxy::computeCoverAndKeepRec
  
      adjustForContentsRect(coverRect);
  
