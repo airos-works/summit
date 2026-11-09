@@ -23302,14 +23302,15 @@ index b7cc6b07caf172c2c167a081bd963c0c0a894842..1303442c7820d596d0253cd46eba6b70
  }
  
 diff --git a/Source/WebCore/dom/ViewTransition.cpp b/Source/WebCore/dom/ViewTransition.cpp
-index 0d080489846058c7981fd45c760edca8e7fb4880..62d26addf72663f7f8bc72152ac6913da5040494 100644
+index 0d080489846058c7981fd45c760edca8e7fb4880..17907e497a74ec99d7e7a795698a32e6a4b193a2 100644
 --- a/Source/WebCore/dom/ViewTransition.cpp
 +++ b/Source/WebCore/dom/ViewTransition.cpp
-@@ -72,6 +72,13 @@
+@@ -72,6 +72,14 @@
  #include <wtf/text/MakeString.h>
  #include <wtf/text/TextStream.h>
  
 +#if PLATFORM(HAIKU)
++#include "SkiaPaintingEngine.h"
 +#include <cstdio>
 +#include <cstdlib>
 +#include <cstring>
@@ -23319,7 +23320,7 @@ index 0d080489846058c7981fd45c760edca8e7fb4880..62d26addf72663f7f8bc72152ac6913d
  namespace WebCore {
  
  WTF_MAKE_TZONE_ALLOCATED_IMPL(CapturedElement);
-@@ -467,8 +474,24 @@ static LayoutPoint layerToLayoutOffset(const RenderLayerModelObject& renderer)
+@@ -467,8 +475,24 @@ static LayoutPoint layerToLayoutOffset(const RenderLayerModelObject& renderer)
      return { };
  }
  
@@ -23344,20 +23345,22 @@ index 0d080489846058c7981fd45c760edca8e7fb4880..62d26addf72663f7f8bc72152ac6913d
      ASSERT(renderer.hasLayer());
      CheckedRef layerRenderer = renderer;
  
-@@ -496,7 +519,21 @@ static RefPtr<ImageBuffer> snapshotElementVisualOverflowClippedToViewport(LocalF
+@@ -496,7 +520,23 @@ static RefPtr<ImageBuffer> snapshotElementVisualOverflowClippedToViewport(LocalF
      colorSpace = ColorSpace::SRGB(); // FIXME: We should use the screen colorspace on iOS too, but that has blending issues: webkit.org/b/318764.
  #endif
  
 -    auto buffer = ImageBuffer::create(paintRect.size(), RenderingMode::Accelerated, RenderingPurpose::Snapshot, scaleFactor, colorSpace, PixelFormat::BGRA8, hostWindow);
 +#if PLATFORM(HAIKU)
-+    // Painted with the CPU, as the page's tiles are: a GPU snapshot rounded
-+    // antialiased edges and text one unit away from the tiles they stand in
-+    // for (old-content-object-fit-none, #182), and Skia on the GPU through
-+    // zink paints no faster than on the CPU here.
-+    // SUMMIT_VIEW_TRANSITION_GPU_SNAPSHOTS=1 paints them on the GPU again.
++    // Painted where the page's tiles are painted, on the CPU or the GPU: a
++    // snapshot painted the other way rounded antialiased edges, text and
++    // blurs one unit or more away from the tiles it stands in for
++    // (old-content-object-fit-none, #182; inline-child-with-filter, #198).
++    // SUMMIT_VIEW_TRANSITION_GPU_SNAPSHOTS=1 or 0 chooses.
 +    static const bool gpuSnapshots = [] {
 +        const char* value = getenv("SUMMIT_VIEW_TRANSITION_GPU_SNAPSHOTS");
-+        return value && !strcmp(value, "1");
++        if (value && *value)
++            return !strcmp(value, "1");
++        return SkiaPaintingEngine::paintsTilesOnGPUHaiku();
 +    }();
 +    auto renderingMode = gpuSnapshots ? RenderingMode::Accelerated : RenderingMode::Unaccelerated;
 +#else
@@ -23367,7 +23370,7 @@ index 0d080489846058c7981fd45c760edca8e7fb4880..62d26addf72663f7f8bc72152ac6913d
      if (!buffer)
          return nullptr;
  
-@@ -510,8 +547,23 @@ static RefPtr<ImageBuffer> snapshotElementVisualOverflowClippedToViewport(LocalF
+@@ -510,8 +550,23 @@ static RefPtr<ImageBuffer> snapshotElementVisualOverflowClippedToViewport(LocalF
      paintFlags.add(RenderLayer::PaintLayerFlag::AppliedTransform);
      paintFlags.add(RenderLayer::PaintLayerFlag::PaintingSkipDescendantViewTransition);
      layerRenderer->layer()->paint(buffer->context(), paintRect, subpixelOffset, frameView->paintBehavior(), nullptr, paintFlags);
@@ -23391,7 +23394,7 @@ index 0d080489846058c7981fd45c760edca8e7fb4880..62d26addf72663f7f8bc72152ac6913d
      return buffer;
  }
  
-@@ -1118,8 +1170,19 @@ void ViewTransition::visibilityStateChanged()
+@@ -1118,8 +1173,19 @@ void ViewTransition::visibilityStateChanged()
  
      Ref document = *this->document();
      if (document->hidden()) {
@@ -64138,7 +64141,7 @@ index a322e5f3f28177dbb62613a726a819d673e0927f..a52ace46086178dc8139ef569d9fd068
      return SkScalarToFloat(width);
  }
 diff --git a/Source/WebCore/platform/graphics/skia/GraphicsContextSkia.cpp b/Source/WebCore/platform/graphics/skia/GraphicsContextSkia.cpp
-index a3cb981bd76fc7f7946862f8f7be53fe133bae79..fbbeaba32188687e7a0dd06ec8401279e98cc7c7 100644
+index a3cb981bd76fc7f7946862f8f7be53fe133bae79..6fc74815608850f78219c76d0e9c0cff5721a7f9 100644
 --- a/Source/WebCore/platform/graphics/skia/GraphicsContextSkia.cpp
 +++ b/Source/WebCore/platform/graphics/skia/GraphicsContextSkia.cpp
 @@ -47,9 +47,20 @@
@@ -64204,10 +64207,7 @@ index a3cb981bd76fc7f7946862f8f7be53fe133bae79..fbbeaba32188687e7a0dd06ec8401279
 +    const auto& shadowColor = shadow->color;
 +    if (!shadowColor.isVisible() || (!offset.width() && !offset.height() && !shadow->radius))
 +        return false;
- 
--    paint.setImageFilter(shadow);
--    drawFunction(paint);
--    paint.setImageFilter(nullptr);
++
 +    // As with DropShadowOnly: the shape's coverage times its opacity, in the
 +    // shadow's colour, blurred with sigma radius / 2, offset, and composited
 +    // with the paint's blend mode.
@@ -64245,7 +64245,10 @@ index a3cb981bd76fc7f7946862f8f7be53fe133bae79..fbbeaba32188687e7a0dd06ec8401279
 +        auto shadow = createDropShadowFilterIfNeeded(ShadowStyle::Outset);
 +        if (!shadow)
 +            return false;
-+
+ 
+-    paint.setImageFilter(shadow);
+-    drawFunction(paint);
+-    paint.setImageFilter(nullptr);
 +        paint.setImageFilter(shadow);
 +        drawFunction(paint);
 +        paint.setImageFilter(nullptr);
@@ -64477,7 +64480,26 @@ index a3cb981bd76fc7f7946862f8f7be53fe133bae79..fbbeaba32188687e7a0dd06ec8401279
              paint.setShader(picture->makeShader(SkTileMode::kRepeat, SkTileMode::kRepeat, samplingOptions.filter, &shaderMatrix, nullptr));
          }
      }
-@@ -1359,7 +1591,7 @@ void GraphicsContextSkia::drawSkiaText(const sk_sp<SkTextBlob>& blob, SkScalar x
+@@ -1322,8 +1554,18 @@ void GraphicsContextSkia::trackAcceleratedRenderingFenceIfNeeded(const sk_sp<SkI
+     if (!image || !image->isTextureBacked())
+         return;
+ 
++#if PLATFORM(HAIKU)
++    // When no GL fence can be made (none came on the X399, NVK through zink)
++    // the flush waits for the GPU instead; the image is still listed, so that
++    // the painting thread replays the tile through SkiaReplayCanvas, which
++    // rewraps the texture for its own GrContext. Played back directly, a
++    // texture of the main thread's context drew nothing: GPU view
++    // transition snapshots on GPU tiles were blank (#198).
++    m_imageToFenceMap.add(image.get(), SkiaUtilities::flushAndSubmitImageWithFence(grContext, image));
++#else
+     if (auto fence = SkiaUtilities::flushAndSubmitImageWithFence(grContext, image))
+         m_imageToFenceMap.add(image.get(), WTF::move(fence));
++#endif
+ }
+ 
+ void GraphicsContextSkia::trackAcceleratedRenderingFenceIfNeeded(Pattern& pattern)
+@@ -1359,7 +1601,7 @@ void GraphicsContextSkia::drawSkiaText(const sk_sp<SkTextBlob>& blob, SkScalar x
          if (hasDropShadow()) {
              inExtraTransparencyLayer = drawOutsetShadow(paint, [&](const SkPaint& paint) {
                  m_canvas.drawTextBlob(blob, x, y, paint);
@@ -65102,10 +65124,20 @@ index c2d6ac748ed19ad7daf8887b9678a32eef10e3f5..e1edefcf3bb920ab49e1bd244577ff75
      bool isColorBitmapFont() const { return m_isColorBitmapFont; }
  
 diff --git a/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.cpp b/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.cpp
-index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..48b32c51137c19e28e01d84dfad4dc0ab9b6a186 100644
+index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..d3fada39be7d8a6e545f32efafa815a22a62cc22 100644
 --- a/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.cpp
 +++ b/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.cpp
-@@ -58,6 +58,13 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
+@@ -33,6 +33,9 @@
+ #include "CoordinatedTileBuffer.h"
+ #include "FontRenderOptions.h"
+ #include "GLContext.h"
++#if PLATFORM(HAIKU) && USE(LIBEPOXY)
++#include <epoxy/gl.h>
++#endif
+ #include "GraphicsContextSkia.h"
+ #include "GraphicsLayerCoordinated.h"
+ #include "PlatformDisplay.h"
+@@ -58,6 +61,13 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
  #include <skia/gpu/ganesh/SkSurfaceGanesh.h>
  WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
  #include <wtf/NumberOfCores.h>
@@ -65119,24 +65151,42 @@ index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..48b32c51137c19e28e01d84dfad4dc0a
  #include <wtf/SystemTracing.h>
  #include <wtf/text/StringToIntegerConversion.h>
  
-@@ -67,11 +74,97 @@ WTF_MAKE_TZONE_ALLOCATED_IMPL(SkiaPaintingEngine);
+@@ -67,11 +77,115 @@ WTF_MAKE_TZONE_ALLOCATED_IMPL(SkiaPaintingEngine);
  
  static bool canPerformAcceleratedRendering()
  {
 +#if PLATFORM(HAIKU)
-+    // The Haiku GL context is currently used for Canvas only. GPU tile
-+    // painting through Zink has been slower than the CPU painting path.
-+    // SUMMIT_GPU_TILES=1 paints tiles with Skia on the GPU, for measuring.
-+    static const bool gpuTiles = [] {
++    if (!ProcessCapabilities::canUseAcceleratedBuffers())
++        return false;
++    auto* skiaGLContext = PlatformDisplay::sharedDisplay().skiaGLContext();
++    if (!skiaGLContext)
++        return false;
++    // Tiles are painted with Skia on the GPU where that has been measured to
++    // be faster: NVK (through zink) on the X399's GTX 1070, MotionMark 444
++    // against 397 and Design at 40 elements 33 frames a second against 22
++    // with four CPU painting threads (#198). Elsewhere on the CPU until
++    // measured: the ROCK 5's panfrost gained nothing, radeonsi is unmeasured.
++    // SUMMIT_GPU_TILES=1 or 0 chooses.
++    static const bool gpuTiles = [skiaGLContext] {
 +        const char* value = getenv("SUMMIT_GPU_TILES");
-+        return value && !strcmp(value, "1");
++        if (value && *value)
++            return !strcmp(value, "1");
++        const char* renderer = skiaGLContext->makeContextCurrent() ? reinterpret_cast<const char*>(glGetString(GL_RENDERER)) : nullptr;
++        return renderer && strstr(renderer, "(MESA_NVK)");
 +    }();
-+    return gpuTiles && ProcessCapabilities::canUseAcceleratedBuffers() && PlatformDisplay::sharedDisplay().skiaGLContext();
++    return gpuTiles;
 +#else
      return ProcessCapabilities::canUseAcceleratedBuffers() && PlatformDisplay::sharedDisplay().skiaGLContext();
 +#endif
  }
  
++#if PLATFORM(HAIKU)
++bool SkiaPaintingEngine::paintsTilesOnGPUHaiku()
++{
++    return canPerformAcceleratedRendering();
++}
++#endif
++
 +#if PLATFORM(HAIKU)
 +// The painting threads take tiles in view first. After a jump (a page that
 +// scrolls itself, a fling) the tiles of the new view were queued behind 50
@@ -65217,7 +65267,7 @@ index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..48b32c51137c19e28e01d84dfad4dc0a
  {
  #if USE(TEXTURE_MAPPER)
      if (canPerformAcceleratedRendering()) {
-@@ -109,7 +202,18 @@ void SkiaPaintingEngine::paintIntoGraphicsContext(const GraphicsLayer& layer, Gr
+@@ -109,7 +223,18 @@ void SkiaPaintingEngine::paintIntoGraphicsContext(const GraphicsLayer& layer, Gr
  
      context.translate(-dirtyRect.x(), -dirtyRect.y());
      context.scale(contentsScale);
@@ -65236,7 +65286,7 @@ index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..48b32c51137c19e28e01d84dfad4dc0a
  }
  
  Ref<CoordinatedTileBuffer> SkiaPaintingEngine::createBuffer(RenderingMode renderingMode, const IntSize& size, bool contentsOpaque) const
-@@ -247,11 +351,20 @@ Ref<SkiaRecordingResult> SkiaPaintingEngine::record(const GraphicsLayerCoordinat
+@@ -247,11 +372,20 @@ Ref<SkiaRecordingResult> SkiaPaintingEngine::record(const GraphicsLayerCoordinat
      return result;
  }
  
@@ -65257,7 +65307,7 @@ index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..48b32c51137c19e28e01d84dfad4dc0a
  
      auto renderingMode = recording->renderingMode();
  #if USE(TEXTURE_MAPPER)
-@@ -259,10 +372,38 @@ Ref<CoordinatedTileBuffer> SkiaPaintingEngine::replay(const GraphicsLayerCoordin
+@@ -259,10 +393,38 @@ Ref<CoordinatedTileBuffer> SkiaPaintingEngine::replay(const GraphicsLayerCoordin
  #else
      auto bufferSize = renderingMode == RenderingMode::Accelerated ? tileRect.size() : dirtyRect.size();
  #endif
@@ -65297,7 +65347,7 @@ index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..48b32c51137c19e28e01d84dfad4dc0a
          if (auto* canvas = buffer->canvas()) {
              auto replayPicture = [](const sk_sp<SkPicture>& picture, SkCanvas* canvas, const IntRect& recordRect, const IntRect& tileRect, const IntRect& dirtyRect, bool isDDLBuffer) {
                  canvas->save();
-@@ -297,9 +438,41 @@ Ref<CoordinatedTileBuffer> SkiaPaintingEngine::replay(const GraphicsLayerCoordin
+@@ -297,9 +459,41 @@ Ref<CoordinatedTileBuffer> SkiaPaintingEngine::replay(const GraphicsLayerCoordin
              WTFEndSignpost(canvas, PaintTile);
          }
  
@@ -65340,7 +65390,7 @@ index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..48b32c51137c19e28e01d84dfad4dc0a
  
      return buffer;
  }
-@@ -310,7 +483,20 @@ unsigned SkiaPaintingEngine::numberOfCPUPaintingThreads()
+@@ -310,7 +504,20 @@ unsigned SkiaPaintingEngine::numberOfCPUPaintingThreads()
      static unsigned numberOfThreads = 0;
  
      std::call_once(onceFlag, [] {
@@ -65362,7 +65412,7 @@ index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..48b32c51137c19e28e01d84dfad4dc0a
          if (const char* envString = getenv("WEBKIT_SKIA_CPU_PAINTING_THREADS")) {
              auto newValue = parseInteger<unsigned>(StringView::fromLatin1(envString));
 diff --git a/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.h b/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.h
-index 6600c24f0265dfae370e5c195967424f74f1ceae..db4ff38f7f75579460ddde62c84ed8bfcc882b2f 100644
+index 6600c24f0265dfae370e5c195967424f74f1ceae..3127304fe907324fbfe72d988a71e4b930e94b08 100644
 --- a/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.h
 +++ b/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.h
 @@ -48,6 +48,10 @@ class SkiaImageAtlasLayout;
@@ -65376,7 +65426,15 @@ index 6600c24f0265dfae370e5c195967424f74f1ceae..db4ff38f7f75579460ddde62c84ed8bf
  class SkiaPaintingEngine {
      WTF_MAKE_TZONE_ALLOCATED(SkiaPaintingEngine);
      WTF_MAKE_NONCOPYABLE(SkiaPaintingEngine);
-@@ -68,7 +72,13 @@ public:
+@@ -64,11 +68,21 @@ public:
+     static bool shouldUseDMABufAtlasTextures();
+     static bool shouldUseLinearTileTextures();
+     static bool shouldUseVivanteSuperTiledTileTextures();
++#if PLATFORM(HAIKU)
++    // Whether the page's tiles are painted on the GPU (SUMMIT_GPU_TILES).
++    static bool paintsTilesOnGPUHaiku();
++#endif
+ 
      const sk_sp<GrContextThreadSafeProxy>& threadSafeGrContext() const { return m_threadSafeGrContext; }
  
      Ref<SkiaRecordingResult> record(const GraphicsLayerCoordinated&, const IntRect& recordRect, bool contentsOpaque, float contentsScale, unsigned dirtyTilesCount);
@@ -65390,7 +65448,7 @@ index 6600c24f0265dfae370e5c195967424f74f1ceae..db4ff38f7f75579460ddde62c84ed8bf
  
  private:
      Ref<CoordinatedTileBuffer> createBuffer(RenderingMode, const IntSize&, bool contentsOpaque) const;
-@@ -77,6 +87,10 @@ private:
+@@ -77,6 +91,10 @@ private:
      bool tryReuseCachedAtlases(SkiaRecordingResult&, unsigned fingerprint);
  
      sk_sp<GrContextThreadSafeProxy> m_threadSafeGrContext;
