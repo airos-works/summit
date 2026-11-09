@@ -54,6 +54,11 @@ for n in $needed; do
     case $n in
     libroot.so|libbe.so|libnetwork.so|libbnetapi.so|libtranslation.so|libmedia.so|libgame.so|libdevice.so|libtracker.so|libtextencoding.so|libpackage.so|libbsd.so|libgnu.so|libshared.so)
         continue;;
+    # air/OS's Neural Kit, which only lib/libsummitspeech.so links (speech
+    # recognition, docs/speech-recognition.md); the engine opens that library
+    # when a page asks for it and does without it where the kit is missing.
+    libneural.so)
+        continue;;
     esac
     # HaikuPorts names libraries in lower case with underscores (lib:libllvm,
     # lib:libharfbuzz_icu). LLVM's soname carries its major version.

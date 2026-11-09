@@ -80,6 +80,17 @@ error event. air/OS images don't ship an engine yet: airos-works/haiku#52
 (`pkgman install espeak` adds one). `SUMMIT_SPEECH_LIBRARY` names another
 library file; `SUMMIT_SPEECH_TRACE=1` logs to stderr.
 
+## Speech recognition (#159)
+
+`webkitSpeechRecognition`, on air/OS's Neural Kit: a Whisper model the system
+runs locally hears the microphone (through the microphone permission) and
+returns text; a recognition that is not continuous ends by itself when the
+person stops speaking. The engine does not link the kit: it opens
+`libsummitspeech.so` at first use, and the interface exists only where that
+loads (not on stock Haiku). A speech model has to be installed; none ships
+yet. Details, switches, the recording that stands in for a microphone in
+tests, and what was checked: [speech-recognition.md](speech-recognition.md).
+
 ## Origin private file system (#146)
 
 `navigator.storage.getDirectory()`, `FileSystemFileHandle.createWritable()`,
