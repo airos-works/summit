@@ -63740,7 +63740,7 @@ index 34d8abe7e20ce6253a0b968d52c127c65871f37d..83e014793498e84a2b4dc891371e77ea
      auto shapeFunction = [&](const HBRun& run) {
          hb_buffer_set_cluster_level(buffer.get(), HB_BUFFER_CLUSTER_LEVEL_CHARACTERS);
 diff --git a/Source/WebCore/platform/graphics/skia/FontCacheSkia.cpp b/Source/WebCore/platform/graphics/skia/FontCacheSkia.cpp
-index 74cfeb60ac3daa537785693be3917358aa26a2b5..7bdf2161982c79a008acd9d46b10787e10b36496 100644
+index 74cfeb60ac3daa537785693be3917358aa26a2b5..1f2cec305c01df570bc8b2646cd0e7bc0335cd15 100644
 --- a/Source/WebCore/platform/graphics/skia/FontCacheSkia.cpp
 +++ b/Source/WebCore/platform/graphics/skia/FontCacheSkia.cpp
 @@ -30,7 +30,16 @@
@@ -63760,18 +63760,19 @@ index 74cfeb60ac3daa537785693be3917358aa26a2b5..7bdf2161982c79a008acd9d46b10787e
  #include <wtf/text/CString.h>
  #include <wtf/text/CharacterProperties.h>
  #include <wtf/unicode/CharacterNames.h>
-@@ -39,6 +48,10 @@
+@@ -39,6 +48,11 @@
  #include "SystemSettings.h"
  #endif
  
 +#if PLATFORM(HAIKU)
++#include <fontconfig/fontconfig.h>
 +#include <interface/Font.h>
 +#endif
 +
  WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
  #include <skia/ports/SkFontScanner_FreeType.h>
  
-@@ -111,6 +124,13 @@ static SkFontStyle skiaFontStyle(const FontDescription& fontDescription)
+@@ -111,6 +125,13 @@ static SkFontStyle skiaFontStyle(const FontDescription& fontDescription)
      return SkFontStyle(skWeight, skWidth, skSlant);
  }
  
@@ -63785,7 +63786,7 @@ index 74cfeb60ac3daa537785693be3917358aa26a2b5..7bdf2161982c79a008acd9d46b10787e
  static std::pair<bool, bool> computeSynthesisProperties(const SkTypeface& typeface, const FontDescription& fontDescription, OptionSet<FontLookupOptions> synthesisOptions)
  {
      if (FontPlatformData::skiaTypefaceHasAnySupportedColorTable(typeface))
-@@ -181,6 +201,10 @@ Ref<Font> FontCache::lastResortFallbackFont(const FontDescription& fontDescripti
+@@ -181,6 +202,10 @@ Ref<Font> FontCache::lastResortFallbackFont(const FontDescription& fontDescripti
  {
  #if PLATFORM(WIN)
      const auto defaultFontName = "Times New Roman"_s;
@@ -63796,7 +63797,7 @@ index 74cfeb60ac3daa537785693be3917358aa26a2b5..7bdf2161982c79a008acd9d46b10787e
  #else
      const auto defaultFontName = "serif"_s;
  #endif
-@@ -189,13 +213,29 @@ Ref<Font> FontCache::lastResortFallbackFont(const FontDescription& fontDescripti
+@@ -189,13 +214,29 @@ Ref<Font> FontCache::lastResortFallbackFont(const FontDescription& fontDescripti
  
      // Passing nullptr as family name makes Skia use a weak match.
      auto typeface = fontManager().matchFamilyStyle(nullptr, skiaFontStyle(fontDescription));
@@ -63827,7 +63828,7 @@ index 74cfeb60ac3daa537785693be3917358aa26a2b5..7bdf2161982c79a008acd9d46b10787e
          fontDescription.orientation(), fontDescription.widthVariant(), fontDescription.textRenderingMode(), computeFeatures(fontDescription, { }));
      return fontForPlatformData(platformData);
  }
-@@ -411,13 +451,133 @@ static bool isUnsupportedFamilyFont(const AtomString& family)
+@@ -411,13 +452,196 @@ static bool isUnsupportedFamilyFont(const AtomString& family)
          || family == "-apple-system-font";
  }
  
@@ -63890,12 +63891,75 @@ index 74cfeb60ac3daa537785693be3917358aa26a2b5..7bdf2161982c79a008acd9d46b10787e
 +    return families;
 +}
 +
++// Whether fontconfig can match the family at all: an installed font has it as
++// a family name, or the configuration binds it strongly to one (a metric
++// alias such as Arial -> Liberation Sans), as Skia's match requires. Asked
++// before the match: every new web process otherwise paid 5 ms on the ROCK 5
++// for each family a page names that is not installed (Wikipedia: Linux
++// Libertine, Georgia, Times, Times New Roman and Source Serif 4, 26 ms of
++// its first layout). SUMMIT_FONT_FAMILY_PRECHECK=0 always matches.
++static bool haikuFamilyMayMatch(const String& family)
++{
++    static const bool enabled = [] {
++        const char* value = getenv("SUMMIT_FONT_FAMILY_PRECHECK");
++        return !value || strcmp(value, "0");
++    }();
++    if (!enabled)
++        return true;
++    static Lock lock;
++    static NeverDestroyed<HashSet<String, ASCIICaseInsensitiveHash>> installed;
++    static bool listed = false;
++    {
++        Locker locker { lock };
++        if (!listed) {
++            listed = true;
++            if (FcFontSet* fonts = FcConfigGetFonts(nullptr, FcSetSystem)) {
++                for (int i = 0; i < fonts->nfont; ++i) {
++                    FcChar8* name = nullptr;
++                    for (int index = 0; FcPatternGetString(fonts->fonts[i], FC_FAMILY, index, &name) == FcResultMatch; ++index)
++                        installed->add(String::fromUTF8(reinterpret_cast<const char*>(name)));
++                }
++            }
++            // No font list (fontconfig not initialized yet): no shortcut.
++            if (installed->isEmpty())
++                listed = false;
++        }
++        if (installed->isEmpty() || installed->contains(family))
++            return true;
++    }
++    FcPattern* pattern = FcPatternCreate();
++    if (!pattern)
++        return true;
++    auto utf8 = family.utf8();
++    FcPatternAddString(pattern, FC_FAMILY, reinterpret_cast<const FcChar8*>(utf8.data()));
++    FcConfigSubstitute(nullptr, pattern, FcMatchPattern);
++    bool mayMatch = false;
++    FcValue value;
++    FcValueBinding binding;
++    for (int index = 0; !mayMatch && FcPatternGetWithBinding(pattern, FC_FAMILY, index, &value, &binding) == FcResultMatch; ++index) {
++        if (binding == FcValueBindingWeak || value.type != FcTypeString)
++            continue;
++        String name = String::fromUTF8(reinterpret_cast<const char*>(value.u.s));
++        Locker locker { lock };
++        mayMatch = installed->contains(name);
++    }
++    FcPatternDestroy(pattern);
++    return mayMatch;
++}
++
 +static sk_sp<SkTypeface> haikuMatchKnownFamilyStyle(SkFontMgr& manager, const String& family, const SkFontStyle& style)
 +{
 +    {
 +        Locker locker { s_missingFamiliesLockHaiku };
 +        if (missingFamiliesHaiku().contains(family))
 +            return nullptr;
++    }
++    // The generic families resolve through fontconfig's aliases; anything
++    // else that cannot match is missing without a match.
++    if (haikuFamilyCandidates(family).isEmpty() && !haikuFamilyMayMatch(family)) {
++        Locker locker { s_missingFamiliesLockHaiku };
++        missingFamiliesHaiku().add(family);
++        return nullptr;
 +    }
 +    // SUMMIT_FONT_MATCH_TRACE=1: each fontconfig match, what it asked for and its time.
 +    static const bool traces = [] {
@@ -63962,7 +64026,7 @@ index 74cfeb60ac3daa537785693be3917358aa26a2b5..7bdf2161982c79a008acd9d46b10787e
      if (!typeface)
          return nullptr;
  
-@@ -449,6 +609,10 @@ void FontCache::platformReleaseNoncriticalMemory()
+@@ -449,6 +673,10 @@ void FontCache::platformReleaseNoncriticalMemory()
  
  void FontCache::platformInvalidate()
  {
@@ -206047,10 +206111,10 @@ index 0000000000000000000000000000000000000000..a150bd67553ae6f1864c655cd04be661
 +} // namespace WebKit
 diff --git a/Source/WebKit/WebProcess/haiku/WebProcessHaiku.cpp b/Source/WebKit/WebProcess/haiku/WebProcessHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..dc5e70c41ae7c96a959c96bc5823a15165541929
+index 0000000000000000000000000000000000000000..71c54b9da3837d040944f7b23539619dba11a8e8
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/haiku/WebProcessHaiku.cpp
-@@ -0,0 +1,305 @@
+@@ -0,0 +1,318 @@
 +/*
 + * Copyright (C) 2014,2019 Haiku, Inc.
 + *
@@ -206193,8 +206257,9 @@ index 0000000000000000000000000000000000000000..dc5e70c41ae7c96a959c96bc5823a151
 +    // a new tab's first layout. So the generic families are resolved here,
 +    // and the families they resolve to are warmed at the common weights
 +    // (650: <b> in 500-weight text).
-+    auto warm = [&](const String& family, WebCore::FontSelectionValue weight) -> RefPtr<WebCore::Font> {
++    auto warm = [&](const String& family, WebCore::FontSelectionValue weight, bool italic = false) -> RefPtr<WebCore::Font> {
 +        description.setWeight(weight);
++        description.setIsItalic(italic);
 +        RefPtr font = WebCore::FontCache::forCurrentThread().fontForFamily(description, family);
 +        if (font)
 +            font->glyphDataForCharacter('a');
@@ -206209,16 +206274,28 @@ index 0000000000000000000000000000000000000000..dc5e70c41ae7c96a959c96bc5823a151
 +        { "serif"_s, { 400, 700, 0, 0, 0 } },
 +        { "monospace"_s, { 400, 0, 0, 0, 0 } },
 +    } };
++    // Pages also name the generic families themselves (Wikipedia: serif,
++    // sans-serif, monospace), in italic too: 9 more matches of its first
++    // layout on the ROCK 5.
 +    for (auto& generic : genericFamilies) {
 +        RefPtr font = warm(generic.name, WebCore::normalWeightValue());
 +        String resolved = font ? font->platformData().familyName() : String { };
-+        if (resolved.isEmpty())
-+            continue;
 +        for (int weight : generic.weights) {
-+            if (weight)
-+                warm(resolved, WebCore::FontSelectionValue(weight));
++            if (!weight)
++                continue;
++            if (weight == 400 || weight == 700) {
++                if (weight != 400)
++                    warm(generic.name, WebCore::FontSelectionValue(weight));
++                warm(generic.name, WebCore::FontSelectionValue(weight), true);
++            }
++            if (resolved.isEmpty())
++                continue;
++            warm(resolved, WebCore::FontSelectionValue(weight));
++            if (weight == 400 || weight == 700)
++                warm(resolved, WebCore::FontSelectionValue(weight), true);
 +        }
 +    }
++    description.setIsItalic(false);
 +
 +    // The first page's tiles: the painting threads would fault in fresh
 +    // memory for all of them at once, and page faults within one team convoy
