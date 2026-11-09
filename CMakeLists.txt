@@ -104,6 +104,16 @@ target_link_libraries(summit_extension_package_tests PRIVATE summit_core)
 add_test(NAME summit_extension_package COMMAND summit_extension_package_tests ${CMAKE_SOURCE_DIR}/tests/fixtures/extensions/package-icons)
 add_test(NAME summit_engine_options COMMAND ${CMAKE_COMMAND} -DINIT_CACHE=${CMAKE_SOURCE_DIR}/engine/arm64/rpi4-gl/init-cache-rtc.cmake
     -P ${CMAKE_SOURCE_DIR}/tests/EngineOptions.cmake)
+# Speech recognition (#159): the engine's end-of-speech detector, down-mix and
+# WAV reader are plain C++ in one header of the engine tree; tested here where
+# that tree has been prepared (tools/prepare-webkit.py).
+set(SUMMIT_ENGINE_SPEECH_DIR ${CMAKE_SOURCE_DIR}/.cache/WebKit/Source/WebCore/Modules/speech/haiku)
+if(EXISTS ${SUMMIT_ENGINE_SPEECH_DIR}/SpeechEndpointerHaiku.h)
+    add_executable(summit_engine_speech_endpoint_tests tests/EngineSpeechEndpointTests.cpp)
+    target_include_directories(summit_engine_speech_endpoint_tests PRIVATE ${SUMMIT_ENGINE_SPEECH_DIR})
+    target_compile_options(summit_engine_speech_endpoint_tests PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME summit_engine_speech_endpoint COMMAND summit_engine_speech_endpoint_tests)
+endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Haiku")
     if(SUMMIT_MODERN_WEBKIT)
         find_path(WEBKIT_MODERN_INCLUDE_DIR WebKit/WebKitView.h PATH_SUFFIXES webkit REQUIRED)

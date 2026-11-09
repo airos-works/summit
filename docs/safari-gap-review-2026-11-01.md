@@ -36,7 +36,7 @@ airos-works/haiku.
 | 156 | Reading List | done |
 | 157 | Profiles | done, one process per profile |
 | 158 | WebGPU | planning note only |
-| 159 | WebDriver / speech recognition | WebDriver done; recognition open |
+| 159 | WebDriver / speech recognition | WebDriver done; recognition on the branch `speech-recognition` (9 November, [speech-recognition.md](speech-recognition.md)): built and run in a VM, needs a model in the image and a test on a machine |
 | 160 | HTTPS-First | done |
 | 161 | SVG in saved web archives | done |
 

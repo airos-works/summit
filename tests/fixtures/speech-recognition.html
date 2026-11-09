@@ -1,0 +1,198 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Speech recognition</title>
+<style>
+  body { font: 15px sans-serif; margin: 20px; max-width: 900px; }
+  fieldset { border: 1px solid #999; margin: 0 0 12px; padding: 8px 12px; }
+  label { margin-right: 14px; }
+  button { font: inherit; margin-right: 6px; padding: 3px 12px; }
+  #state { font-weight: bold; }
+  #transcript { min-height: 3em; border: 1px solid #999; padding: 8px; white-space: pre-wrap; }
+  #transcript .interim { color: #888; }
+  #log { height: 22em; overflow: auto; border: 1px solid #999; padding: 8px; font: 12px monospace; white-space: pre-wrap; }
+  .error { color: #b00020; }
+</style>
+<h1>Speech recognition (webkitSpeechRecognition)</h1>
+<p>Manual test for Summit #159 (docs/speech-recognition.md). Start, speak, and
+watch the events: results that may still change are grey, final ones black. A
+recognition that is not continuous ends by itself when you stop speaking.
+The page must come from <code>http://localhost</code> or <code>https</code>.</p>
+<fieldset>
+  <label>Language <input id="lang" size="8" value="en-US"></label>
+  <label><input id="continuous" type="checkbox"> continuous</label>
+  <label><input id="interim" type="checkbox" checked> interim results</label>
+  <label>Alternatives <input id="alternatives" type="number" min="1" max="5" value="1" style="width: 3em"></label>
+</fieldset>
+<p>
+  <button id="start">Start</button>
+  <button id="stop">Stop</button>
+  <button id="abort">Abort</button>
+  <button id="clear">Clear</button>
+  <span id="state">loading</span>
+</p>
+<div id="transcript"></div>
+<p>Events (seconds since Start):</p>
+<div id="log"></div>
+<script>
+// For scripts (WebDriver "execute script", Summit's MCP): everything that
+// happened, and where the recognition stands.
+//   speechTest.events            [{ time, type, ... }]
+//   speechTest.status()          { supported, state, events, finals, interim, errors, ended }
+//   speechTest.start(options)    { lang, continuous, interimResults, maxAlternatives }
+//   speechTest.stop(), speechTest.abort()
+// The address can start one by itself:
+//   ?auto=1&lang=en-US&continuous=1&interim=0&stopAfter=20
+window.speechTest = { events: [], finals: [], interim: '', errors: [], state: 'idle', ended: 0, supported: false };
+
+const $ = id => document.getElementById(id);
+const Recognition = window.webkitSpeechRecognition || window.SpeechRecognition;
+let recognition = null;
+let startTime = 0;
+let stopTimer = 0;
+
+function setState(state) {
+  speechTest.state = state;
+  $('state').textContent = state;
+}
+
+function log(type, details = {}, isError = false) {
+  const time = startTime ? Math.round(performance.now() - startTime) / 1000 : 0;
+  speechTest.events.push({ time, type, ...details });
+  const line = document.createElement('div');
+  if (isError)
+    line.className = 'error';
+  const text = Object.keys(details).length ? ' ' + JSON.stringify(details) : '';
+  line.textContent = time.toFixed(2).padStart(7) + '  ' + type + text;
+  $('log').append(line);
+  $('log').scrollTop = $('log').scrollHeight;
+}
+
+function showTranscript() {
+  const box = $('transcript');
+  box.textContent = speechTest.finals.join('\n');
+  if (speechTest.interim) {
+    const span = document.createElement('span');
+    span.className = 'interim';
+    span.textContent = (speechTest.finals.length ? '\n' : '') + speechTest.interim;
+    box.append(span);
+  }
+}
+
+speechTest.status = () => ({
+  supported: speechTest.supported, state: speechTest.state, events: speechTest.events.length,
+  types: speechTest.events.map(event => event.type),
+  finals: speechTest.finals, interim: speechTest.interim, errors: speechTest.errors, ended: speechTest.ended
+});
+
+speechTest.start = (options = {}) => {
+  if (!Recognition) {
+    log('unsupported', { message: 'This browser has no webkitSpeechRecognition (the system has no recogniser, or the page is not a secure context)' }, true);
+    return false;
+  }
+  if (recognition && speechTest.state !== 'idle' && speechTest.state !== 'ended') {
+    log('ignored', { message: 'A recognition is going on' });
+    return false;
+  }
+  recognition = new Recognition();
+  recognition.lang = options.lang ?? $('lang').value;
+  recognition.continuous = options.continuous ?? $('continuous').checked;
+  recognition.interimResults = options.interimResults ?? $('interim').checked;
+  recognition.maxAlternatives = options.maxAlternatives ?? (Number($('alternatives').value) || 1);
+
+  for (const type of ['start', 'audiostart', 'soundstart', 'speechstart', 'speechend', 'soundend', 'audioend', 'nomatch']) {
+    recognition.addEventListener(type, () => {
+      log(type);
+      if (type === 'start')
+        setState('listening');
+    });
+  }
+  recognition.addEventListener('result', event => {
+    const results = [];
+    let interim = '';
+    for (let index = event.resultIndex; index < event.results.length; ++index) {
+      const result = event.results[index];
+      const alternatives = Array.from(result, alternative => ({ transcript: alternative.transcript, confidence: alternative.confidence }));
+      results.push({ index, isFinal: result.isFinal, alternatives });
+      if (result.isFinal)
+        speechTest.finals.push(result[0].transcript);
+      else
+        interim += result[0].transcript;
+    }
+    speechTest.interim = interim;
+    log('result', { resultIndex: event.resultIndex, length: event.results.length, results });
+    showTranscript();
+  });
+  recognition.addEventListener('error', event => {
+    speechTest.errors.push({ error: event.error, message: event.message });
+    log('error', { error: event.error, message: event.message }, true);
+  });
+  recognition.addEventListener('end', () => {
+    clearTimeout(stopTimer);
+    speechTest.interim = '';
+    ++speechTest.ended;
+    log('end');
+    setState('ended');
+    showTranscript();
+  });
+
+  startTime = performance.now();
+  setState('starting');
+  log('start() called', { lang: recognition.lang, continuous: recognition.continuous, interimResults: recognition.interimResults, maxAlternatives: recognition.maxAlternatives });
+  try {
+    recognition.start();
+  } catch (error) {
+    speechTest.errors.push({ error: 'exception', message: String(error) });
+    log('exception', { message: String(error) }, true);
+    setState('idle');
+    return false;
+  }
+  if (options.stopAfter > 0)
+    stopTimer = setTimeout(() => speechTest.stop(), options.stopAfter * 1000);
+  return true;
+};
+
+speechTest.stop = () => {
+  if (!recognition)
+    return;
+  log('stop() called');
+  recognition.stop();
+};
+
+speechTest.abort = () => {
+  if (!recognition)
+    return;
+  log('abort() called');
+  recognition.abort();
+};
+
+speechTest.clear = () => {
+  speechTest.events = [];
+  speechTest.finals = [];
+  speechTest.errors = [];
+  speechTest.interim = '';
+  speechTest.ended = 0;
+  $('log').textContent = '';
+  showTranscript();
+};
+
+$('start').onclick = () => speechTest.start();
+$('stop').onclick = () => speechTest.stop();
+$('abort').onclick = () => speechTest.abort();
+$('clear').onclick = () => speechTest.clear();
+
+speechTest.supported = !!Recognition;
+setState('idle');
+if (!Recognition)
+  log('unsupported', { secureContext: window.isSecureContext, message: 'No webkitSpeechRecognition here' }, true);
+else
+  log('ready', { interface: window.webkitSpeechRecognition ? 'webkitSpeechRecognition' : 'SpeechRecognition', secureContext: window.isSecureContext });
+
+const parameters = new URLSearchParams(location.search);
+const flag = (name, fallback) => parameters.has(name) ? parameters.get(name) !== '0' : fallback;
+if (parameters.has('lang'))
+  $('lang').value = parameters.get('lang');
+$('continuous').checked = flag('continuous', false);
+$('interim').checked = flag('interim', true);
+if (flag('auto', false))
+  speechTest.start({ stopAfter: Number(parameters.get('stopAfter')) || 0 });
+</script>
