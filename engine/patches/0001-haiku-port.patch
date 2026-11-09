@@ -206047,10 +206047,10 @@ index 0000000000000000000000000000000000000000..a150bd67553ae6f1864c655cd04be661
 +} // namespace WebKit
 diff --git a/Source/WebKit/WebProcess/haiku/WebProcessHaiku.cpp b/Source/WebKit/WebProcess/haiku/WebProcessHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..ddaa147dc62cbd26579ceb1e1319d2844a67f5a5
+index 0000000000000000000000000000000000000000..edd4181b87af35f9be5a01b0d55a3b5755d66fe7
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/haiku/WebProcessHaiku.cpp
-@@ -0,0 +1,258 @@
+@@ -0,0 +1,282 @@
 +/*
 + * Copyright (C) 2014,2019 Haiku, Inc.
 + *
@@ -206196,6 +206196,30 @@ index 0000000000000000000000000000000000000000..ddaa147dc62cbd26579ceb1e1319d284
 +        warm("sans-serif"_s, WebCore::FontSelectionValue(weight));
 +    warm("serif"_s, WebCore::normalWeightValue());
 +    warm("monospace"_s, WebCore::normalWeightValue());
++
++    // The first page's tiles: the painting threads would fault in fresh
++    // memory for all of them at once, and page faults within one team convoy
++    // on air/OS (four threads took twice as long as one for a new tab's 17
++    // tiles on the X399). Faulted in here on one thread, the allocator hands
++    // the same pages to the tile buffers: a new tab's first tiles in the VM
++    // 43 -> 26 ms. 24 MiB covers a full-HD window at 200 %, and the first
++    // page's tiles take it. SUMMIT_PREWARM_TILE_MEMORY=MiB (0: off).
++    static const size_t tileMemory = [] {
++        const char* value = getenv("SUMMIT_PREWARM_TILE_MEMORY");
++        return value ? static_cast<size_t>(atoi(value)) : 24;
++    }();
++    if (tileMemory) {
++        static constexpr size_t tileBytes = 512 * 512 * 4;
++        Vector<void*> blocks;
++        for (size_t i = 0; i < tileMemory * 1024 * 1024 / tileBytes; ++i) {
++            auto* block = static_cast<volatile uint8_t*>(fastMalloc(tileBytes));
++            for (size_t offset = 0; offset < tileBytes; offset += 4096)
++                block[offset] = 0;
++            blocks.append(const_cast<uint8_t*>(block));
++        }
++        for (auto* block : blocks)
++            fastFree(block);
++    }
 +    if (getenv("SUMMIT_NAV_TRACE"))
 +        fprintf(stderr, "Summit nav: spare web process %d warmed up in %.1f ms (fonts %.1f ms)\n", getpid(), (MonotonicTime::now() - start).milliseconds(), (MonotonicTime::now() - fontsStart).milliseconds());
 +}
