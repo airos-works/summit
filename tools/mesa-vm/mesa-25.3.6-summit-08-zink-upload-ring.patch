@@ -1,0 +1,104 @@
+--- a/src/gallium/drivers/zink/zink_resource.c
++++ b/src/gallium/drivers/zink/zink_resource.c
+@@ -2589,6 +2589,50 @@
+       templ.array_size = 1;
+       templ.flags = 0;
+ 
++#if DETECT_OS_HAIKU
++      /* A CPU write (texture_subdata without host image copy: every
++       * compositor tile upload) made a staging buffer of its own each time.
++       * Still busy when the next tile came, it was never reused from the
++       * buffer cache, and on Haiku each was a kernel area created and later
++       * deleted (X399, NVK: 57 % of the compositor in MotionMark's Design
++       * test was uploads, 8 % area deletion). Writes are suballocated from
++       * one mapped buffer instead, replaced when full; the transfers and the
++       * GPU's use keep a full one alive until they are done. Any thread may
++       * map (threaded-context uploads come from the application thread), so
++       * it belongs to the screen, under a lock.
++       * ZINK_HAIKU_IMAGE_UPLOAD_RING=0 allocates per map. */
++      static int upload_ring = -1;
++      if (upload_ring < 0) {
++         const char *value = getenv("ZINK_HAIKU_IMAGE_UPLOAD_RING");
++         upload_ring = !value || value[0] != '0';
++      }
++      static const unsigned upload_ring_size = 32 * 1024 * 1024;
++      if (upload_ring && !(usage & PIPE_MAP_READ) && templ.width0 <= upload_ring_size / 4) {
++         simple_mtx_lock(&screen->haiku_upload_lock);
++         unsigned offset = align(screen->haiku_upload_offset, 256);
++         if (!screen->haiku_upload || offset + templ.width0 > upload_ring_size) {
++            pipe_resource_reference(&screen->haiku_upload, NULL);
++            screen->haiku_upload_map = NULL;
++            struct pipe_resource ring = templ;
++            ring.width0 = upload_ring_size;
++            screen->haiku_upload = zink_resource_create(pctx->screen, &ring);
++            if (screen->haiku_upload)
++               screen->haiku_upload_map = map_resource(screen, zink_resource(screen->haiku_upload));
++            if (!screen->haiku_upload_map)
++               pipe_resource_reference(&screen->haiku_upload, NULL);
++            offset = 0;
++         }
++         if (screen->haiku_upload_map) {
++            pipe_resource_reference(&trans->staging_res, screen->haiku_upload);
++            trans->offset = offset;
++            ptr = screen->haiku_upload_map + offset;
++            screen->haiku_upload_offset = offset + templ.width0;
++         }
++         simple_mtx_unlock(&screen->haiku_upload_lock);
++         if (trans->staging_res)
++            goto staged;
++      }
++#endif
+       trans->staging_res = zink_resource_create(pctx->screen, &templ);
+       if (!trans->staging_res)
+          goto fail;
+@@ -2606,6 +2650,10 @@
+       }
+ 
+       ptr = map_resource(screen, staging_res);
++#if DETECT_OS_HAIKU
++staged:
++      ;
++#endif
+    } else {
+       assert(res->linear);
+       ptr = map_resource(screen, res);
+--- a/src/gallium/drivers/zink/zink_screen.c
++++ b/src/gallium/drivers/zink/zink_screen.c
+@@ -1523,6 +1523,10 @@
+ {
+    struct zink_screen *screen = zink_screen(pscreen);
+ 
++#if DETECT_OS_HAIKU
++   pipe_resource_reference(&screen->haiku_upload, NULL);
++#endif
++
+    if (!screen->device_lost && screen->queue) {
+       // Multiple screens can share a queue, so we need to lock queue_lock even
+       // in the screen destructor
+@@ -3745,6 +3749,9 @@
+    }
+ 
+    simple_mtx_init(&screen->free_batch_states_lock, mtx_plain);
++#if DETECT_OS_HAIKU
++   simple_mtx_init(&screen->haiku_upload_lock, mtx_plain);
++#endif
+    simple_mtx_init(&screen->active_batch_states_lock, mtx_plain);
+    simple_mtx_init(&screen->dt_lock, mtx_plain);
+ 
+--- a/src/gallium/drivers/zink/zink_types.h
++++ b/src/gallium/drivers/zink/zink_types.h
+@@ -1364,6 +1364,14 @@
+ };
+ 
+ struct zink_screen {
++#if DETECT_OS_HAIKU
++   /* Haiku: staging for CPU writes to images, suballocated from one mapped
++    * buffer at a time (zink_image_map); any thread, under the lock. */
++   simple_mtx_t haiku_upload_lock;
++   struct pipe_resource *haiku_upload;
++   uint8_t *haiku_upload_map;
++   unsigned haiku_upload_offset;
++#endif
+    struct pipe_screen base;
+ 
+    const char *vendor_name;
