@@ -206047,10 +206047,10 @@ index 0000000000000000000000000000000000000000..a150bd67553ae6f1864c655cd04be661
 +} // namespace WebKit
 diff --git a/Source/WebKit/WebProcess/haiku/WebProcessHaiku.cpp b/Source/WebKit/WebProcess/haiku/WebProcessHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..edd4181b87af35f9be5a01b0d55a3b5755d66fe7
+index 0000000000000000000000000000000000000000..dc5e70c41ae7c96a959c96bc5823a15165541929
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/haiku/WebProcessHaiku.cpp
-@@ -0,0 +1,282 @@
+@@ -0,0 +1,305 @@
 +/*
 + * Copyright (C) 2014,2019 Haiku, Inc.
 + *
@@ -206186,16 +206186,39 @@ index 0000000000000000000000000000000000000000..edd4181b87af35f9be5a01b0d55a3b57
 +    WebCore::FontCascadeDescription description;
 +    description.setUsedSize(16);
 +    // The families and weights of the start page (resources/start.html) and
-+    // of most pages' body text.
-+    auto warm = [&](ASCIILiteral family, WebCore::FontSelectionValue weight) {
++    // of most pages' body text. A page asks for what the preferences make of
++    // a generic family (Summit's sans-serif is "Noto Sans"), not for the
++    // generic name, and each family and style is a fontconfig match of 5-6 ms
++    // on the ROCK 5: the start page's four "Noto Sans" weights were 23 ms of
++    // a new tab's first layout. So the generic families are resolved here,
++    // and the families they resolve to are warmed at the common weights
++    // (650: <b> in 500-weight text).
++    auto warm = [&](const String& family, WebCore::FontSelectionValue weight) -> RefPtr<WebCore::Font> {
 +        description.setWeight(weight);
-+        if (RefPtr font = WebCore::FontCache::forCurrentThread().fontForFamily(description, family))
++        RefPtr font = WebCore::FontCache::forCurrentThread().fontForFamily(description, family);
++        if (font)
 +            font->glyphDataForCharacter('a');
++        return font;
 +    };
-+    for (int weight : { 400, 500, 600, 700 })
-+        warm("sans-serif"_s, WebCore::FontSelectionValue(weight));
-+    warm("serif"_s, WebCore::normalWeightValue());
-+    warm("monospace"_s, WebCore::normalWeightValue());
++    struct GenericFamily {
++        ASCIILiteral name;
++        std::array<int, 5> weights; // 0 ends the list
++    };
++    static constexpr std::array<GenericFamily, 3> genericFamilies { {
++        { "sans-serif"_s, { 400, 500, 600, 650, 700 } },
++        { "serif"_s, { 400, 700, 0, 0, 0 } },
++        { "monospace"_s, { 400, 0, 0, 0, 0 } },
++    } };
++    for (auto& generic : genericFamilies) {
++        RefPtr font = warm(generic.name, WebCore::normalWeightValue());
++        String resolved = font ? font->platformData().familyName() : String { };
++        if (resolved.isEmpty())
++            continue;
++        for (int weight : generic.weights) {
++            if (weight)
++                warm(resolved, WebCore::FontSelectionValue(weight));
++        }
++    }
 +
 +    // The first page's tiles: the painting threads would fault in fresh
 +    // memory for all of them at once, and page faults within one team convoy
