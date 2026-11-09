@@ -14874,6 +14874,2540 @@ index 5b9626762cfaab44c439d060e2c5e1b0931b8032..0e461e222cf6ec0f3ef34648ad3a5996
      });
      return visibleTypes->contains(type);
  }
+diff --git a/Source/WebCore/Modules/speech/SpeechRecognitionCaptureSource.cpp b/Source/WebCore/Modules/speech/SpeechRecognitionCaptureSource.cpp
+index e7e6269a695e0b84577d547951c6c555bffe772c..9c8002675cddfc787b639c617971a6b74ba55ac7 100644
+--- a/Source/WebCore/Modules/speech/SpeechRecognitionCaptureSource.cpp
++++ b/Source/WebCore/Modules/speech/SpeechRecognitionCaptureSource.cpp
+@@ -33,6 +33,10 @@
+ #include "SpeechRecognitionUpdate.h"
+ #endif
+ 
++#if ENABLE(MEDIA_STREAM) && PLATFORM(HAIKU)
++#include "HaikuCaptureSources.h"
++#endif
++
+ namespace WebCore {
+ 
+ WTF_MAKE_TZONE_ALLOCATED_IMPL(SpeechRecognitionCaptureSource);
+@@ -48,6 +52,12 @@ void SpeechRecognitionCaptureSource::mute()
+ 
+ std::optional<CaptureDevice> SpeechRecognitionCaptureSource::findCaptureDevice()
+ {
++#if PLATFORM(HAIKU)
++    // For tests without a microphone: a recording stands in for it
++    // (SUMMIT_RECOGNITION_WAV, HaikuSpeechTestAudioSource).
++    if (auto device = HaikuSpeechTestAudioSource::device())
++        return device;
++#endif
+     std::optional<CaptureDevice> captureDevice;
+     auto devices = RealtimeMediaSourceCenter::singleton().audioCaptureFactory().audioCaptureDeviceManager().captureDevices();
+     for (auto device : devices) {
+@@ -67,6 +77,10 @@ std::optional<CaptureDevice> SpeechRecognitionCaptureSource::findCaptureDevice()
+ 
+ CaptureSourceOrError SpeechRecognitionCaptureSource::createRealtimeMediaSource(const CaptureDevice& captureDevice, PageIdentifier pageIdentifier)
+ {
++#if PLATFORM(HAIKU)
++    if (HaikuSpeechTestAudioSource::isTestDevice(captureDevice))
++        return HaikuSpeechTestAudioSource::create(captureDevice, { "SpeechID"_s, "SpeechID"_s }, pageIdentifier);
++#endif
+     return RealtimeMediaSourceCenter::singleton().audioCaptureFactory().createAudioCaptureSource(captureDevice, { "SpeechID"_s, "SpeechID"_s }, { }, pageIdentifier);
+ }
+ 
+diff --git a/Source/WebCore/Modules/speech/SpeechRecognitionCaptureSourceImpl.cpp b/Source/WebCore/Modules/speech/SpeechRecognitionCaptureSourceImpl.cpp
+index 876de637d414257bae23157b04a23dd5b0c7d2b6..bbe706810f03ad3147b48e348d2bac225c6beded 100644
+--- a/Source/WebCore/Modules/speech/SpeechRecognitionCaptureSourceImpl.cpp
++++ b/Source/WebCore/Modules/speech/SpeechRecognitionCaptureSourceImpl.cpp
+@@ -37,6 +37,12 @@
+ #include "WebAudioBufferList.h"
+ #endif
+ 
++#if PLATFORM(HAIKU)
++#include "HaikuAudioData.h"
++#include <wtf/MainThread.h>
++#include <wtf/MediaTime.h>
++#endif
++
+ namespace WebCore {
+ 
+ #if !RELEASE_LOG_DISABLED
+@@ -147,6 +153,21 @@ void SpeechRecognitionCaptureSourceImpl::audioSamplesAvailable(const WTF::MediaT
+         if (CheckedPtr checkedThis = weakThis.get())
+             checkedThis->pullSamplesAndCallDataCallback(dataSource.get(), time, audioDescription, sampleCount);
+     });
++#elif PLATFORM(HAIKU)
++    // The capture node's thread (Summit #159). The samples are the caller's
++    // for the time of this call only, so a copy goes to the main thread,
++    // where the recogniser's task takes them.
++    auto* audio = dynamicDowncast<HaikuAudioData>(data);
++    if (!audio)
++        return;
++    callOnMainThread([weakThis = WeakPtr { *this }, samples = Vector<float>(audio->samples()), channels = audio->channelCount(), rate = description.sampleRate(), time, sampleCount] {
++        CheckedPtr checkedThis = weakThis.get();
++        if (!checkedThis)
++            return;
++        HaikuAudioData data(samples.span(), channels);
++        HaikuAudioStreamDescription description(rate, channels);
++        checkedThis->m_dataCallback(time, data, description, sampleCount);
++    });
+ #endif
+ }
+ 
+diff --git a/Source/WebCore/Modules/speech/SpeechRecognizer.cpp b/Source/WebCore/Modules/speech/SpeechRecognizer.cpp
+index f81e5ccc3d4645540070d46e0dae64899f0697ac..4bb216cd2e3170b0263b706eec2b306e73603a99 100644
+--- a/Source/WebCore/Modules/speech/SpeechRecognizer.cpp
++++ b/Source/WebCore/Modules/speech/SpeechRecognizer.cpp
+@@ -37,6 +37,10 @@
+ #include <pal/cf/CoreMediaSoftLink.h>
+ #endif
+ 
++#if PLATFORM(HAIKU) && ENABLE(MEDIA_STREAM)
++#include "SpeechRecognitionTaskHaiku.h"
++#endif
++
+ namespace WebCore {
+ 
+ WTF_MAKE_TZONE_ALLOCATED_IMPL(SpeechRecognizer);
+@@ -50,7 +54,17 @@ SpeechRecognizer::SpeechRecognizer(DelegateCallback&& delegateCallback, Ref<Spee
+ {
+ }
+ 
++#if PLATFORM(HAIKU) && ENABLE(MEDIA_STREAM)
++SpeechRecognizer::~SpeechRecognizer()
++{
++    // The page closed, or another recognition takes this one's place: the
++    // system's recogniser is given up without a word to anybody.
++    if (RefPtr task = std::exchange(m_task, nullptr))
++        task->invalidate();
++}
++#else
+ SpeechRecognizer::~SpeechRecognizer() = default;
++#endif
+ 
+ void SpeechRecognizer::abort(std::optional<SpeechRecognitionError>&& error)
+ {
+@@ -61,6 +75,11 @@ void SpeechRecognizer::abort(std::optional<SpeechRecognitionError>&& error)
+     if (error)
+         m_delegateCallback(SpeechRecognitionUpdate::createError(clientIdentifier(), *error));
+ 
++#if PLATFORM(HAIKU) && ENABLE(MEDIA_STREAM)
++    // speechend and soundend come before audioend.
++    if (RefPtr task = m_task)
++        task->audioWillEnd();
++#endif
+     stopCapture();
+     abortRecognition();
+ }
+@@ -71,6 +90,10 @@ void SpeechRecognizer::stop()
+         return;
+     m_state = State::Stopping;
+ 
++#if PLATFORM(HAIKU) && ENABLE(MEDIA_STREAM)
++    if (RefPtr task = m_task)
++        task->audioWillEnd();
++#endif
+     stopCapture();
+     stopRecognition();
+ }
+@@ -95,8 +118,17 @@ void SpeechRecognizer::prepareForDestruction()
+ void SpeechRecognizer::start(Ref<RealtimeMediaSource>&& source, bool mockSpeechRecognitionEnabled)
+ {
+     if (!startRecognition(mockSpeechRecognitionEnabled, clientIdentifier(), m_request->lang(), m_request->continuous(), m_request->interimResults(), m_request->maxAlternatives())) {
++#if PLATFORM(HAIKU)
++        // Why not (no recogniser on this system, no model installed, a
++        // language no model knows), and then the end, which a page expects
++        // after an error.
++        auto error = std::exchange(m_startError, std::nullopt).value_or(SpeechRecognitionError { SpeechRecognitionErrorType::ServiceNotAllowed, "Failed to start recognition"_s });
++        m_delegateCallback(SpeechRecognitionUpdate::createError(clientIdentifier(), WTF::move(error)));
++        m_delegateCallback(SpeechRecognitionUpdate::create(clientIdentifier(), SpeechRecognitionUpdateType::End));
++#else
+         auto error = SpeechRecognitionError { SpeechRecognitionErrorType::ServiceNotAllowed, "Failed to start recognition"_s };
+         m_delegateCallback(SpeechRecognitionUpdate::createError(clientIdentifier(), WTF::move(error)));
++#endif
+         return;
+     }
+ 
+@@ -131,7 +163,7 @@ void SpeechRecognizer::stopCapture()
+     m_delegateCallback(SpeechRecognitionUpdate::create(clientIdentifier(), SpeechRecognitionUpdateType::AudioEnd));
+ }
+ 
+-#if !HAVE(SPEECHRECOGNIZER)
++#if !HAVE(SPEECHRECOGNIZER) && !(PLATFORM(HAIKU) && ENABLE(MEDIA_STREAM))
+ 
+ void SpeechRecognizer::dataCaptured(const MediaTime&, const PlatformAudioData&, const AudioStreamDescription&, size_t)
+ {
+diff --git a/Source/WebCore/Modules/speech/SpeechRecognizer.h b/Source/WebCore/Modules/speech/SpeechRecognizer.h
+index 53fa7791a0bb4d463616114abbfc5b51d4809f68..6131526a56721f529ccaa34b71a46e1eb57039e8 100644
+--- a/Source/WebCore/Modules/speech/SpeechRecognizer.h
++++ b/Source/WebCore/Modules/speech/SpeechRecognizer.h
+@@ -43,6 +43,9 @@ namespace WebCore {
+ 
+ class SpeechRecognitionRequest;
+ class SpeechRecognitionUpdate;
++#if PLATFORM(HAIKU) && ENABLE(MEDIA_STREAM)
++class SpeechRecognitionTaskHaiku;
++#endif
+ 
+ class SpeechRecognizer final : public CanMakeWeakPtr<SpeechRecognizer>, public CanMakeCheckedPtr<SpeechRecognizer> {
+     WTF_MAKE_TZONE_ALLOCATED_EXPORT(SpeechRecognizer, WEBCORE_EXPORT);
+@@ -64,6 +67,12 @@ public:
+ 
+     void setInactive() { m_state = State::Inactive; }
+ 
++#if PLATFORM(HAIKU) && ENABLE(MEDIA_STREAM)
++    // Whether this system has a recogniser (Summit #159): the Neural Kit's,
++    // reached through libsummitspeech.so. Says nothing about models.
++    WEBCORE_EXPORT static bool platformRecognizerAvailable();
++#endif
++
+ private:
+     enum class State {
+         Inactive,
+@@ -90,6 +99,13 @@ private:
+     RetainPtr<WebSpeechRecognizerTask> m_task;
+     CMTime m_currentAudioSampleTime;
+ #endif
++
++#if PLATFORM(HAIKU) && ENABLE(MEDIA_STREAM)
++    // The system's recogniser at work (haiku/SpeechRecognizerHaiku.cpp), and
++    // why it could not be started.
++    RefPtr<SpeechRecognitionTaskHaiku> m_task;
++    std::optional<SpeechRecognitionError> m_startError;
++#endif
+ };
+ 
+ } // namespace WebCore
+diff --git a/Source/WebCore/Modules/speech/haiku/SpeechEndpointerHaiku.h b/Source/WebCore/Modules/speech/haiku/SpeechEndpointerHaiku.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..9070d2e03aee699d22f6951de04213b47358245c
+--- /dev/null
++++ b/Source/WebCore/Modules/speech/haiku/SpeechEndpointerHaiku.h
+@@ -0,0 +1,394 @@
++/*
++ * Copyright (C) 2026 Summit contributors.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHORS ``AS IS'' AND ANY EXPRESS OR
++ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
++ * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
++ */
++
++#pragma once
++
++// The parts of speech recognition on Haiku (Summit #159) that are plain
++// arithmetic: bringing captured audio to one channel, deciding where speech
++// begins and ends, and reading a WAV file. Only the C++ standard library is
++// used, so that tests/EngineSpeechEndpointTests.cpp compiles this file as it
++// is, on any machine.
++
++#include <algorithm>
++#include <cmath>
++#include <cstddef>
++#include <cstdint>
++#include <cstring>
++#include <vector>
++
++namespace WebCore {
++
++// Interleaved samples to one channel: the mean of the channels of each frame.
++inline void speechDownmixToMono(const float* interleaved, size_t frames, unsigned channels, std::vector<float>& mono)
++{
++    mono.resize(frames);
++    if (!channels) {
++        std::fill(mono.begin(), mono.end(), 0.f);
++        return;
++    }
++    if (channels == 1) {
++        std::copy(interleaved, interleaved + frames, mono.begin());
++        return;
++    }
++    float scale = 1.f / channels;
++    for (size_t frame = 0; frame < frames; ++frame) {
++        float sum = 0;
++        for (unsigned channel = 0; channel < channels; ++channel)
++            sum += interleaved[frame * channels + channel];
++        mono[frame] = sum * scale;
++    }
++}
++
++// Levels are root mean square values of samples between -1 and 1.
++struct SpeechEndpointerSettings {
++    // The length of the stretches of audio whose level is taken.
++    double frameDuration { 0.02 };
++    // Sound has to last this long to count as the beginning of speech
++    // (a click or a key press does not).
++    double speechOnset { 0.12 };
++    // Quiet of this length after speech ends what was said.
++    double trailingSilence { 0.9 };
++    // Nothing quieter is speech, about -50 dBFS.
++    float floorLevel { 0.003f };
++    // What the background noise is taken to be at most, about -42 dBFS:
++    // a level above it is never learned as noise, so speech that goes on
++    // from the first sample is still heard as speech.
++    float maximumNoiseLevel { 0.008f };
++    // Speech begins this far above the background noise, and goes on while
++    // the level is this far above it.
++    float onsetRatio { 3.5f };
++    float releaseRatio { 2.f };
++};
++
++// Tells speech from quiet by the level of the sound against the level of the
++// background. The background is what the level keeps coming back to: the
++// estimate follows a quieter level quickly and a louder one slowly, and
++// never above maximumNoiseLevel, so the gaps between words pull it down to
++// the room's level while speech raises it only a little. The system's
++// recogniser has no voice activity detection, and a recognition that is not
++// continuous ends when the person stops speaking.
++class SpeechEndpointer {
++public:
++    enum class Event : uint8_t { SpeechStart, SpeechEnd };
++
++    explicit SpeechEndpointer(const SpeechEndpointerSettings& settings = { })
++        : m_settings(settings)
++    {
++    }
++
++    const SpeechEndpointerSettings& settings() const { return m_settings; }
++
++    // Forgets everything, the background level too.
++    void reset()
++    {
++        m_frameSum = 0;
++        m_frameFill = 0;
++        m_noiseLevel = -1;
++        m_lastLevel = 0;
++        m_inSpeech = false;
++        m_voicedFrames = 0;
++        m_quietFrames = 0;
++        m_samples = 0;
++        m_lastSpeechSample = 0;
++        m_speechStartSample = 0;
++        m_everSpoke = false;
++    }
++
++    // Samples of one channel. The handler is called with each event and the
++    // number of samples of this call that came before it.
++    template<typename Handler> void process(const float* samples, size_t count, double sampleRate, Handler&& handler)
++    {
++        if (sampleRate <= 0)
++            return;
++        if (sampleRate != m_sampleRate) {
++            // Levels and the background stay; the frame in progress does not.
++            m_sampleRate = sampleRate;
++            m_frameSize = std::max<size_t>(1, static_cast<size_t>(std::lround(sampleRate * m_settings.frameDuration)));
++            m_frameSum = 0;
++            m_frameFill = 0;
++        }
++        for (size_t index = 0; index < count; ++index) {
++            double sample = samples[index];
++            m_frameSum += sample * sample;
++            ++m_samples;
++            if (++m_frameFill < m_frameSize)
++                continue;
++            float level = static_cast<float>(std::sqrt(m_frameSum / m_frameFill));
++            m_frameSum = 0;
++            m_frameFill = 0;
++            frameMeasured(level, index + 1, handler);
++        }
++    }
++
++    bool isInSpeech() const { return m_inSpeech; }
++    // Whether speech began at any time since reset().
++    bool everSpoke() const { return m_everSpoke; }
++    double secondsProcessed() const { return m_sampleRate > 0 ? m_samples / m_sampleRate : 0; }
++    // Since the last sound that counted as speech; since reset() when there
++    // was none.
++    double secondsSinceSpeech() const { return m_sampleRate > 0 ? (m_samples - m_lastSpeechSample) / m_sampleRate : 0; }
++    // How long the speech that is going on has lasted.
++    double secondsInSpeech() const { return m_inSpeech && m_sampleRate > 0 ? (m_samples - m_speechStartSample) / m_sampleRate : 0; }
++    // The level of the last frame, and what the background is taken to be
++    // (the floor before any quiet was heard).
++    float lastLevel() const { return m_lastLevel; }
++    float noiseLevel() const { return std::max(m_noiseLevel, 0.f); }
++    float onsetThreshold() const { return std::max(m_settings.floorLevel, noiseLevel() * m_settings.onsetRatio); }
++    float releaseThreshold() const { return std::max(m_settings.floorLevel, noiseLevel() * m_settings.releaseRatio); }
++
++private:
++    template<typename Handler> void frameMeasured(float level, size_t offset, Handler&& handler)
++    {
++        m_lastLevel = level;
++        learnNoise(level);
++        bool voiced = level > (m_inSpeech ? releaseThreshold() : onsetThreshold());
++
++        if (!m_inSpeech) {
++            if (!voiced) {
++                m_voicedFrames = 0;
++                return;
++            }
++            if (++m_voicedFrames >= frames(m_settings.speechOnset)) {
++                m_inSpeech = true;
++                m_everSpoke = true;
++                m_quietFrames = 0;
++                m_speechStartSample = m_samples;
++                m_lastSpeechSample = m_samples;
++                handler(Event::SpeechStart, offset);
++            }
++            return;
++        }
++
++        if (voiced) {
++            m_quietFrames = 0;
++            m_lastSpeechSample = m_samples;
++            return;
++        }
++        if (++m_quietFrames >= frames(m_settings.trailingSilence)) {
++            m_inSpeech = false;
++            m_voicedFrames = 0;
++            m_quietFrames = 0;
++            handler(Event::SpeechEnd, offset);
++        }
++    }
++
++    // How many frames a duration is, at least one.
++    unsigned frames(double seconds) const
++    {
++        return std::max(1u, static_cast<unsigned>(std::ceil(seconds / m_settings.frameDuration - 1e-6)));
++    }
++
++    void learnNoise(float level)
++    {
++        level = std::min(level, m_settings.maximumNoiseLevel);
++        if (m_noiseLevel < 0) {
++            m_noiseLevel = level;
++            return;
++        }
++        // Down to a quieter level within a few frames (one frame of nothing,
++        // a dropped buffer, does not make the room silent); up to a louder
++        // one in about a second.
++        double rate = level < m_noiseLevel ? 0.3 : std::min(1., m_settings.frameDuration);
++        m_noiseLevel += (level - m_noiseLevel) * static_cast<float>(rate);
++    }
++
++    SpeechEndpointerSettings m_settings;
++    double m_sampleRate { 0 };
++    size_t m_frameSize { 1 };
++    double m_frameSum { 0 };
++    size_t m_frameFill { 0 };
++    float m_noiseLevel { -1 };
++    float m_lastLevel { 0 };
++    bool m_inSpeech { false };
++    bool m_everSpoke { false };
++    unsigned m_voicedFrames { 0 };
++    unsigned m_quietFrames { 0 };
++    uint64_t m_samples { 0 };
++    uint64_t m_lastSpeechSample { 0 };
++    uint64_t m_speechStartSample { 0 };
++};
++
++// The last stretch of audio that was not taken for speech, so that the
++// beginning of a word is not lost to the time it takes to notice it.
++class SpeechPreRoll {
++public:
++    void setCapacity(size_t samples)
++    {
++        m_capacity = samples;
++        trim();
++    }
++
++    void append(const float* samples, size_t count)
++    {
++        if (count >= m_capacity) {
++            m_samples.assign(samples + (count - m_capacity), samples + count);
++            return;
++        }
++        m_samples.insert(m_samples.end(), samples, samples + count);
++        trim();
++    }
++
++    const std::vector<float>& samples() const { return m_samples; }
++    void clear() { m_samples.clear(); }
++
++private:
++    void trim()
++    {
++        if (m_samples.size() > m_capacity)
++            m_samples.erase(m_samples.begin(), m_samples.begin() + (m_samples.size() - m_capacity));
++    }
++
++    std::vector<float> m_samples;
++    size_t m_capacity { 0 };
++};
++
++// A RIFF/WAVE file's sample format and where its samples are.
++struct SpeechWavInfo {
++    // 1: integers, 3: floating point
++    uint16_t encoding { 0 };
++    uint16_t channels { 0 };
++    uint16_t bitsPerSample { 0 };
++    uint32_t sampleRate { 0 };
++    size_t dataOffset { 0 };
++    size_t dataSize { 0 };
++
++    size_t bytesPerFrame() const { return static_cast<size_t>(channels) * (bitsPerSample / 8); }
++    size_t frameCount() const { return bytesPerFrame() ? dataSize / bytesPerFrame() : 0; }
++};
++
++namespace SpeechWavInternal {
++
++inline uint16_t read16(const uint8_t* bytes) { return static_cast<uint16_t>(bytes[0] | (bytes[1] << 8)); }
++inline uint32_t read32(const uint8_t* bytes) { return static_cast<uint32_t>(bytes[0]) | (static_cast<uint32_t>(bytes[1]) << 8) | (static_cast<uint32_t>(bytes[2]) << 16) | (static_cast<uint32_t>(bytes[3]) << 24); }
++
++} // namespace SpeechWavInternal
++
++// Finds the format and the samples of a WAV file in memory: 8, 16, 24 or 32
++// bit integers or 32 bit floating point, any number of channels up to 8.
++// When it returns false, `error` says why (a string constant).
++inline bool speechParseWav(const uint8_t* bytes, size_t size, SpeechWavInfo& info, const char*& error)
++{
++    using namespace SpeechWavInternal;
++    info = { };
++    if (size < 12 || std::memcmp(bytes, "RIFF", 4) || std::memcmp(bytes + 8, "WAVE", 4)) {
++        error = "not a RIFF/WAVE file";
++        return false;
++    }
++    bool haveFormat = false;
++    size_t position = 12;
++    while (position + 8 <= size) {
++        const uint8_t* chunk = bytes + position;
++        size_t chunkSize = read32(chunk + 4);
++        size_t body = position + 8;
++        if (!std::memcmp(chunk, "fmt ", 4)) {
++            if (chunkSize < 16 || body + 16 > size) {
++                error = "the format chunk is too short";
++                return false;
++            }
++            info.encoding = read16(bytes + body);
++            info.channels = read16(bytes + body + 2);
++            info.sampleRate = read32(bytes + body + 4);
++            info.bitsPerSample = read16(bytes + body + 14);
++            // WAVE_FORMAT_EXTENSIBLE: the encoding is the beginning of the
++            // sub-format.
++            if (info.encoding == 0xFFFE && chunkSize >= 40 && body + 40 <= size)
++                info.encoding = read16(bytes + body + 24);
++            haveFormat = true;
++        } else if (!std::memcmp(chunk, "data", 4)) {
++            if (!haveFormat) {
++                error = "the samples come before the format";
++                return false;
++            }
++            info.dataOffset = body;
++            // A recording that was cut off, or one written to a pipe, says
++            // more than there is.
++            info.dataSize = std::min(chunkSize, size - body);
++            break;
++        }
++        // Chunks are padded to an even length.
++        size_t next = body + chunkSize + (chunkSize & 1);
++        if (next <= position)
++            break;
++        position = next;
++    }
++    if (!haveFormat || !info.dataOffset) {
++        error = "no samples in the file";
++        return false;
++    }
++    bool integers = info.encoding == 1 && (info.bitsPerSample == 8 || info.bitsPerSample == 16 || info.bitsPerSample == 24 || info.bitsPerSample == 32);
++    bool floats = info.encoding == 3 && info.bitsPerSample == 32;
++    if (!integers && !floats) {
++        error = "only 8, 16, 24 and 32 bit PCM and 32 bit float are read";
++        return false;
++    }
++    if (!info.channels || info.channels > 8 || info.sampleRate < 4000 || info.sampleRate > 384000) {
++        error = "the channel count or the sample rate is out of range";
++        return false;
++    }
++    info.dataSize -= info.dataSize % info.bytesPerFrame();
++    error = nullptr;
++    return true;
++}
++
++// `frames` frames of the file from `firstFrame` on, as interleaved float.
++// Returns the number of frames converted (fewer at the end of the file).
++inline size_t speechConvertWavFrames(const uint8_t* bytes, const SpeechWavInfo& info, size_t firstFrame, size_t frames, std::vector<float>& interleaved)
++{
++    using namespace SpeechWavInternal;
++    size_t available = info.frameCount();
++    if (firstFrame >= available) {
++        interleaved.clear();
++        return 0;
++    }
++    frames = std::min(frames, available - firstFrame);
++    size_t count = frames * info.channels;
++    interleaved.resize(count);
++    const uint8_t* in = bytes + info.dataOffset + firstFrame * info.bytesPerFrame();
++    if (info.encoding == 3) {
++        for (size_t i = 0; i < count; ++i) {
++            uint32_t bits = read32(in + i * 4);
++            float value;
++            std::memcpy(&value, &bits, sizeof(value));
++            interleaved[i] = value;
++        }
++        return frames;
++    }
++    switch (info.bitsPerSample) {
++    case 8:
++        for (size_t i = 0; i < count; ++i)
++            interleaved[i] = (static_cast<int>(in[i]) - 128) / 128.f;
++        break;
++    case 16:
++        for (size_t i = 0; i < count; ++i)
++            interleaved[i] = static_cast<int16_t>(read16(in + i * 2)) / 32768.f;
++        break;
++    case 24:
++        for (size_t i = 0; i < count; ++i) {
++            // Into the upper three bytes, so that the sign comes along.
++            int32_t value = static_cast<int32_t>((static_cast<uint32_t>(in[i * 3]) << 8) | (static_cast<uint32_t>(in[i * 3 + 1]) << 16) | (static_cast<uint32_t>(in[i * 3 + 2]) << 24));
++            interleaved[i] = value / 2147483648.f;
++        }
++        break;
++    case 32:
++        for (size_t i = 0; i < count; ++i)
++            interleaved[i] = static_cast<int32_t>(read32(in + i * 4)) / 2147483648.f;
++        break;
++    }
++    return frames;
++}
++
++} // namespace WebCore
+diff --git a/Source/WebCore/Modules/speech/haiku/SpeechRecognitionShimHaiku.cpp b/Source/WebCore/Modules/speech/haiku/SpeechRecognitionShimHaiku.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..e50da07e117d9b09646d99edd7b9afc388ece225
+--- /dev/null
++++ b/Source/WebCore/Modules/speech/haiku/SpeechRecognitionShimHaiku.cpp
+@@ -0,0 +1,947 @@
++/*
++ * Copyright (C) 2026 Summit contributors.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHORS ``AS IS'' AND ANY EXPRESS OR
++ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
++ * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
++ */
++
++// libsummitspeech.so (Summit #159): see SpeechRecognitionShimHaiku.h. This
++// file is not part of the engine's libraries; it is built on its own, only
++// where the system has the Neural Kit's speech recogniser, and links
++// libneural.so. It uses the system's API alone, nothing of WebKit.
++//
++// A session has a BLooper: the model is loaded on its thread, and the
++// recogniser's messages arrive there. One recogniser stays loaded for a while
++// after its session (a page that dictates starts one recognition after the
++// other, and loading the model reads 150 MB).
++
++#include "SpeechRecognitionShimHaiku.h"
++
++#include <Handler.h>
++#include <LocaleRoster.h>
++#include <Looper.h>
++#include <MediaDefs.h>
++#include <Message.h>
++#include <Messenger.h>
++#include <OS.h>
++#include <Path.h>
++#include <String.h>
++#include <StringList.h>
++#include <neural/NeuralDefs.h>
++#include <neural/SpeechRecognizer.h>
++
++#include <ctype.h>
++#include <deque>
++#include <new>
++#include <pthread.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <vector>
++
++namespace {
++
++const uint32 kMessageLoad = 'ssLd';
++const uint32 kMessageQuit = 'ssQt';
++
++// Audio that may wait for the model (while it loads, or while the utterance
++// before is recognised).
++const double kMaximumQueuedSeconds = 120;
++
++// How long a recogniser stays loaded after its session.
++const bigtime_t kDefaultKeepLoaded = 5 * 60 * 1000000LL;
++
++bool
++trace_enabled()
++{
++	static int enabled = -1;
++	if (enabled < 0) {
++		const char* value = getenv("SUMMIT_RECOGNITION_TRACE");
++		enabled = value != NULL && value[0] != '\0' && strcmp(value, "0") != 0;
++	}
++	return enabled == 1;
++}
++
++
++#define TRACE(format...) \
++	do { \
++		if (trace_enabled()) { \
++			fprintf(stderr, "Summit speech recognition (shim): " format); \
++			fputc('\n', stderr); \
++		} \
++	} while (0)
++#define LOG(format...) \
++	do { \
++		fprintf(stderr, "Summit speech recognition: " format); \
++		fputc('\n', stderr); \
++	} while (0)
++
++
++class AutoLock {
++public:
++	AutoLock(pthread_mutex_t& lock)
++		:
++		fLock(lock)
++	{
++		pthread_mutex_lock(&fLock);
++	}
++
++	~AutoLock()
++	{
++		pthread_mutex_unlock(&fLock);
++	}
++
++private:
++	pthread_mutex_t&	fLock;
++};
++
++
++// #pragma mark - the recogniser that stays loaded
++
++
++pthread_mutex_t sCacheLock = PTHREAD_MUTEX_INITIALIZER;
++BSpeechRecognizer* sCachedRecognizer = NULL;
++char sCachedModel[B_PATH_NAME_LENGTH];
++uint32 sCachedFlags = 0;
++int32 sCacheGeneration = 0;
++
++
++bigtime_t
++keep_loaded_time()
++{
++	const char* value = getenv("SUMMIT_RECOGNITION_KEEP_MODEL");
++	if (value != NULL && value[0] != '\0')
++		return (bigtime_t)atoll(value) * 1000000LL;
++	return kDefaultKeepLoaded;
++}
++
++
++BSpeechRecognizer*
++take_cached_recognizer(const char* model, uint32 flags)
++{
++	AutoLock locker(sCacheLock);
++	if (sCachedRecognizer == NULL || sCachedFlags != flags
++		|| strcmp(sCachedModel, model) != 0) {
++		return NULL;
++	}
++	BSpeechRecognizer* recognizer = sCachedRecognizer;
++	sCachedRecognizer = NULL;
++	sCacheGeneration++;
++	return recognizer;
++}
++
++
++status_t
++cache_janitor(void* data)
++{
++	int32 generation = (int32)(addr_t)data;
++	snooze(keep_loaded_time());
++
++	BSpeechRecognizer* recognizer = NULL;
++	{
++		AutoLock locker(sCacheLock);
++		if (generation == sCacheGeneration) {
++			recognizer = sCachedRecognizer;
++			sCachedRecognizer = NULL;
++			sCacheGeneration++;
++		}
++	}
++	if (recognizer != NULL) {
++		TRACE("the model was not used for a while: unloaded");
++		delete recognizer;
++	}
++	return B_OK;
++}
++
++
++/*!	Takes the recogniser of a session that is over: kept for the next
++	session when none is kept yet and it may be, deleted otherwise. On the
++	session's thread (deleting waits for the step the model is in). */
++void
++give_back_recognizer(BSpeechRecognizer* recognizer, const char* model,
++	uint32 flags)
++{
++	recognizer->Cancel();
++	recognizer->SetTarget(BMessenger());
++
++	bigtime_t keep = keep_loaded_time();
++	if (keep > 0) {
++		AutoLock locker(sCacheLock);
++		if (sCachedRecognizer == NULL) {
++			sCachedRecognizer = recognizer;
++			strlcpy(sCachedModel, model, sizeof(sCachedModel));
++			sCachedFlags = flags;
++			int32 generation = ++sCacheGeneration;
++			thread_id thread = spawn_thread(&cache_janitor,
++				"Summit speech model", B_LOW_PRIORITY,
++				(void*)(addr_t)generation);
++			if (thread >= 0)
++				resume_thread(thread);
++			return;
++		}
++	}
++	delete recognizer;
++}
++
++
++// #pragma mark - languages and models
++
++
++/*!	"en-US" -> "en": the language of a BCP 47 tag as the models name it. */
++BString
++language_code(const char* tag)
++{
++	BString code;
++	for (const char* c = tag; *c != '\0' && *c != '-' && *c != '_'; c++)
++		code << (char)tolower((unsigned char)*c);
++
++	// names browsers and systems use for languages the models call otherwise
++	static const struct {
++		const char* from;
++		const char* to;
++	} kAliases[] = {
++		{ "cmn", "zh" }, { "nb", "no" }, { "nn", "no" }, { "fil", "tl" },
++		{ "iw", "he" }, { "in", "id" }, { "ji", "yi" }
++	};
++	for (size_t i = 0; i < sizeof(kAliases) / sizeof(kAliases[0]); i++) {
++		if (code == kAliases[i].from)
++			return kAliases[i].to;
++	}
++	return code;
++}
++
++
++BString
++system_language()
++{
++	BMessage languages;
++	if (BLocaleRoster::Default()->GetPreferredLanguages(&languages) == B_OK) {
++		const char* first;
++		if (languages.FindString("language", &first) == B_OK)
++			return language_code(first);
++	}
++	return "en";
++}
++
++
++bool
++is_english_only(const BString& model)
++{
++	// Whisper's names: "tiny.en" knows English, "tiny" many languages.
++	return model.EndsWith(".en");
++}
++
++
++/*!	The installed models worth loading for a language, best first: for
++	English the ones made for English alone, then the others; for another
++	language only those that know several. */
++void
++models_for_language(const BStringList& installed, const BString& language,
++	BStringList& candidates)
++{
++	candidates.MakeEmpty();
++	bool english = language == "en";
++	if (english) {
++		for (int32 i = 0; i < installed.CountStrings(); i++) {
++			if (is_english_only(installed.StringAt(i)))
++				candidates.Add(installed.StringAt(i));
++		}
++	}
++	for (int32 i = 0; i < installed.CountStrings(); i++) {
++		if (!is_english_only(installed.StringAt(i)))
++			candidates.Add(installed.StringAt(i));
++	}
++}
++
++
++// #pragma mark - Session
++
++
++struct QueuedUtterance {
++	std::vector<float>	samples;
++	double				rate;
++	uint32				index;
++	bool				ended;
++};
++
++
++class Session : public BHandler {
++public:
++								Session(summit_speech_callback callback,
++									void* cookie);
++	virtual						~Session();
++
++			int					Init(const summit_speech_config* config,
++									char* message, size_t messageSize);
++
++			int					Feed(const float* samples, size_t frames,
++									double rate);
++			int					EndUtterance();
++			void				Cancel();
++			void				Destroy();
++
++	virtual	void				MessageReceived(BMessage* message);
++
++private:
++			void				_Load();
++			status_t			_LoadModel(const BString& model,
++									const BString& language,
++									BString& details, bool& languageMissing);
++			void				_Quit();
++			void				_ResultReceived(BMessage* message);
++			void				_RecordingFinished(BMessage* message);
++
++			status_t			_StartRecording(double rate, uint32 index);
++			int					_FeedRecognizer(const float* samples,
++									size_t frames);
++			void				_Pump();
++			void				_Fail(int error, const char* text);
++			void				_Notify(const summit_speech_event& event);
++
++private:
++			summit_speech_callback fCallback;
++			void*				fCookie;
++			// held while the callback runs
++			pthread_mutex_t		fCallbackLock;
++			bool				fClosed;
++
++			BLooper*			fLooper;
++
++			// set by Init(), then read on the looper's thread only
++			BStringList			fLanguages;
++			BStringList			fInstalled;
++			BString				fForcedModel;
++			uint32				fFlags;
++			bigtime_t			fInterimInterval;
++
++			// everything below is guarded by fLock
++			pthread_mutex_t		fLock;
++			BSpeechRecognizer*	fRecognizer;
++			BString				fModel;
++			int					fError;
++			// a recording of the recogniser is open (Start() was called,
++			// B_SPEECH_FINISHED did not arrive)
++			bool				fRecording;
++			// ... and Finish() was called
++			bool				fFinishing;
++			int32				fToken;
++			double				fRate;
++			uint32				fRecordingUtterance;
++			uint32				fNextUtterance;
++			std::deque<QueuedUtterance> fQueue;
++};
++
++
++Session::Session(summit_speech_callback callback, void* cookie)
++	:
++	BHandler("Summit speech session"),
++	fCallback(callback),
++	fCookie(cookie),
++	fClosed(false),
++	fLooper(NULL),
++	fFlags(0),
++	fInterimInterval(0),
++	fRecognizer(NULL),
++	fError(SUMMIT_SPEECH_OK),
++	fRecording(false),
++	fFinishing(false),
++	fToken(0),
++	fRate(0),
++	fRecordingUtterance(0),
++	fNextUtterance(0)
++{
++	pthread_mutex_init(&fCallbackLock, NULL);
++	pthread_mutex_init(&fLock, NULL);
++}
++
++
++Session::~Session()
++{
++	pthread_mutex_destroy(&fLock);
++	pthread_mutex_destroy(&fCallbackLock);
++}
++
++
++/*!	What can be told without loading a model: whether one is installed, and
++	whether one of them could know the language. Then the looper is started
++	and loads the model. */
++int
++Session::Init(const summit_speech_config* config, char* message,
++	size_t messageSize)
++{
++	fFlags = (config->flags & SUMMIT_SPEECH_ANY_DEVICE) != 0
++		? 0 : B_NEURAL_CPU_ONLY;
++	fInterimInterval = config->interim_interval > 0
++		? config->interim_interval : 0;
++
++	bool languageGiven = config->language != NULL
++		&& config->language[0] != '\0';
++	if (languageGiven) {
++		fLanguages.Add(language_code(config->language));
++	} else {
++		fLanguages.Add(system_language());
++		if (!fLanguages.HasString("en"))
++			fLanguages.Add("en");
++	}
++
++	if (config->model != NULL && config->model[0] != '\0') {
++		BPath directory;
++		if (BSpeechRecognizer::FindModel(config->model, &directory) != B_OK) {
++			snprintf(message, messageSize, "the speech model \"%s\" is not "
++				"installed", config->model);
++			return SUMMIT_SPEECH_NO_MODEL;
++		}
++		fForcedModel = config->model;
++	} else {
++		BSpeechRecognizer::GetModels(&fInstalled);
++		if (fInstalled.IsEmpty()) {
++			snprintf(message, messageSize, "no speech model is installed "
++				"(a directory with a speech.conf under neural/models of the "
++				"data directories, such as "
++				"/boot/system/non-packaged/data/neural/models/"
++				"whisper-tiny.en)");
++			return SUMMIT_SPEECH_NO_MODEL;
++		}
++		bool any = false;
++		for (int32 i = 0; i < fLanguages.CountStrings() && !any; i++) {
++			BStringList candidates;
++			models_for_language(fInstalled, fLanguages.StringAt(i),
++				candidates);
++			any = !candidates.IsEmpty();
++		}
++		if (!any) {
++			snprintf(message, messageSize, "no installed speech model knows "
++				"the language \"%s\" (installed: %s)",
++				fLanguages.StringAt(0).String(),
++				fInstalled.Join(", ").String());
++			return SUMMIT_SPEECH_NO_LANGUAGE;
++		}
++	}
++
++	fLooper = new(std::nothrow) BLooper("Summit speech recognition");
++	if (fLooper == NULL) {
++		snprintf(message, messageSize, "out of memory");
++		return SUMMIT_SPEECH_FAILED;
++	}
++	fLooper->AddHandler(this);
++	if (fLooper->Run() < 0) {
++		fLooper->RemoveHandler(this);
++		// never ran: deleted as an object, not quit as a thread
++		delete fLooper;
++		fLooper = NULL;
++		snprintf(message, messageSize, "no thread for the recogniser");
++		return SUMMIT_SPEECH_FAILED;
++	}
++	fLooper->PostMessage(kMessageLoad, this);
++	return SUMMIT_SPEECH_OK;
++}
++
++
++int
++Session::Feed(const float* samples, size_t frames, double rate)
++{
++	if (samples == NULL || rate <= 0)
++		return SUMMIT_SPEECH_BAD_ARGUMENT;
++	if (frames == 0)
++		return SUMMIT_SPEECH_OK;
++
++	int error = SUMMIT_SPEECH_OK;
++	{
++		AutoLock locker(fLock);
++		if (fError != SUMMIT_SPEECH_OK)
++			return fError;
++
++		bool queueEmpty = fQueue.empty();
++		if (fRecognizer != NULL && queueEmpty && fRecording && !fFinishing
++			&& rate == fRate) {
++			// the utterance that is being recorded
++			error = _FeedRecognizer(samples, frames);
++		} else if (fRecognizer != NULL && queueEmpty && !fRecording) {
++			// nothing is going on: a new utterance, at once
++			if (_StartRecording(rate, fNextUtterance++) == B_OK)
++				error = _FeedRecognizer(samples, frames);
++			else
++				error = SUMMIT_SPEECH_FAILED;
++		} else {
++			// The model is loading, the utterance before is being
++			// recognised, or the rate changed: this audio waits.
++			if (fRecognizer != NULL && queueEmpty && fRecording && !fFinishing) {
++				// another rate is another recording
++				fRecognizer->Finish();
++				fFinishing = true;
++			}
++			if (queueEmpty || fQueue.back().ended
++				|| fQueue.back().rate != rate) {
++				if (!queueEmpty)
++					fQueue.back().ended = true;
++				QueuedUtterance utterance;
++				utterance.rate = rate;
++				utterance.index = fNextUtterance++;
++				utterance.ended = false;
++				fQueue.push_back(utterance);
++			}
++			double queued = 0;
++			for (size_t i = 0; i < fQueue.size(); i++)
++				queued += fQueue[i].samples.size() / fQueue[i].rate;
++			if (queued + frames / rate > kMaximumQueuedSeconds)
++				error = SUMMIT_SPEECH_OVERRUN;
++			else {
++				std::vector<float>& queue = fQueue.back().samples;
++				queue.insert(queue.end(), samples, samples + frames);
++			}
++		}
++		if (error != SUMMIT_SPEECH_OK)
++			fError = error;
++	}
++
++	if (error != SUMMIT_SPEECH_OK) {
++		_Fail(error, error == SUMMIT_SPEECH_OVERRUN
++			? "more audio is waiting than the recogniser can take"
++			: "the recogniser did not take the audio");
++	}
++	return error;
++}
++
++
++int
++Session::EndUtterance()
++{
++	AutoLock locker(fLock);
++	if (fError != SUMMIT_SPEECH_OK)
++		return 0;
++	if (!fQueue.empty()) {
++		if (fQueue.back().ended)
++			return 0;
++		fQueue.back().ended = true;
++		return 1;
++	}
++	if (fRecognizer != NULL && fRecording && !fFinishing) {
++		fRecognizer->Finish();
++		fFinishing = true;
++		return 1;
++	}
++	return 0;
++}
++
++
++void
++Session::Cancel()
++{
++	AutoLock locker(fLock);
++	fQueue.clear();
++	if (fRecognizer != NULL && fRecording)
++		fRecognizer->Cancel();
++	fRecording = false;
++	fFinishing = false;
++}
++
++
++void
++Session::Destroy()
++{
++	{
++		AutoLock locker(fCallbackLock);
++		fClosed = true;
++	}
++	// The rest on the looper's thread, which may be loading the model or
++	// may have to wait for it to give up the recogniser.
++	fLooper->PostMessage(kMessageQuit, this);
++}
++
++
++void
++Session::MessageReceived(BMessage* message)
++{
++	switch (message->what) {
++		case kMessageLoad:
++			_Load();
++			break;
++
++		case kMessageQuit:
++			_Quit();
++			// not reached: the looper's thread is gone
++			break;
++
++		case B_SPEECH_RESULT:
++			_ResultReceived(message);
++			break;
++
++		case B_SPEECH_FINISHED:
++			_RecordingFinished(message);
++			break;
++
++		default:
++			BHandler::MessageReceived(message);
++			break;
++	}
++}
++
++
++status_t
++Session::_LoadModel(const BString& model, const BString& language,
++	BString& details, bool& languageMissing)
++{
++	bigtime_t start = system_time();
++	bool cached = true;
++	BSpeechRecognizer* recognizer = take_cached_recognizer(model.String(),
++		fFlags);
++	if (recognizer == NULL) {
++		cached = false;
++		recognizer = new(std::nothrow) BSpeechRecognizer();
++		if (recognizer == NULL)
++			return B_NO_MEMORY;
++		status_t status = recognizer->SetTo(model.String(), fFlags);
++		if (status != B_OK) {
++			details.SetToFormat("%s: %s (%s)", model.String(),
++				strerror(status), recognizer->ErrorDetails());
++			delete recognizer;
++			return status;
++		}
++	}
++
++	BStringList known;
++	recognizer->GetLanguages(&known);
++	if (!known.HasString(language)
++		|| recognizer->SetLanguage(language.String()) != B_OK) {
++		languageMissing = true;
++		give_back_recognizer(recognizer, model.String(), fFlags);
++		return B_NAME_NOT_FOUND;
++	}
++
++	recognizer->SetTarget(BMessenger(this));
++	recognizer->SetInterimInterval(fInterimInterval);
++	LOG("model %s (%s), language %s, %s%s", model.String(),
++		recognizer->ModelName(), language.String(),
++		cached ? "still loaded" : "loaded in ",
++		cached ? "" : (BString() << (system_time() - start) / 1000
++			<< " ms").String());
++
++	AutoLock locker(fLock);
++	fRecognizer = recognizer;
++	fModel = model;
++	return B_OK;
++}
++
++
++void
++Session::_Load()
++{
++	BString details;
++	bool languageMissing = false;
++	bool loaded = false;
++	BString language;
++
++	for (int32 i = 0; i < fLanguages.CountStrings() && !loaded; i++) {
++		language = fLanguages.StringAt(i);
++		BStringList candidates;
++		if (fForcedModel.Length() > 0)
++			candidates.Add(fForcedModel);
++		else
++			models_for_language(fInstalled, language, candidates);
++		for (int32 j = 0; j < candidates.CountStrings() && !loaded; j++) {
++			loaded = _LoadModel(candidates.StringAt(j), language, details,
++				languageMissing) == B_OK;
++		}
++	}
++
++	if (!loaded) {
++		if (details.Length() > 0) {
++			// a model that is there and does not load is the worse news
++			_Fail(SUMMIT_SPEECH_MODEL_FAILED, details.String());
++		} else if (languageMissing) {
++			details.SetToFormat("no installed speech model knows the "
++				"language \"%s\"", fLanguages.StringAt(0).String());
++			_Fail(SUMMIT_SPEECH_NO_LANGUAGE, details.String());
++		} else
++			_Fail(SUMMIT_SPEECH_NO_MODEL, "no speech model is installed");
++		return;
++	}
++
++	summit_speech_event event;
++	memset(&event, 0, sizeof(event));
++	event.type = SUMMIT_SPEECH_EVENT_READY;
++	BString model;
++	{
++		AutoLock locker(fLock);
++		model = fModel;
++	}
++	event.text = model.String();
++	event.language = language.String();
++	_Notify(event);
++
++	AutoLock locker(fLock);
++	_Pump();
++}
++
++
++/*!	The end of the session, on the looper's thread: the recogniser goes back
++	(or is deleted), then this object and the looper. Does not return. */
++void
++Session::_Quit()
++{
++	BSpeechRecognizer* recognizer;
++	BString model;
++	{
++		AutoLock locker(fLock);
++		fQueue.clear();
++		recognizer = fRecognizer;
++		fRecognizer = NULL;
++		model = fModel;
++	}
++	if (recognizer != NULL)
++		give_back_recognizer(recognizer, model.String(), fFlags);
++
++	BLooper* looper = fLooper;
++	looper->RemoveHandler(this);
++	delete this;
++	// On its own thread a looper deletes itself and ends the thread.
++	looper->Quit();
++}
++
++
++void
++Session::_ResultReceived(BMessage* message)
++{
++	summit_speech_event event;
++	memset(&event, 0, sizeof(event));
++	event.type = SUMMIT_SPEECH_EVENT_RESULT;
++	{
++		AutoLock locker(fLock);
++		// (of a recording that was cancelled, or of the session that had
++		// the recogniser before)
++		if (!fRecording || message->GetInt32("speech:token", -1) != fToken)
++			return;
++		event.utterance = fRecordingUtterance;
++	}
++	event.text = message->GetString("speech:text", "");
++	event.final = message->GetBool("speech:final", false) ? 1 : 0;
++	event.start = message->GetInt64("speech:start", 0);
++	event.end = message->GetInt64("speech:end", 0);
++	TRACE("utterance %u %s: \"%s\"", (unsigned)event.utterance,
++		event.final ? "final" : "interim", event.text);
++	_Notify(event);
++}
++
++
++void
++Session::_RecordingFinished(BMessage* message)
++{
++	summit_speech_event event;
++	memset(&event, 0, sizeof(event));
++	event.type = SUMMIT_SPEECH_EVENT_UTTERANCE_DONE;
++	event.status = message->GetInt32("speech:status", B_OK);
++	{
++		AutoLock locker(fLock);
++		if (!fRecording || message->GetInt32("speech:token", -1) != fToken)
++			return;
++		event.utterance = fRecordingUtterance;
++		fRecording = false;
++		fFinishing = false;
++	}
++	TRACE("utterance %u done: %s, %.2f s of audio in %.2f s",
++		(unsigned)event.utterance, strerror(event.status),
++		message->GetInt64("speech:audio", 0) / 1e6,
++		message->GetInt64("speech:duration", 0) / 1e6);
++	_Notify(event);
++
++	AutoLock locker(fLock);
++	_Pump();
++}
++
++
++//! Called with the lock held.
++status_t
++Session::_StartRecording(double rate, uint32 index)
++{
++	media_raw_audio_format format;
++	memset(&format, 0, sizeof(format));
++	format.frame_rate = rate;
++	format.channel_count = 1;
++	format.format = media_raw_audio_format::B_AUDIO_FLOAT;
++	format.byte_order = B_MEDIA_HOST_ENDIAN;
++
++	status_t status = fRecognizer->Start(&format, &fToken);
++	if (status != B_OK) {
++		TRACE("Start() at %.0f Hz: %s", rate, strerror(status));
++		return status;
++	}
++	fRecording = true;
++	fFinishing = false;
++	fRate = rate;
++	fRecordingUtterance = index;
++	return B_OK;
++}
++
++
++//! Called with the lock held, a recording open.
++int
++Session::_FeedRecognizer(const float* samples, size_t frames)
++{
++	status_t status = fRecognizer->Feed(samples, frames * sizeof(float));
++	if (status == B_OK)
++		return SUMMIT_SPEECH_OK;
++	TRACE("Feed(): %s", strerror(status));
++	return status == B_BUSY ? SUMMIT_SPEECH_OVERRUN : SUMMIT_SPEECH_FAILED;
++}
++
++
++/*!	Called with the lock held, on the looper's thread: the audio that waited
++	goes to the recogniser, one utterance at a time. */
++void
++Session::_Pump()
++{
++	while (fRecognizer != NULL && !fRecording && !fQueue.empty()
++		&& fError == SUMMIT_SPEECH_OK) {
++		QueuedUtterance& utterance = fQueue.front();
++		int error = SUMMIT_SPEECH_OK;
++		if (_StartRecording(utterance.rate, utterance.index) != B_OK)
++			error = SUMMIT_SPEECH_FAILED;
++		else if (!utterance.samples.empty()) {
++			error = _FeedRecognizer(utterance.samples.data(),
++				utterance.samples.size());
++		}
++		if (error != SUMMIT_SPEECH_OK) {
++			fError = error;
++			fQueue.clear();
++			// _Fail() takes the callback lock, never with this one held
++			pthread_mutex_unlock(&fLock);
++			_Fail(error, "the recogniser did not take the audio");
++			pthread_mutex_lock(&fLock);
++			return;
++		}
++		if (utterance.ended) {
++			fRecognizer->Finish();
++			fFinishing = true;
++		}
++		fQueue.pop_front();
++	}
++}
++
++
++void
++Session::_Fail(int error, const char* text)
++{
++	{
++		AutoLock locker(fLock);
++		fError = error;
++		fQueue.clear();
++		if (fRecognizer != NULL && fRecording)
++			fRecognizer->Cancel();
++		fRecording = false;
++		fFinishing = false;
++	}
++	LOG("%s", text);
++
++	summit_speech_event event;
++	memset(&event, 0, sizeof(event));
++	event.type = SUMMIT_SPEECH_EVENT_ERROR;
++	event.error = error;
++	event.text = text;
++	_Notify(event);
++}
++
++
++void
++Session::_Notify(const summit_speech_event& event)
++{
++	AutoLock locker(fCallbackLock);
++	if (!fClosed)
++		fCallback(fCookie, &event);
++}
++
++}	// namespace
++
++
++// #pragma mark - the C interface
++
++
++#define SUMMIT_SPEECH_EXPORT __attribute__((visibility("default")))
++
++
++extern "C" SUMMIT_SPEECH_EXPORT int
++summit_speech_api_version(void)
++{
++	return SUMMIT_SPEECH_API_VERSION;
++}
++
++
++extern "C" SUMMIT_SPEECH_EXPORT summit_speech_session*
++summit_speech_create(const summit_speech_config* config,
++	summit_speech_callback callback, void* cookie, int* _error, char* message,
++	size_t messageSize)
++{
++	char unused[1];
++	if (message == NULL || messageSize == 0) {
++		message = unused;
++		messageSize = sizeof(unused);
++	}
++	message[0] = '\0';
++	int ignored;
++	int& error = _error != NULL ? *_error : ignored;
++
++	if (config == NULL || config->size < sizeof(summit_speech_config)
++		|| callback == NULL) {
++		snprintf(message, messageSize, "bad arguments");
++		error = SUMMIT_SPEECH_BAD_ARGUMENT;
++		return NULL;
++	}
++
++	Session* session = new(std::nothrow) Session(callback, cookie);
++	if (session == NULL) {
++		snprintf(message, messageSize, "out of memory");
++		error = SUMMIT_SPEECH_FAILED;
++		return NULL;
++	}
++	error = session->Init(config, message, messageSize);
++	if (error != SUMMIT_SPEECH_OK) {
++		LOG("%s", message);
++		delete session;
++		return NULL;
++	}
++	return (summit_speech_session*)session;
++}
++
++
++extern "C" SUMMIT_SPEECH_EXPORT int
++summit_speech_feed(summit_speech_session* session, const float* samples,
++	size_t frames, double rate)
++{
++	if (session == NULL)
++		return SUMMIT_SPEECH_BAD_ARGUMENT;
++	return ((Session*)session)->Feed(samples, frames, rate);
++}
++
++
++extern "C" SUMMIT_SPEECH_EXPORT int
++summit_speech_end_utterance(summit_speech_session* session)
++{
++	if (session == NULL)
++		return 0;
++	return ((Session*)session)->EndUtterance();
++}
++
++
++extern "C" SUMMIT_SPEECH_EXPORT void
++summit_speech_cancel(summit_speech_session* session)
++{
++	if (session != NULL)
++		((Session*)session)->Cancel();
++}
++
++
++extern "C" SUMMIT_SPEECH_EXPORT void
++summit_speech_destroy(summit_speech_session* session)
++{
++	if (session != NULL)
++		((Session*)session)->Destroy();
++}
+diff --git a/Source/WebCore/Modules/speech/haiku/SpeechRecognitionShimHaiku.h b/Source/WebCore/Modules/speech/haiku/SpeechRecognitionShimHaiku.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..0f4b39b0c0b89d6770704913400e96a8ecc90cc0
+--- /dev/null
++++ b/Source/WebCore/Modules/speech/haiku/SpeechRecognitionShimHaiku.h
+@@ -0,0 +1,156 @@
++/*
++ * Copyright (C) 2026 Summit contributors.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHORS ``AS IS'' AND ANY EXPRESS OR
++ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
++ * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
++ */
++
++#ifndef SpeechRecognitionShimHaiku_h
++#define SpeechRecognitionShimHaiku_h
++
++/*
++ * The interface of libsummitspeech.so: the system's speech recogniser
++ * (BSpeechRecognizer of the Neural Kit, libneural.so) behind plain C
++ * functions.
++ *
++ * The engine does not link libneural: systems older than the kit have no
++ * such library, and the engine has to start on them. It opens this library,
++ * which does link the kit, when a page first asks for speech recognition
++ * (SpeechRecognitionTaskHaiku.cpp); where the library or the kit is
++ * missing, the page is told that the service is not available.
++ *
++ * A session is one SpeechRecognition.start(). Audio goes in as utterances:
++ * the samples of one stretch of speech, then summit_speech_end_utterance().
++ * Each utterance is one recording of the kit's recogniser; the next one can
++ * be fed while the last one is still being recognised. Events come back on
++ * a thread of the library's own; no function here waits for the model.
++ */
++
++#include <stddef.h>
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* Changes when a structure or a function changes incompatibly. */
++#define SUMMIT_SPEECH_API_VERSION 1
++
++typedef struct summit_speech_session summit_speech_session;
++
++enum {
++	/* Let the kit pick the device (a GPU or NPU when it has one); without
++	   it the model runs on the CPU, which is what was measured. */
++	SUMMIT_SPEECH_ANY_DEVICE = 0x1
++};
++
++typedef struct summit_speech_config {
++	/* sizeof(summit_speech_config) */
++	uint32_t	size;
++	uint32_t	flags;
++	/* A BCP 47 language tag ("en-US"); NULL or "": the system's first
++	   language when a model knows it, English otherwise. */
++	const char*	language;
++	/* The name of a model under neural/models of the data directories, or
++	   the path of a model directory; NULL: one that knows the language. */
++	const char*	model;
++	/* How often, at most, speech that is not final yet is read for a
++	   result that is not final, in microseconds; 0: never. */
++	int64_t		interim_interval;
++} summit_speech_config;
++
++enum {
++	SUMMIT_SPEECH_OK = 0,
++	/* No speech model is installed. */
++	SUMMIT_SPEECH_NO_MODEL = 1,
++	/* No installed model knows the language. */
++	SUMMIT_SPEECH_NO_LANGUAGE = 2,
++	/* A model is there and did not load. */
++	SUMMIT_SPEECH_MODEL_FAILED = 3,
++	/* The recogniser refused the audio or failed on it. */
++	SUMMIT_SPEECH_FAILED = 4,
++	/* More audio is waiting than the machine can recognise in time. */
++	SUMMIT_SPEECH_OVERRUN = 5,
++	SUMMIT_SPEECH_BAD_ARGUMENT = 6
++};
++
++enum {
++	/* The model is loaded: `text` is its name, `language` the language
++	   that will be recognised. */
++	SUMMIT_SPEECH_EVENT_READY = 1,
++	/* Text of the utterance `utterance`. `final` 1: a phrase that stands.
++	   `final` 0: the reading of everything after the last final phrase,
++	   which replaces the reading before. */
++	SUMMIT_SPEECH_EVENT_RESULT = 2,
++	/* The utterance `utterance` is done with; `status` is 0, or a Haiku
++	   status code when the recogniser failed on it. */
++	SUMMIT_SPEECH_EVENT_UTTERANCE_DONE = 3,
++	/* The session cannot go on: `error` is one of the codes above, `text`
++	   says more for the log. No more events follow. */
++	SUMMIT_SPEECH_EVENT_ERROR = 4
++};
++
++typedef struct summit_speech_event {
++	uint32_t	type;
++	int32_t		error;
++	int32_t		status;
++	/* Counts the utterances of the session from 0. */
++	uint32_t	utterance;
++	uint32_t	final;
++	/* UTF-8; valid during the call. */
++	const char*	text;
++	const char*	language;
++	/* The phrase's place in its utterance, in microseconds. */
++	int64_t		start;
++	int64_t		end;
++} summit_speech_event;
++
++/* Called on a thread of the library's, one call at a time for a session.
++   It must return soon, and must not call the functions of this file. */
++typedef void (*summit_speech_callback)(void* cookie, const summit_speech_event* event);
++
++/* SUMMIT_SPEECH_API_VERSION of the library. */
++int summit_speech_api_version(void);
++
++/* Begins a session. The model is loaded on the library's thread (READY, or
++   ERROR, follows); audio fed before that waits. NULL when there can be no
++   session: `*error` is the reason, and `message` (when not NULL) gets a
++   sentence for the log. */
++summit_speech_session* summit_speech_create(const summit_speech_config* config,
++	summit_speech_callback callback, void* cookie, int* error, char* message, size_t messageSize);
++
++/* More audio of the utterance: `frames` samples of one channel, floats
++   between -1 and 1, at `rate` per second. The first call after
++   summit_speech_end_utterance() (or after create) begins an utterance.
++   Returns SUMMIT_SPEECH_OK, or a code above (an ERROR event follows too). */
++int summit_speech_feed(summit_speech_session* session, const float* samples, size_t frames, double rate);
++
++/* The utterance is complete: its last phrases are recognised, then
++   UTTERANCE_DONE is sent. Returns 1 when an utterance was open, 0 when there
++   was nothing to finish (no event follows). */
++int summit_speech_end_utterance(summit_speech_session* session);
++
++/* Drops the audio that is waiting and the utterance in progress; no more
++   results of them are sent. The session can be fed again. */
++void summit_speech_cancel(summit_speech_session* session);
++
++/* Ends the session. When it returns the callback is not running and will
++   not be called again; the recogniser is given up on the library's thread,
++   so this does not wait for the model either. */
++void summit_speech_destroy(summit_speech_session* session);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* SpeechRecognitionShimHaiku_h */
+diff --git a/Source/WebCore/Modules/speech/haiku/SpeechRecognitionTaskHaiku.cpp b/Source/WebCore/Modules/speech/haiku/SpeechRecognitionTaskHaiku.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..0a68e37265d7baf9e44d5d2d3c3ec98a65125238
+--- /dev/null
++++ b/Source/WebCore/Modules/speech/haiku/SpeechRecognitionTaskHaiku.cpp
+@@ -0,0 +1,552 @@
++/*
++ * Copyright (C) 2026 Summit contributors.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHORS ``AS IS'' AND ANY EXPRESS OR
++ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
++ * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
++ */
++
++// SpeechRecognition on Haiku (Summit #159): see SpeechRecognitionTaskHaiku.h.
++//
++// Environment, for testing (docs/speech-recognition.md in Summit):
++//   SUMMIT_RECOGNITION_SHIM=<file>      another libsummitspeech.so
++//   SUMMIT_RECOGNITION_MODEL=<name>     a model's name or directory, instead
++//                                       of one chosen by language
++//   SUMMIT_RECOGNITION_DEVICE=any       let the Neural Kit pick the device
++//                                       (default: the CPU)
++//   SUMMIT_RECOGNITION_SILENCE_MS=<n>   the pause that ends an utterance
++//                                       (default 1000; 1600 when continuous)
++//   SUMMIT_RECOGNITION_INTERIM_MS=<n>   how often results that are not final
++//                                       are made (default 1500)
++//   SUMMIT_RECOGNITION_VAD=0            everything captured goes to the
++//                                       model, and only stop() ends an
++//                                       utterance
++//   SUMMIT_RECOGNITION_TRACE=1          logs to stderr
++
++#include "config.h"
++#include "SpeechRecognitionTaskHaiku.h"
++
++#if PLATFORM(HAIKU) && ENABLE(MEDIA_STREAM)
++
++#include "SpeechRecognitionShimHaiku.h"
++#include "SpeechRecognitionUpdate.h"
++#include <OS.h>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <dlfcn.h>
++#include <image.h>
++#include <wtf/FileSystem.h>
++#include <wtf/MainThread.h>
++#include <wtf/text/CString.h>
++#include <wtf/text/MakeString.h>
++
++namespace WebCore {
++
++namespace {
++
++bool traceEnabled()
++{
++    static bool enabled = [] {
++        const char* value = getenv("SUMMIT_RECOGNITION_TRACE");
++        return value && *value && strcmp(value, "0");
++    }();
++    return enabled;
++}
++
++#define SPEECH_TRACE(...) do { \
++        if (traceEnabled()) { \
++            fprintf(stderr, "Summit speech recognition: " __VA_ARGS__); \
++            fputc('\n', stderr); \
++        } \
++    } while (0)
++
++long environmentNumber(const char* name, long fallback, long minimum, long maximum)
++{
++    const char* value = getenv(name);
++    if (!value || !*value)
++        return fallback;
++    char* end = nullptr;
++    long number = strtol(value, &end, 10);
++    if (end == value)
++        return fallback;
++    return std::clamp(number, minimum, maximum);
++}
++
++// The functions of libsummitspeech.so.
++struct ShimLibrary {
++    decltype(&summit_speech_create) create { nullptr };
++    decltype(&summit_speech_feed) feed { nullptr };
++    decltype(&summit_speech_end_utterance) endUtterance { nullptr };
++    decltype(&summit_speech_cancel) cancel { nullptr };
++    decltype(&summit_speech_destroy) destroy { nullptr };
++};
++
++// The directory of the library this code is in (libWebKit.so): the engine
++// keeps libsummitspeech.so beside it.
++String engineLibraryDirectory()
++{
++    int32 cookie = 0;
++    image_info image;
++    auto self = reinterpret_cast<addr_t>(&engineLibraryDirectory);
++    while (get_next_image_info(B_CURRENT_TEAM, &cookie, &image) == B_OK) {
++        auto text = reinterpret_cast<addr_t>(image.text);
++        if (self >= text && self - text < static_cast<addr_t>(image.text_size))
++            return FileSystem::parentPath(String::fromUTF8(image.name));
++    }
++    return { };
++}
++
++const ShimLibrary* loadShimLibrary()
++{
++    Vector<String> candidates;
++    if (const char* file = getenv("SUMMIT_RECOGNITION_SHIM"); file && *file)
++        candidates.append(String::fromUTF8(file));
++    if (auto directory = engineLibraryDirectory(); !directory.isEmpty())
++        candidates.append(FileSystem::pathByAppendingComponent(directory, "libsummitspeech.so"_s));
++    // The library search path last (an installation that keeps it elsewhere).
++    candidates.append("libsummitspeech.so"_s);
++
++    for (auto& candidate : candidates) {
++        // Everything resolved now: where libneural.so is missing, or has no
++        // speech recogniser yet, this fails here and not at the first call.
++        void* handle = dlopen(candidate.utf8().legacyCStringPointer(), RTLD_NOW | RTLD_LOCAL);
++        if (!handle) {
++            SPEECH_TRACE("%s does not load: %s", candidate.utf8().legacyCStringPointer(), dlerror());
++            continue;
++        }
++        auto version = reinterpret_cast<decltype(&summit_speech_api_version)>(dlsym(handle, "summit_speech_api_version"));
++        static ShimLibrary library;
++        library.create = reinterpret_cast<decltype(library.create)>(dlsym(handle, "summit_speech_create"));
++        library.feed = reinterpret_cast<decltype(library.feed)>(dlsym(handle, "summit_speech_feed"));
++        library.endUtterance = reinterpret_cast<decltype(library.endUtterance)>(dlsym(handle, "summit_speech_end_utterance"));
++        library.cancel = reinterpret_cast<decltype(library.cancel)>(dlsym(handle, "summit_speech_cancel"));
++        library.destroy = reinterpret_cast<decltype(library.destroy)>(dlsym(handle, "summit_speech_destroy"));
++        if (!version || version() != SUMMIT_SPEECH_API_VERSION || !library.create || !library.feed
++            || !library.endUtterance || !library.cancel || !library.destroy) {
++            fprintf(stderr, "Summit speech recognition: %s is not the library this engine was built with (interface %d wanted)\n", candidate.utf8().legacyCStringPointer(), SUMMIT_SPEECH_API_VERSION);
++            dlclose(handle);
++            continue;
++        }
++        SPEECH_TRACE("using %s", candidate.utf8().legacyCStringPointer());
++        // Never closed: its threads may run until the process ends.
++        return &library;
++    }
++    return nullptr;
++}
++
++const ShimLibrary* shimLibrary()
++{
++    static const ShimLibrary* library = loadShimLibrary();
++    return library;
++}
++
++// What a model writes for sound that is not speech: "[BLANK_AUDIO]",
++// "(music)". Not something that was said.
++bool isNonSpeechAnnotation(const String& text)
++{
++    if (text.length() < 2)
++        return false;
++    auto first = text[0];
++    auto last = text[text.length() - 1];
++    return (first == '[' && last == ']' && text.find(']') == text.length() - 1)
++        || (first == '(' && last == ')' && text.find(')') == text.length() - 1);
++}
++
++// Audio from before speech was noticed that goes to the model with it.
++constexpr double preRollSeconds = 0.4;
++
++} // namespace
++
++// What the library's callback gets: a way to the task that stays valid
++// while the task goes away.
++struct SpeechRecognitionTaskHaiku::CallbackTarget {
++    WTF_DEPRECATED_MAKE_STRUCT_FAST_ALLOCATED(CallbackTarget);
++    ThreadSafeWeakPtr<SpeechRecognitionTaskHaiku> task;
++};
++
++bool SpeechRecognitionTaskHaiku::isAvailable()
++{
++    return !!shimLibrary();
++}
++
++RefPtr<SpeechRecognitionTaskHaiku> SpeechRecognitionTaskHaiku::create(SpeechRecognitionConnectionClientIdentifier identifier, const String& language, bool continuous, bool interimResults, DelegateCallback&& delegateCallback, Function<void()>&& audioNoLongerNeeded, std::optional<SpeechRecognitionError>& error)
++{
++    ASSERT(isMainThread());
++    auto* library = shimLibrary();
++    if (!library) {
++        fprintf(stderr, "Summit speech recognition: not available: libsummitspeech.so or the system's libneural.so (with BSpeechRecognizer) is missing\n");
++        error = SpeechRecognitionError { SpeechRecognitionErrorType::ServiceNotAllowed, "Speech recognition is not available on this system"_s };
++        return nullptr;
++    }
++
++    Ref task = adoptRef(*new SpeechRecognitionTaskHaiku(identifier, continuous, interimResults, WTF::move(delegateCallback), WTF::move(audioNoLongerNeeded)));
++    task->m_callbackTarget = new CallbackTarget { ThreadSafeWeakPtr { task.get() } };
++
++    auto languageTag = language.utf8();
++    summit_speech_config config;
++    memset(&config, 0, sizeof(config));
++    config.size = sizeof(config);
++    config.language = languageTag.legacyCStringPointer();
++    config.model = getenv("SUMMIT_RECOGNITION_MODEL");
++    if (const char* device = getenv("SUMMIT_RECOGNITION_DEVICE"); device && !strcmp(device, "any"))
++        config.flags |= SUMMIT_SPEECH_ANY_DEVICE;
++    if (interimResults)
++        config.interim_interval = environmentNumber("SUMMIT_RECOGNITION_INTERIM_MS", 1500, 300, 60000) * 1000;
++
++    int code = SUMMIT_SPEECH_OK;
++    char message[512] = "";
++    task->m_session = library->create(&config, &shimCallback, task->m_callbackTarget, &code, message, sizeof(message));
++    if (!task->m_session) {
++        delete std::exchange(task->m_callbackTarget, nullptr);
++        auto type = code == SUMMIT_SPEECH_NO_LANGUAGE ? SpeechRecognitionErrorType::LanguageNotSupported : SpeechRecognitionErrorType::ServiceNotAllowed;
++        error = SpeechRecognitionError { type, makeString("Speech recognition: "_s, String::fromUTF8(message)) };
++        return nullptr;
++    }
++    SPEECH_TRACE("started: language \"%s\", %s, %s", languageTag.legacyCStringPointer(), continuous ? "continuous" : "one utterance", interimResults ? "with interim results" : "final results only");
++    return task;
++}
++
++SpeechRecognitionTaskHaiku::SpeechRecognitionTaskHaiku(SpeechRecognitionConnectionClientIdentifier identifier, bool continuous, bool interimResults, DelegateCallback&& delegateCallback, Function<void()>&& audioNoLongerNeeded)
++    : m_identifier(identifier)
++    , m_continuous(continuous)
++    , m_interimResults(interimResults)
++    , m_delegateCallback(WTF::move(delegateCallback))
++    , m_audioNoLongerNeeded(WTF::move(audioNoLongerNeeded))
++{
++    // A recognition of one utterance answers soon after the person stops.
++    // A continuous one waits longer before it takes a pause for the end of
++    // a sentence: the model does better on whole sentences than on halves
++    // (measured with a speaker who pauses for a second between phrases).
++    SpeechEndpointerSettings settings;
++    settings.trailingSilence = environmentNumber("SUMMIT_RECOGNITION_SILENCE_MS", continuous ? 1600 : 1000, 200, 10000) / 1000.;
++    m_endpointer = SpeechEndpointer(settings);
++    if (const char* value = getenv("SUMMIT_RECOGNITION_VAD"); value && !strcmp(value, "0"))
++        m_useEndpointer = false;
++}
++
++SpeechRecognitionTaskHaiku::~SpeechRecognitionTaskHaiku()
++{
++    closeSession();
++}
++
++void SpeechRecognitionTaskHaiku::closeSession()
++{
++    if (!m_session)
++        return;
++    // After this the callback does not run any more, so nothing uses the
++    // target either.
++    shimLibrary()->destroy(std::exchange(m_session, nullptr));
++    delete std::exchange(m_callbackTarget, nullptr);
++}
++
++void SpeechRecognitionTaskHaiku::invalidate()
++{
++    ASSERT(isMainThread());
++    closeSession();
++    m_state = State::Done;
++}
++
++// On a thread of the library's.
++void SpeechRecognitionTaskHaiku::shimCallback(void* cookie, const summit_speech_event* event)
++{
++    RefPtr task = static_cast<CallbackTarget*>(cookie)->task.get();
++    if (!task)
++        return;
++    callOnMainThread([task = WTF::move(task), type = event->type, error = event->error, status = event->status, utterance = event->utterance, isFinal = !!event->final,
++        text = String::fromUTF8(event->text ? event->text : "").isolatedCopy(), language = String::fromUTF8(event->language ? event->language : "").isolatedCopy()]() mutable {
++        task->handleEvent(type, error, status, utterance, isFinal, WTF::move(text), WTF::move(language));
++    });
++}
++
++void SpeechRecognitionTaskHaiku::handleEvent(uint32_t type, int error, int status, uint32_t utterance, bool isFinal, String&& text, String&& language)
++{
++    ASSERT(isMainThread());
++    // (an event that was on its way when the session ended)
++    if (!m_session || m_state == State::Failed || m_state == State::Done)
++        return;
++
++    switch (type) {
++    case SUMMIT_SPEECH_EVENT_READY:
++        SPEECH_TRACE("model %s, language %s", text.utf8().legacyCStringPointer(), language.utf8().legacyCStringPointer());
++        break;
++
++    case SUMMIT_SPEECH_EVENT_RESULT: {
++        auto transcript = text.trim(isASCIIWhitespace<char16_t>);
++        SPEECH_TRACE("utterance %u, %s: \"%s\"", utterance, isFinal ? "final" : "interim", transcript.utf8().legacyCStringPointer());
++        if (transcript.isEmpty() || isNonSpeechAnnotation(transcript))
++            break;
++        if (m_continuous) {
++            // Every phrase that stands is a result of its own.
++            if (isFinal || m_interimResults)
++                sendResult(transcript, isFinal);
++            break;
++        }
++        // One utterance, one final result, when it is over. Until then the
++        // phrases that stand and the reading after them are one result that
++        // is not final.
++        if (isFinal) {
++            m_finalText = m_finalText.isEmpty() ? transcript : makeString(m_finalText, ' ', transcript);
++            if (m_interimResults && m_state == State::Listening)
++                sendResult(m_finalText, false);
++        } else if (m_interimResults)
++            sendResult(m_finalText.isEmpty() ? transcript : makeString(m_finalText, ' ', transcript), false);
++        break;
++    }
++
++    case SUMMIT_SPEECH_EVENT_UTTERANCE_DONE:
++        if (status)
++            fprintf(stderr, "Summit speech recognition: the recogniser failed on an utterance: %s\n", strerror(status));
++        if (m_utterancesInProgress)
++            --m_utterancesInProgress;
++        completeIfReady();
++        break;
++
++    case SUMMIT_SPEECH_EVENT_ERROR: {
++        auto errorType = SpeechRecognitionErrorType::Aborted;
++        if (error == SUMMIT_SPEECH_NO_LANGUAGE)
++            errorType = SpeechRecognitionErrorType::LanguageNotSupported;
++        else if (error == SUMMIT_SPEECH_NO_MODEL || error == SUMMIT_SPEECH_MODEL_FAILED)
++            errorType = SpeechRecognitionErrorType::ServiceNotAllowed;
++        fail(errorType, makeString("Speech recognition: "_s, text));
++        break;
++    }
++    }
++}
++
++void SpeechRecognitionTaskHaiku::audioAvailable(std::span<const float> samples, unsigned channels, double sampleRate)
++{
++    ASSERT(isMainThread());
++    if (m_state != State::Listening || !m_session || !channels || sampleRate <= 0)
++        return;
++    Ref protectedThis { *this };
++
++    size_t frames = samples.size() / channels;
++    speechDownmixToMono(samples.data(), frames, channels, m_mono);
++
++    if (!m_useEndpointer) {
++        if (!m_utteranceOpen)
++            speechStarted();
++        feed(m_mono.data(), frames, sampleRate);
++        return;
++    }
++
++    // In pieces of one frame of the endpointer, so that speech begins or
++    // ends at most once in a piece.
++    m_preRoll.setCapacity(static_cast<size_t>(sampleRate * preRollSeconds));
++    size_t piece = std::max<size_t>(1, static_cast<size_t>(sampleRate * m_endpointer.settings().frameDuration));
++    for (size_t offset = 0; offset < frames && m_state == State::Listening; offset += piece)
++        process(m_mono.data() + offset, std::min(piece, frames - offset), sampleRate);
++}
++
++void SpeechRecognitionTaskHaiku::process(const float* samples, size_t count, double sampleRate)
++{
++    bool wasInSpeech = m_endpointer.isInSpeech();
++    bool started = false;
++    bool ended = false;
++    m_endpointer.process(samples, count, sampleRate, [&](SpeechEndpointer::Event event, size_t) {
++        if (event == SpeechEndpointer::Event::SpeechStart)
++            started = true;
++        else
++            ended = true;
++    });
++
++    if (started) {
++        SPEECH_TRACE("speech begins at %.2f s (level %.4f, background %.4f)", m_endpointer.secondsProcessed(), m_endpointer.lastLevel(), m_endpointer.noiseLevel());
++        speechStarted();
++        auto& before = m_preRoll.samples();
++        feed(before.data(), before.size(), sampleRate);
++        m_preRoll.clear();
++        feed(samples, count, sampleRate);
++    } else if (wasInSpeech)
++        feed(samples, count, sampleRate);
++    else
++        m_preRoll.append(samples, count);
++
++    if (ended) {
++        SPEECH_TRACE("speech ends at %.2f s", m_endpointer.secondsProcessed());
++        utteranceEnded();
++    }
++    if (m_state != State::Listening)
++        return;
++
++    if (m_endpointer.isInSpeech()) {
++        // Sound that never pauses: a recognition of one utterance ends
++        // anyway, with what the model makes of it.
++        if (!m_continuous && m_endpointer.secondsInSpeech() >= m_maximumUtterance)
++            utteranceEnded();
++        return;
++    }
++    double quiet = m_endpointer.secondsSinceSpeech();
++    if (!m_endpointer.everSpoke()) {
++        if (quiet >= (m_continuous ? m_idleTimeout : m_noSpeechTimeout))
++            fail(SpeechRecognitionErrorType::NoSpeech, "No speech was detected"_s);
++    } else if (m_continuous && quiet >= m_idleTimeout) {
++        SPEECH_TRACE("nothing was said for %.0f s: the recognition ends", quiet);
++        finishListening(true);
++    }
++}
++
++void SpeechRecognitionTaskHaiku::feed(const float* samples, size_t count, double sampleRate)
++{
++    if (!count || !m_session)
++        return;
++    // A failure also comes as an event, which ends the recognition.
++    shimLibrary()->feed(m_session, samples, count, sampleRate);
++}
++
++void SpeechRecognitionTaskHaiku::speechStarted()
++{
++    m_utteranceOpen = true;
++    if (m_sentSpeechStart)
++        return;
++    m_sentSpeechStart = true;
++    send(SpeechRecognitionUpdate::create(m_identifier, SpeechRecognitionUpdateType::SoundStart));
++    send(SpeechRecognitionUpdate::create(m_identifier, SpeechRecognitionUpdateType::SpeechStart));
++}
++
++void SpeechRecognitionTaskHaiku::utteranceEnded()
++{
++    if (m_utteranceOpen && m_session) {
++        m_utteranceOpen = false;
++        if (shimLibrary()->endUtterance(m_session))
++            ++m_utterancesInProgress;
++    }
++    if (!m_continuous)
++        finishListening(true);
++}
++
++void SpeechRecognitionTaskHaiku::finishListening(bool releaseAudio)
++{
++    if (m_state != State::Listening)
++        return;
++    m_state = State::Finishing;
++    if (m_utteranceOpen && m_session) {
++        m_utteranceOpen = false;
++        if (shimLibrary()->endUtterance(m_session))
++            ++m_utterancesInProgress;
++    }
++    sendSpeechEndIfNeeded();
++
++    if (!releaseAudio) {
++        m_audioReleased = true;
++        completeIfReady();
++        return;
++    }
++    // Capture stops from the run loop, not from inside the call that
++    // delivered its audio; the end of the audio comes before the last
++    // result and the end.
++    callOnMainThread([protectedThis = Ref { *this }] {
++        if (protectedThis->m_audioNoLongerNeeded)
++            protectedThis->m_audioNoLongerNeeded();
++        protectedThis->m_audioReleased = true;
++        protectedThis->completeIfReady();
++    });
++}
++
++void SpeechRecognitionTaskHaiku::completeIfReady()
++{
++    if (m_state != State::Finishing || !m_audioReleased || m_utterancesInProgress)
++        return;
++    Ref protectedThis { *this };
++    if (!m_continuous) {
++        if (!m_finalText.isEmpty())
++            sendResult(m_finalText, true);
++        else if (m_sentSpeechStart)
++            send(SpeechRecognitionUpdate::create(m_identifier, SpeechRecognitionUpdateType::NoMatch));
++    }
++    closeSession();
++    m_state = State::Done;
++    sendEndIfNeeded();
++}
++
++void SpeechRecognitionTaskHaiku::audioWillEnd()
++{
++    ASSERT(isMainThread());
++    Ref protectedThis { *this };
++    sendSpeechEndIfNeeded();
++}
++
++void SpeechRecognitionTaskHaiku::stop()
++{
++    ASSERT(isMainThread());
++    Ref protectedThis { *this };
++    // Capture has stopped already. In the other states the end is on its
++    // way, or follows the abort an error brings.
++    if (m_state == State::Listening)
++        finishListening(false);
++}
++
++void SpeechRecognitionTaskHaiku::abort()
++{
++    ASSERT(isMainThread());
++    Ref protectedThis { *this };
++    if (m_state == State::Done)
++        return;
++    if (m_session)
++        shimLibrary()->cancel(m_session);
++    closeSession();
++    m_state = State::Done;
++    sendSpeechEndIfNeeded();
++    sendEndIfNeeded();
++}
++
++void SpeechRecognitionTaskHaiku::fail(SpeechRecognitionErrorType type, const String& message)
++{
++    if (m_state == State::Failed || m_state == State::Done)
++        return;
++    Ref protectedThis { *this };
++    fprintf(stderr, "Summit speech recognition: %s\n", message.utf8().legacyCStringPointer());
++    if (m_session)
++        shimLibrary()->cancel(m_session);
++    closeSession();
++    m_state = State::Failed;
++    // Whoever gets the error aborts the recognition, which sends the end.
++    send(SpeechRecognitionUpdate::createError(m_identifier, SpeechRecognitionError { type, message }));
++}
++
++void SpeechRecognitionTaskHaiku::send(const SpeechRecognitionUpdate& update)
++{
++    if (m_delegateCallback)
++        m_delegateCallback(update);
++}
++
++void SpeechRecognitionTaskHaiku::sendResult(const String& transcript, bool isFinal)
++{
++    // The model gives one reading and no measure of how sure it is: a
++    // result that stands counts as certain, one that may change as not.
++    SpeechRecognitionAlternativeData alternative { transcript, isFinal ? 1. : 0. };
++    SpeechRecognitionResultData result { { WTF::move(alternative) }, isFinal };
++    send(SpeechRecognitionUpdate::createResult(m_identifier, { WTF::move(result) }));
++}
++
++void SpeechRecognitionTaskHaiku::sendSpeechEndIfNeeded()
++{
++    if (!m_sentSpeechStart || m_sentSpeechEnd)
++        return;
++    m_sentSpeechEnd = true;
++    send(SpeechRecognitionUpdate::create(m_identifier, SpeechRecognitionUpdateType::SpeechEnd));
++    send(SpeechRecognitionUpdate::create(m_identifier, SpeechRecognitionUpdateType::SoundEnd));
++}
++
++void SpeechRecognitionTaskHaiku::sendEndIfNeeded()
++{
++    if (m_sentEnd)
++        return;
++    m_sentEnd = true;
++    SPEECH_TRACE("ended");
++    send(SpeechRecognitionUpdate::create(m_identifier, SpeechRecognitionUpdateType::End));
++}
++
++} // namespace WebCore
++
++#endif // PLATFORM(HAIKU) && ENABLE(MEDIA_STREAM)
+diff --git a/Source/WebCore/Modules/speech/haiku/SpeechRecognitionTaskHaiku.h b/Source/WebCore/Modules/speech/haiku/SpeechRecognitionTaskHaiku.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..dbb09af1ba8347c8b1563169ec90644888d1e479
+--- /dev/null
++++ b/Source/WebCore/Modules/speech/haiku/SpeechRecognitionTaskHaiku.h
+@@ -0,0 +1,147 @@
++/*
++ * Copyright (C) 2026 Summit contributors.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHORS ``AS IS'' AND ANY EXPRESS OR
++ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
++ * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
++ */
++
++#pragma once
++
++#if PLATFORM(HAIKU) && ENABLE(MEDIA_STREAM)
++
++#include "SpeechEndpointerHaiku.h"
++#include "SpeechRecognitionConnectionClientIdentifier.h"
++#include "SpeechRecognitionError.h"
++#include <span>
++#include <wtf/Function.h>
++#include <wtf/ThreadSafeWeakPtr.h>
++#include <wtf/text/WTFString.h>
++
++struct summit_speech_event;
++struct summit_speech_session;
++
++namespace WebCore {
++
++class SpeechRecognitionUpdate;
++
++// One SpeechRecognition.start() on Haiku (Summit #159), in the process that
++// captures the microphone (the browser's): the audio goes to the system's
++// recogniser, a Whisper model the Neural Kit runs on this machine, through
++// libsummitspeech.so (SpeechRecognitionShimHaiku.h), and what comes back
++// becomes the updates of the Web Speech API.
++//
++// The recogniser does not tell speech from quiet, so this does
++// (SpeechEndpointerHaiku.h): only speech goes to the model, as utterances
++// that end with a pause. A recognition that is not continuous is one
++// utterance: it ends by itself when the person stops speaking, with one
++// final result. A continuous one gives a final result for every phrase the
++// model completes, until the page stops it or nobody speaks for a minute.
++//
++// Everything here runs on the main thread, except the library's callback,
++// which only passes its event on to the main thread.
++class SpeechRecognitionTaskHaiku final : public ThreadSafeRefCountedAndCanMakeThreadSafeWeakPtr<SpeechRecognitionTaskHaiku, WTF::DestructionThread::MainRunLoop> {
++public:
++    using DelegateCallback = Function<void(const SpeechRecognitionUpdate&)>;
++
++    // Whether this system has the recogniser: the library that binds it is
++    // installed and loads (it does not where libneural.so is missing or is
++    // older than the recogniser). Says nothing about models.
++    static bool isAvailable();
++
++    // Null, with the error for the page, when recognition cannot begin: no
++    // recogniser on this system, no model installed, or none that could
++    // know the language. `audioNoLongerNeeded` is called, later and on the
++    // main thread, when a recognition ends by itself and capture can stop.
++    static RefPtr<SpeechRecognitionTaskHaiku> create(SpeechRecognitionConnectionClientIdentifier, const String& language, bool continuous, bool interimResults, DelegateCallback&&, Function<void()>&& audioNoLongerNeeded, std::optional<SpeechRecognitionError>&);
++    ~SpeechRecognitionTaskHaiku();
++
++    // Captured audio, interleaved.
++    void audioAvailable(std::span<const float>, unsigned channels, double sampleRate);
++    // Capture is about to stop: the events that come before the end of the
++    // audio are sent now.
++    void audioWillEnd();
++    // What was said so far is recognised, then the recognition ends.
++    void stop();
++    // The recognition ends at once, without a result.
++    void abort();
++    // Gives up the recogniser without telling anybody.
++    void invalidate();
++    // The end was sent (or nothing will be sent any more).
++    bool hasEnded() const { return m_state == State::Done; }
++
++private:
++    SpeechRecognitionTaskHaiku(SpeechRecognitionConnectionClientIdentifier, bool continuous, bool interimResults, DelegateCallback&&, Function<void()>&& audioNoLongerNeeded);
++
++    enum class State : uint8_t {
++        // Audio is taken.
++        Listening,
++        // No more audio is taken; the utterances that were fed are
++        // recognised, then the recognition ends.
++        Finishing,
++        // An error was sent; the end follows when the recognition is aborted.
++        Failed,
++        // The end was sent.
++        Done
++    };
++
++    struct CallbackTarget;
++    static void shimCallback(void* cookie, const summit_speech_event*);
++    void handleEvent(uint32_t type, int error, int status, uint32_t utterance, bool isFinal, String&& text, String&& language);
++
++    void process(const float* samples, size_t count, double sampleRate);
++    void feed(const float* samples, size_t count, double sampleRate);
++    void speechStarted();
++    void utteranceEnded();
++    void finishListening(bool releaseAudio);
++    void completeIfReady();
++    void fail(SpeechRecognitionErrorType, const String& message);
++    void closeSession();
++
++    void send(const SpeechRecognitionUpdate&);
++    void sendResult(const String& transcript, bool isFinal);
++    void sendSpeechEndIfNeeded();
++    void sendEndIfNeeded();
++
++    const SpeechRecognitionConnectionClientIdentifier m_identifier;
++    const bool m_continuous;
++    const bool m_interimResults;
++    DelegateCallback m_delegateCallback;
++    Function<void()> m_audioNoLongerNeeded;
++
++    summit_speech_session* m_session { nullptr };
++    CallbackTarget* m_callbackTarget { nullptr };
++
++    State m_state { State::Listening };
++    bool m_useEndpointer { true };
++    SpeechEndpointer m_endpointer;
++    SpeechPreRoll m_preRoll;
++    std::vector<float> m_mono;
++    // Audio went to the recogniser since the last utterance ended.
++    bool m_utteranceOpen { false };
++    // Capture has stopped (or was told to) after the last utterance.
++    bool m_audioReleased { false };
++    // Utterances that were ended and are still being recognised.
++    unsigned m_utterancesInProgress { 0 };
++    // Not continuous: the phrases of the utterance that stand.
++    String m_finalText;
++    double m_noSpeechTimeout { 8 };
++    double m_idleTimeout { 60 };
++    double m_maximumUtterance { 30 };
++    bool m_sentSpeechStart { false };
++    bool m_sentSpeechEnd { false };
++    bool m_sentEnd { false };
++};
++
++} // namespace WebCore
++
++#endif // PLATFORM(HAIKU) && ENABLE(MEDIA_STREAM)
+diff --git a/Source/WebCore/Modules/speech/haiku/SpeechRecognizerHaiku.cpp b/Source/WebCore/Modules/speech/haiku/SpeechRecognizerHaiku.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..f2412834b1e2bf9492629cb5c3fcfc1746aab3e0
+--- /dev/null
++++ b/Source/WebCore/Modules/speech/haiku/SpeechRecognizerHaiku.cpp
+@@ -0,0 +1,100 @@
++/*
++ * Copyright (C) 2026 Summit contributors.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHORS ``AS IS'' AND ANY EXPRESS OR
++ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
++ * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
++ */
++
++// The platform half of SpeechRecognizer on Haiku (Summit #159): the audio
++// the capture source hands over goes to a SpeechRecognitionTaskHaiku, which
++// has the system's recogniser turn it into the updates of the Web Speech API.
++
++#include "config.h"
++#include "SpeechRecognizer.h"
++
++#if PLATFORM(HAIKU) && ENABLE(MEDIA_STREAM)
++
++#include "AudioStreamDescription.h"
++#include "HaikuAudioData.h"
++#include "SpeechRecognitionTaskHaiku.h"
++#include "SpeechRecognitionUpdate.h"
++#include <wtf/MediaTime.h>
++
++namespace WebCore {
++
++bool SpeechRecognizer::platformRecognizerAvailable()
++{
++    return SpeechRecognitionTaskHaiku::isAvailable();
++}
++
++void SpeechRecognizer::dataCaptured(const MediaTime&, const PlatformAudioData& data, const AudioStreamDescription& description, size_t)
++{
++    RefPtr task = m_task;
++    auto* audio = dynamicDowncast<HaikuAudioData>(data);
++    if (!task || !audio)
++        return;
++    task->audioAvailable(audio->samples(), audio->channelCount(), description.sampleRate());
++}
++
++// The recogniser is the system's whether or not capture devices are mocked
++// (as they are under WebDriver): there is no mock recogniser on this port.
++// One alternative per result is all the model gives, whatever the page asks.
++bool SpeechRecognizer::startRecognition(bool, SpeechRecognitionConnectionClientIdentifier identifier, const String& localeIdentifier, bool continuous, bool interimResults, uint64_t)
++{
++    if (RefPtr task = std::exchange(m_task, nullptr))
++        task->invalidate();
++    m_startError = std::nullopt;
++    m_task = SpeechRecognitionTaskHaiku::create(identifier, localeIdentifier, continuous, interimResults, [weakThis = WeakPtr { *this }](const SpeechRecognitionUpdate& update) {
++        if (weakThis)
++            weakThis->m_delegateCallback(update);
++    }, [weakThis = WeakPtr { *this }] {
++        // The recognition ended by itself: the microphone is let go.
++        if (weakThis)
++            weakThis->stopCapture();
++    }, m_startError);
++    return !!m_task;
++}
++
++void SpeechRecognizer::stopRecognition()
++{
++    RefPtr task = m_task;
++    if (!task) {
++        m_delegateCallback(SpeechRecognitionUpdate::create(clientIdentifier(), SpeechRecognitionUpdateType::End));
++        return;
++    }
++    // The recognition ended by itself a moment ago: its end was sent, and
++    // nothing else will come that makes this object inactive.
++    if (task->hasEnded()) {
++        m_state = State::Inactive;
++        return;
++    }
++    task->stop();
++}
++
++void SpeechRecognizer::abortRecognition()
++{
++    RefPtr task = m_task;
++    if (!task) {
++        m_delegateCallback(SpeechRecognitionUpdate::create(clientIdentifier(), SpeechRecognitionUpdateType::End));
++        return;
++    }
++    if (task->hasEnded()) {
++        m_state = State::Inactive;
++        return;
++    }
++    task->abort();
++}
++
++} // namespace WebCore
++
++#endif // PLATFORM(HAIKU) && ENABLE(MEDIA_STREAM)
 diff --git a/Source/WebCore/Modules/streams/ReadableStreamDefaultReader.cpp b/Source/WebCore/Modules/streams/ReadableStreamDefaultReader.cpp
 index 25851ad8c4fa3e72ef708266fe0a2b68bf22f095..ae976c94aa2a37d64d4cee8be72580a94b9207af 100644
 --- a/Source/WebCore/Modules/streams/ReadableStreamDefaultReader.cpp
@@ -18900,10 +21434,10 @@ index 0000000000000000000000000000000000000000..48e19a5957df4c1ae60378dd9a84cbe4
 +/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
 +enum USBTransferStatus { "ok", "stall", "babble" };
 diff --git a/Source/WebCore/PlatformHaiku.cmake b/Source/WebCore/PlatformHaiku.cmake
-index 16a88804a1baa39ccdd9fc2870b6e2524d941298..9a6c66eba8e7d8da7b9c2dee660a96629d4be911 100644
+index 16a88804a1baa39ccdd9fc2870b6e2524d941298..1a86420e98d4a2aa3bf4b158279ec690590ba12a 100644
 --- a/Source/WebCore/PlatformHaiku.cmake
 +++ b/Source/WebCore/PlatformHaiku.cmake
-@@ -1,52 +1,412 @@
+@@ -1,52 +1,456 @@
 +include(platform/Haiku.cmake)
  include(platform/ImageDecoders.cmake)
  include(platform/OpenSSL.cmake)
@@ -19238,6 +21772,50 @@ index 16a88804a1baa39ccdd9fc2870b6e2524d941298..9a6c66eba8e7d8da7b9c2dee660a9662
 +    list(APPEND WebCore_PRIVATE_FRAMEWORK_HEADERS
 +        platform/mediastream/haiku/HaikuCaptureNode.h
 +    )
++
++    # SpeechRecognition (Summit #159): the microphone's audio goes to the
++    # system's speech recogniser, BSpeechRecognizer of the Neural Kit
++    # (libneural.so), which air/OS has and stock Haiku does not. The engine
++    # does not link the kit: it opens libsummitspeech.so at first use
++    # (Modules/speech/haiku/SpeechRecognitionShimHaiku.h), and without it
++    # SpeechRecognition.start() fails with service-not-allowed.
++    list(APPEND WebCore_SOURCES
++        Modules/speech/haiku/SpeechRecognitionTaskHaiku.cpp
++        Modules/speech/haiku/SpeechRecognizerHaiku.cpp
++    )
++    list(APPEND WebCore_PRIVATE_INCLUDE_DIRECTORIES
++        "${WEBCORE_DIR}/Modules/speech/haiku"
++    )
++
++    # libsummitspeech.so itself, where the SDK has the recogniser (a sysroot
++    # of an air/OS with it; HAIKU_NEURAL_INCLUDE_DIR and HAIKU_NEURAL_LIBRARY
++    # name the kit's headers/os directory and libneural.so elsewhere). It
++    # goes beside libWebKit.so in the package. The engine builds, and runs,
++    # without it.
++    find_path(HAIKU_NEURAL_INCLUDE_DIR neural/SpeechRecognizer.h PATH_SUFFIXES os)
++    find_library(HAIKU_NEURAL_LIBRARY neural)
++    if (HAIKU_NEURAL_INCLUDE_DIR AND HAIKU_NEURAL_LIBRARY)
++        message(STATUS "Speech recognition: libsummitspeech.so with ${HAIKU_NEURAL_LIBRARY}")
++        # A shared library, so that it is linked as the engine's others are
++        # (CMAKE_SHARED_LINKER_FLAGS: the SDK's unwinder specs and library
++        # paths); nothing links it, the engine opens it.
++        add_library(summitspeech SHARED ${WEBCORE_DIR}/Modules/speech/haiku/SpeechRecognitionShimHaiku.cpp)
++        # The kit's headers first: a sysroot older than the recogniser has
++        # the kit's other headers, without the recogniser's messages.
++        target_include_directories(summitspeech BEFORE PRIVATE "${HAIKU_NEURAL_INCLUDE_DIR}")
++        target_compile_options(summitspeech PRIVATE -Wno-multichar -fvisibility=hidden)
++        target_link_libraries(summitspeech PRIVATE ${HAIKU_NEURAL_LIBRARY} be)
++        set_target_properties(summitspeech PROPERTIES
++            PREFIX "lib"
++            SUFFIX ".so"
++            LIBRARY_OUTPUT_DIRECTORY "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}"
++            # libneural.so is the system's, on the default library path.
++            SKIP_BUILD_RPATH ON
++        )
++        add_dependencies(WebCore summitspeech)
++    else ()
++        message(STATUS "Speech recognition: no neural/SpeechRecognizer.h or libneural.so in the SDK; libsummitspeech.so is not built")
++    endif ()
 +endif ()
 +
 +# TS demuxing uses version-checked public FFmpeg APIs at runtime. Keep the
@@ -19322,7 +21900,7 @@ index 16a88804a1baa39ccdd9fc2870b6e2524d941298..9a6c66eba8e7d8da7b9c2dee660a9662
    textencoding
    translation
    ${WEBP_LIBRARIES}
-@@ -61,6 +421,244 @@ list(APPEND WebCore_SYSTEM_INCLUDE_DIRECTORIES
+@@ -61,6 +465,244 @@ list(APPEND WebCore_SYSTEM_INCLUDE_DIRECTORIES
    ${SQLITE_INCLUDE_DIR}
    ${WEBP_INCLUDE_DIRS}
    ${ZLIB_INCLUDE_DIRS}
@@ -78883,10 +81461,10 @@ index 0000000000000000000000000000000000000000..baf606eb8a43e053820e4a472dc51c40
 +#endif // ENABLE(MEDIA_STREAM) && PLATFORM(HAIKU)
 diff --git a/Source/WebCore/platform/mediastream/haiku/HaikuCaptureSources.cpp b/Source/WebCore/platform/mediastream/haiku/HaikuCaptureSources.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..8c1945d699a005644350d6b61034ef38085e4018
+index 0000000000000000000000000000000000000000..70755d6fbf776a88d6486032c5fba6ef38b7b7ff
 --- /dev/null
 +++ b/Source/WebCore/platform/mediastream/haiku/HaikuCaptureSources.cpp
-@@ -0,0 +1,1866 @@
+@@ -0,0 +1,2039 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -78915,6 +81493,7 @@ index 0000000000000000000000000000000000000000..8c1945d699a005644350d6b61034ef38
 +#include "HaikuVoiceProcessing.h"
 +#include "MediaConstraints.h"
 +#include "RealtimeMediaSourceCenter.h"
++#include "SpeechEndpointerHaiku.h"
 +#include "VideoFrameHaiku.h"
 +#include <Application.h>
 +#include <Bitmap.h>
@@ -78928,6 +81507,7 @@ index 0000000000000000000000000000000000000000..8c1945d699a005644350d6b61034ef38
 +#include <dlfcn.h>
 +#include <interface/Screen.h>
 +#include <private/interface/WindowInfo.h>
++#include <wtf/FileSystem.h>
 +#include <wtf/HashMap.h>
 +#include <wtf/MainThread.h>
 +#include <wtf/NeverDestroyed.h>
@@ -80733,6 +83313,177 @@ index 0000000000000000000000000000000000000000..8c1945d699a005644350d6b61034ef38
 +    }
 +}
 +
++// A recording in place of the microphone, for speech recognition tests.
++
++static constexpr auto speechTestDeviceId = "haiku-speech-test-recording"_s;
++
++struct HaikuSpeechTestAudioSource::Recording {
++    WTF_DEPRECATED_MAKE_STRUCT_FAST_ALLOCATED(Recording);
++    Vector<uint8_t> file;
++    SpeechWavInfo info;
++};
++
++static String speechTestRecordingPath()
++{
++    const char* path = getenv("SUMMIT_RECOGNITION_WAV");
++    return path && *path ? String::fromUTF8(path) : String();
++}
++
++std::optional<CaptureDevice> HaikuSpeechTestAudioSource::device()
++{
++    if (speechTestRecordingPath().isEmpty())
++        return std::nullopt;
++    CaptureDevice device(speechTestDeviceId, CaptureDevice::DeviceType::Microphone, "Speech recognition test recording"_s);
++    device.setEnabled(true);
++    device.setIsDefault(true);
++    return device;
++}
++
++bool HaikuSpeechTestAudioSource::isTestDevice(const CaptureDevice& device)
++{
++    return device.persistentId() == speechTestDeviceId;
++}
++
++CaptureSourceOrError HaikuSpeechTestAudioSource::create(const CaptureDevice& device, MediaDeviceHashSalts&& hashSalts, std::optional<PageIdentifier> pageIdentifier)
++{
++    auto path = speechTestRecordingPath();
++    auto recording = makeUnique<Recording>();
++    const char* problem = nullptr;
++    if (auto file = FileSystem::readEntireFile(path)) {
++        recording->file = WTF::move(*file);
++        speechParseWav(recording->file.span().data(), recording->file.size(), recording->info, problem);
++    } else
++        problem = "the file cannot be read";
++    if (problem) {
++        fprintf(stderr, "Summit speech recognition: SUMMIT_RECOGNITION_WAV=%s: %s\n", path.utf8().legacyCStringPointer(), problem);
++        return CaptureSourceOrError(CaptureSourceError { makeString("The test recording cannot be used: "_s, String::fromUTF8(problem)), MediaAccessDenialReason::HardwareError });
++    }
++    fprintf(stderr, "Summit speech recognition: the microphone is the recording %s (%.1f s, %u Hz, %u channels)\n", path.utf8().legacyCStringPointer(),
++        double(recording->info.frameCount()) / recording->info.sampleRate, unsigned(recording->info.sampleRate), unsigned(recording->info.channels));
++    return CaptureSourceOrError(adoptRef(*new HaikuSpeechTestAudioSource(device, WTF::move(hashSalts), pageIdentifier, WTF::move(recording))));
++}
++
++HaikuSpeechTestAudioSource::HaikuSpeechTestAudioSource(const CaptureDevice& device, MediaDeviceHashSalts&& hashSalts, std::optional<PageIdentifier> pageIdentifier, std::unique_ptr<Recording>&& recording)
++    : RealtimeMediaSource(device, WTF::move(hashSalts), pageIdentifier)
++    , m_recording(WTF::move(recording))
++{
++    initializeSampleRate(m_recording->info.sampleRate);
++    initializeVolume(1);
++    initializeEchoCancellation(false);
++}
++
++HaikuSpeechTestAudioSource::~HaikuSpeechTestAudioSource()
++{
++    stopProducingData();
++}
++
++const RealtimeMediaSourceCapabilities& HaikuSpeechTestAudioSource::capabilities()
++{
++    if (!m_capabilities) {
++        RealtimeMediaSourceCapabilities capabilities(settings().supportedConstraints());
++        capabilities.setDeviceId(hashedId());
++        capabilities.setVolume({ 1.0, 1.0 });
++        capabilities.setSampleRate({ static_cast<int>(m_recording->info.sampleRate), static_cast<int>(m_recording->info.sampleRate) });
++        capabilities.setEchoCancellation(RealtimeMediaSourceCapabilities::EchoCancellation::Off);
++        m_capabilities = WTF::move(capabilities);
++    }
++    return *m_capabilities;
++}
++
++const RealtimeMediaSourceSettings& HaikuSpeechTestAudioSource::settings()
++{
++    if (!m_currentSettings) {
++        RealtimeMediaSourceSettings settings;
++        settings.setDeviceId(hashedId());
++        settings.setLabel(name());
++        RealtimeMediaSourceSupportedConstraints supportedConstraints;
++        supportedConstraints.setSupportsDeviceId(true);
++        supportedConstraints.setSupportsSampleRate(true);
++        settings.setSupportedConstraints(supportedConstraints);
++        settings.setVolume(1);
++        settings.setSampleRate(m_recording->info.sampleRate);
++        settings.setEchoCancellation(false);
++        m_currentSettings = WTF::move(settings);
++    }
++    return *m_currentSettings;
++}
++
++void HaikuSpeechTestAudioSource::startProducingData()
++{
++    {
++        Locker locker { m_lock };
++        if (m_running)
++            return;
++        m_running = true;
++    }
++    m_thread = Thread::create("Summit speech test recording"_s, [protectedThis = Ref { *this }] {
++        protectedThis->playLoop();
++    });
++}
++
++void HaikuSpeechTestAudioSource::stopProducingData()
++{
++    {
++        Locker locker { m_lock };
++        if (!m_running)
++            return;
++        m_running = false;
++        m_condition.notifyAll();
++    }
++    if (m_thread) {
++        if (&Thread::currentSingleton() != m_thread.get())
++            m_thread->waitForCompletion();
++        m_thread = nullptr;
++    }
++}
++
++void HaikuSpeechTestAudioSource::playLoop()
++{
++    auto& info = m_recording->info;
++    const uint8_t* file = m_recording->file.span().data();
++    double rate = info.sampleRate;
++    unsigned channels = info.channels;
++    // 10 ms at a time, as a microphone's buffers come.
++    size_t chunk = std::max<size_t>(1, info.sampleRate / 100);
++    std::vector<float> converted;
++    Vector<float> samples;
++    auto baseClock = MonotonicTime::now();
++    auto baseTime = MediaTime::createWithDouble(baseClock.secondsSinceEpoch().value());
++    uint64_t framesSent = 0;
++    bool announcedEnd = false;
++
++    while (true) {
++        {
++            Locker locker { m_lock };
++            if (!m_running)
++                break;
++            m_condition.waitFor(m_lock, 10_ms);
++            if (!m_running)
++                break;
++        }
++        // What is due by the clock, at most half a second at once after a
++        // stall.
++        double due = (MonotonicTime::now() - baseClock).seconds() * rate;
++        for (unsigned sent = 0; framesSent + chunk <= due && sent < 50; ++sent) {
++            size_t frames = speechConvertWavFrames(file, info, framesSent, chunk, converted);
++            samples.fill(0, chunk * channels);
++            if (frames)
++                memcpy(samples.mutableSpan().data(), converted.data(), frames * channels * sizeof(float));
++            else if (!announcedEnd) {
++                // After the recording: silence, which is what ends an
++                // utterance.
++                announcedEnd = true;
++                fprintf(stderr, "Summit speech recognition: the test recording is over; silence follows\n");
++            }
++            auto time = baseTime + MediaTime(framesSent * 1000000 / uint64_t(rate), 1000000);
++            framesSent += chunk;
++            HaikuAudioData audioData(samples.span(), channels);
++            HaikuAudioStreamDescription description(rate, channels);
++            audioSamplesAvailable(time, audioData, description, chunk);
++        }
++    }
++}
++
 +// The center's platform factories.
 +
 +AudioCaptureFactory& RealtimeMediaSourceCenter::defaultAudioCaptureFactory()
@@ -80755,10 +83506,10 @@ index 0000000000000000000000000000000000000000..8c1945d699a005644350d6b61034ef38
 +#endif // ENABLE(MEDIA_STREAM) && PLATFORM(HAIKU)
 diff --git a/Source/WebCore/platform/mediastream/haiku/HaikuCaptureSources.h b/Source/WebCore/platform/mediastream/haiku/HaikuCaptureSources.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..c30c671ef478071a728916fc07d5826314fd3948
+index 0000000000000000000000000000000000000000..01bdd3e9041aa9b4224bc0bab6570c733d5e51df
 --- /dev/null
 +++ b/Source/WebCore/platform/mediastream/haiku/HaikuCaptureSources.h
-@@ -0,0 +1,314 @@
+@@ -0,0 +1,358 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -81040,6 +83791,50 @@ index 0000000000000000000000000000000000000000..c30c671ef478071a728916fc07d58263
 +    // Since when silence stands in for the mixer's buffers, or nothing.
 +    MonotonicTime m_silenceSince WTF_GUARDED_BY_LOCK(m_sendLock);
 +    std::atomic<float> m_gain { 1 };
++    std::optional<RealtimeMediaSourceCapabilities> m_capabilities;
++    std::optional<RealtimeMediaSourceSettings> m_currentSettings;
++};
++
++// A recording in place of the microphone, for speech recognition only
++// (Summit #159, docs/speech-recognition.md): with
++// SUMMIT_RECOGNITION_WAV=<file> in the browser's environment,
++// SpeechRecognition hears that WAV file instead of the microphone, on
++// machines with or without one: played once, in real time, from the moment
++// a recognition starts, and followed by silence. A testing aid: nothing else
++// (getUserMedia(), the list of devices) ever sees it, and without the
++// variable nothing here is used.
++class HaikuSpeechTestAudioSource final : public RealtimeMediaSource, public ThreadSafeRefCountedAndCanMakeThreadSafeWeakPtr<HaikuSpeechTestAudioSource, WTF::DestructionThread::MainRunLoop> {
++public:
++    // The device that stands for the recording; nothing when the variable
++    // is not set.
++    static std::optional<CaptureDevice> device();
++    static bool isTestDevice(const CaptureDevice&);
++    // Reads the file: an error when it is not a WAV file that can be read.
++    static CaptureSourceOrError create(const CaptureDevice&, MediaDeviceHashSalts&&, std::optional<PageIdentifier>);
++    ~HaikuSpeechTestAudioSource();
++
++    WTF_ABSTRACT_THREAD_SAFE_REF_COUNTED_AND_CAN_MAKE_WEAK_PTR_IMPL;
++
++    const RealtimeMediaSourceCapabilities& capabilities() final;
++    const RealtimeMediaSourceSettings& settings() final;
++
++private:
++    struct Recording;
++    HaikuSpeechTestAudioSource(const CaptureDevice&, MediaDeviceHashSalts&&, std::optional<PageIdentifier>, std::unique_ptr<Recording>&&);
++
++    bool isCaptureSource() const final { return true; }
++    CaptureDevice::DeviceType deviceType() const final { return CaptureDevice::DeviceType::Microphone; }
++    void startProducingData() final;
++    void stopProducingData() final;
++
++    // On a thread of its own while producing.
++    void playLoop();
++
++    const std::unique_ptr<Recording> m_recording;
++    RefPtr<Thread> m_thread;
++    Lock m_lock;
++    Condition m_condition;
++    bool m_running WTF_GUARDED_BY_LOCK(m_lock) { false };
 +    std::optional<RealtimeMediaSourceCapabilities> m_capabilities;
 +    std::optional<RealtimeMediaSourceSettings> m_currentSettings;
 +};
@@ -149840,7 +152635,7 @@ index 8842bc89df532e17b4b33db802e2ea5b6d2035ea..951e5f12d016232449caf48d42c936d2
      static bool spellingUIIsShowing();
      static void toggleSpellingUIIsShowing();
 diff --git a/Source/WebKit/UIProcess/UserMediaPermissionRequestManagerProxy.cpp b/Source/WebKit/UIProcess/UserMediaPermissionRequestManagerProxy.cpp
-index ed75cd4b36d92c580f0ad731f77ff6db6efebcef..23bcac32f305bfa7c78d2b044874870db8079176 100644
+index ed75cd4b36d92c580f0ad731f77ff6db6efebcef..3321187062a5725d15a4d6e939b94693ca01d46d 100644
 --- a/Source/WebKit/UIProcess/UserMediaPermissionRequestManagerProxy.cpp
 +++ b/Source/WebKit/UIProcess/UserMediaPermissionRequestManagerProxy.cpp
 @@ -710,7 +710,7 @@ void UserMediaPermissionRequestManagerProxy::processUserMediaPermissionRequest()
@@ -149869,7 +152664,24 @@ index ed75cd4b36d92c580f0ad731f77ff6db6efebcef..23bcac32f305bfa7c78d2b044874870d
      denyRequest(protect(*m_currentUserMediaRequest), filterConstraint ? MediaConstraintType::Unknown : invalidConstraint);
  }
  
-@@ -966,7 +976,7 @@ bool UserMediaPermissionRequestManagerProxy::wasGrantedVideoAccess(FrameIdentifi
+@@ -847,6 +857,16 @@ void UserMediaPermissionRequestManagerProxy::checkUserMediaPermissionForSpeechRe
+         return;
+     }
+ 
++#if PLATFORM(HAIKU)
++    // A WebDriver-controlled page captures without a prompt
++    // (markPageAutomatedHaiku), as getUserMedia() does there; nobody could
++    // answer one. Speech recognition is no different (Summit #159).
++    if (Ref preferences = page->preferences(); preferences->mockCaptureDevicesEnabled() && !preferences->mockCaptureDevicesPromptEnabled()) {
++        request->decisionCompletionHandler()(true);
++        return;
++    }
++#endif
++
+     Ref apiRequestingOrigin = API::SecurityOrigin::create(requestingOrigin);
+     Ref apiTopOrigin = API::SecurityOrigin::create(topOrigin);
+     page->uiClient().decidePolicyForUserMediaPermissionRequest(*page, *frame, WTF::move(apiRequestingOrigin), WTF::move(apiTopOrigin), request.get());
+@@ -966,7 +986,7 @@ bool UserMediaPermissionRequestManagerProxy::wasGrantedVideoAccess(FrameIdentifi
      return m_grantedVideoFrames.contains(frameID);
  }
  
@@ -164310,10 +167122,10 @@ index 0000000000000000000000000000000000000000..c9a119d02f85b7c5ad8fe9153bfc9604
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebView.cpp b/Source/WebKit/UIProcess/haiku/WebView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..5c75a791f47e52b650852eaf9b7c9560aab3ec48
+index 0000000000000000000000000000000000000000..f5f01198105d87a882e3554e98da8196c7a623c8
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebView.cpp
-@@ -0,0 +1,3763 @@
+@@ -0,0 +1,3776 @@
 +/*
 + * Copyright (C) 2013 Intel Corporation. All rights reserved.
 + *
@@ -164424,6 +167236,7 @@ index 0000000000000000000000000000000000000000..5c75a791f47e52b650852eaf9b7c9560
 +#include <WebCore/RegistrableDomain.h>
 +#include <WebCore/DragData.h>
 +#include <WebCore/SleepDisablerClient.h>
++#include <WebCore/SpeechRecognizer.h>
 +#include "WebHitTestResultData.h"
 +#if ENABLE(WK_WEB_EXTENSIONS)
 +#include "WebExtension.h"
@@ -166562,6 +169375,18 @@ index 0000000000000000000000000000000000000000..5c75a791f47e52b650852eaf9b7c9560
 +#if ENABLE(MEDIA_RECORDER)
 +    configuration->preferences().setMediaRecorderEnabled(true);
 +#endif
++    // SpeechRecognition (Summit #159) on the system's recogniser, a Whisper
++    // model the Neural Kit runs on this machine, through the microphone
++    // permission (WebCore/Modules/speech/haiku). The interface is there
++    // where the system has the recogniser, so that pages do not offer
++    // dictation that cannot work (stock Haiku, air/OS before the kit).
++    // SUMMIT_RECOGNITION=1 shows it anyway (start() then fails with
++    // service-not-allowed), SUMMIT_RECOGNITION=0 never.
++    {
++        const char* recognition = std::getenv("SUMMIT_RECOGNITION");
++        bool enabled = recognition && *recognition ? !!std::strcmp(recognition, "0") : WebCore::SpeechRecognizer::platformRecognizerAvailable();
++        configuration->preferences().setSpeechRecognitionEnabled(enabled && !summitPreferenceOffHaiku("recognition"));
++    }
 +    // Media capture on plain http://localhost pages and file: URLs is for
 +    // testing: SUMMIT_INSECURE_MEDIA_CAPTURE=1.
 +    if (const char* insecure = std::getenv("SUMMIT_INSECURE_MEDIA_CAPTURE"); insecure && !std::strcmp(insecure, "1"))
