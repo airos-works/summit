@@ -43363,6 +43363,39 @@ index 28829bd1aac3177356f62c6aa30919288ca3f36d..dd1f607e1a46f9b6671af2089bd35256
      mutable GLExtensions m_glExtensions;
  };
  
+diff --git a/Source/WebCore/platform/graphics/egl/GLFence.cpp b/Source/WebCore/platform/graphics/egl/GLFence.cpp
+index 06b199654b906c399313f5f2b11f0a14748d3ee8..bb037afe50c30633c8db6203cf49eaf6c49fb829 100644
+--- a/Source/WebCore/platform/graphics/egl/GLFence.cpp
++++ b/Source/WebCore/platform/graphics/egl/GLFence.cpp
+@@ -20,6 +20,11 @@
+ #include "config.h"
+ #include "GLFence.h"
+ 
++#if PLATFORM(HAIKU)
++#include <cstdlib>
++#include <cstring>
++#endif
++
+ #include "GLContext.h"
+ #include "GLDisplay.h"
+ #include "GLFenceEGL.h"
+@@ -66,6 +71,16 @@ bool GLFence::isSupported(const GLDisplay& display)
+ 
+ std::unique_ptr<GLFence> GLFence::create(const GLDisplay& display)
+ {
++#if PLATFORM(HAIKU)
++    // SUMMIT_GL_FENCE=0: no fences, so flushes wait for the GPU instead (as
++    // before HAVE_GL_FENCE was set for Haiku), for comparisons.
++    static const bool fencesOff = [] {
++        const char* value = getenv("SUMMIT_GL_FENCE");
++        return value && !strcmp(value, "0");
++    }();
++    if (fencesOff)
++        return nullptr;
++#endif
+ #if HAVE(GL_FENCE)
+     auto* context = GLContextWrapper::currentContext();
+     if (!context)
 diff --git a/Source/WebCore/platform/graphics/egl/GLFenceEGL.cpp b/Source/WebCore/platform/graphics/egl/GLFenceEGL.cpp
 index dee3a440582ce6b1384f94b6d755e9122bc20e68..b49252f25f54b75e3e963fb3f79078922111561f 100644
 --- a/Source/WebCore/platform/graphics/egl/GLFenceEGL.cpp
@@ -225535,10 +225568,10 @@ index 359c3765d3a41ba1c6cfdb6b44fa292cc7811a0d..18a4d1524bbb7a68b2bec420d013fd89
  endif ()
 diff --git a/Source/cmake/OptionsHaiku.cmake b/Source/cmake/OptionsHaiku.cmake
 new file mode 100644
-index 0000000000000000000000000000000000000000..994433aac1fd8ed55ccba8f2ae7c6aacebdc12d2
+index 0000000000000000000000000000000000000000..cba5cc7b8ae7d71d1572071b69857375d3919272
 --- /dev/null
 +++ b/Source/cmake/OptionsHaiku.cmake
-@@ -0,0 +1,457 @@
+@@ -0,0 +1,466 @@
 +include(GNUInstallDirs)
 +include(VersioningUtils)
 +
@@ -225812,6 +225845,15 @@ index 0000000000000000000000000000000000000000..994433aac1fd8ed55ccba8f2ae7c6aac
 +    find_package(EGL REQUIRED)
 +    SET_AND_EXPOSE_TO_BUILD(USE_EGL TRUE)
 +endif ()
++
++# GL fences (EGL 1.5 / KHR_fence_sync, or GL 3 sync objects), as GTK and WPE
++# have them. Without them GLFence::create() returned nothing and every GPU
++# tile, accelerated canvas flush and WebGL frame waited for the GPU
++# (GrSyncCpu::kYes), so the tile painting threads ran one at a time. With
++# them and Mesa's asynchronous fence flushes (airos-works/mesa 04eee2a),
++# MotionMark 1.3.1 on the X399 (NVK, GPU tiles) went 304 -> 619.
++# SUMMIT_GL_FENCE=0 turns them off.
++SET_AND_EXPOSE_TO_BUILD(HAVE_GL_FENCE TRUE)
 +
 +SET_AND_EXPOSE_TO_BUILD(USE_INSPECTOR_SOCKET_SERVER ${ENABLE_REMOTE_INSPECTOR})
 +
