@@ -154595,7 +154595,7 @@ index d9243a6e70f5b6759cb9d98941df81778c31e1c9..43fbd7c6716da249ae7c929d4321aa42
          }
      }
 diff --git a/Source/WebKit/UIProcess/WebProcessPool.cpp b/Source/WebKit/UIProcess/WebProcessPool.cpp
-index cf634997b899951b6afccf716c62137a21a66d6a..383266349c7bf812325fb50d41f77f441d85022b 100644
+index cf634997b899951b6afccf716c62137a21a66d6a..216e50955c3caf015f24296a4e49a679938eee73 100644
 --- a/Source/WebKit/UIProcess/WebProcessPool.cpp
 +++ b/Source/WebKit/UIProcess/WebProcessPool.cpp
 @@ -144,6 +144,8 @@
@@ -154748,19 +154748,25 @@ index cf634997b899951b6afccf716c62137a21a66d6a..383266349c7bf812325fb50d41f77f44
          tryPrewarmWithDomainInformation(sourceProcess, targetSite.domain());
          return { WTF::move(sourceProcess), nullptr, "Process has not yet committed any provisional loads"_s };
      }
-@@ -2562,6 +2672,11 @@ std::tuple<Ref<WebProcessProxy>, RefPtr<SuspendedPageProxy>, ASCIILiteral> WebPr
+@@ -2562,6 +2672,17 @@ std::tuple<Ref<WebProcessProxy>, RefPtr<SuspendedPageProxy>, ASCIILiteral> WebPr
          return { WTF::move(sourceProcess), nullptr, "Navigation within the same non-HTTP(s) protocol"_s };
  
      bool sourceURLIsInvalid = !sourceURL.isValid() || sourceURL.isEmpty();
 +#if OS(HAIKU)
++    // A fragment navigation (location.hash, an anchor) stays in its document:
++    // swapping for it turned it into a full reload of the page, which lost
++    // Speedometer's results at #summary and started the run again (the page
++    // has ?startAutomatically), every run, once its process held 768 MiB.
++    bool fragmentNavigationHaiku = targetURL.hasFragmentIdentifier() && equalIgnoringFragmentIdentifier(targetURL, sourceURL)
++        && navigation.currentRequest().httpMethod() == "GET"_s;
 +    if (!siteIsolationEnabled && frame.isMainFrame() && !sourceURLIsInvalid && targetURL.isValid() && targetURL.protocolIsInHTTPFamily()
-+        && targetSite.domain().matches(sourceURL) && shouldLeaveBloatedProcessHaiku(sourceProcess))
++        && targetSite.domain().matches(sourceURL) && !fragmentNavigationHaiku && shouldLeaveBloatedProcessHaiku(sourceProcess))
 +        return { createNewProcess(), nullptr, "Same-site navigation leaves a bloated process"_s };
 +#endif
      if (!siteIsolationEnabled && (sourceURLIsInvalid || !targetURL.isValid() || targetSite.domain().matches(sourceURL)))
          return { WTF::move(sourceProcess), nullptr, "Navigation is same-site"_s };
  
-@@ -2608,6 +2723,10 @@ std::tuple<Ref<WebProcessProxy>, RefPtr<SuspendedPageProxy>, ASCIILiteral> WebPr
+@@ -2608,6 +2729,10 @@ std::tuple<Ref<WebProcessProxy>, RefPtr<SuspendedPageProxy>, ASCIILiteral> WebPr
          }
      }
  
