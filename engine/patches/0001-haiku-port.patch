@@ -3762,10 +3762,18 @@ index 20bf4afc44c82cfa659ee14666984f92f9c713ed..aa12afb027199ee11fce7cae96a0d17b
    zx_status_t status = zx_object_set_property(zx_thread_self(), ZX_PROP_NAME,
                                                name, strlen(name));
 diff --git a/Source/ThirdParty/skia/CMakeLists.txt b/Source/ThirdParty/skia/CMakeLists.txt
-index 679b31f339a04bb1a8633f5d8b149701c17b43e5..69cada4c1dfff257dd46b09a01ee04427557abfb 100644
+index 679b31f339a04bb1a8633f5d8b149701c17b43e5..a65e7c2e81d3a7b19e953bd4486ecb7a911b2ea1 100644
 --- a/Source/ThirdParty/skia/CMakeLists.txt
 +++ b/Source/ThirdParty/skia/CMakeLists.txt
-@@ -177,6 +177,7 @@ add_library(Skia STATIC
+@@ -65,6 +65,7 @@ add_library(Skia STATIC
+     src/core/SkBlendMode.cpp
+     src/core/SkBlendModeBlender.cpp
+     src/core/SkBlitMask_opts.cpp
++    src/core/SkBlitMask_opts_ml3.cpp
+     src/core/SkBlitMask_opts_ssse3.cpp
+     src/core/SkBlitRow_D32.cpp
+     src/core/SkBlitRow_opts.cpp
+@@ -177,6 +178,7 @@ add_library(Skia STATIC
      src/core/SkPath.cpp
      src/core/SkPathBuilder.cpp
      src/core/SkPathData.cpp
@@ -3773,7 +3781,7 @@ index 679b31f339a04bb1a8633f5d8b149701c17b43e5..69cada4c1dfff257dd46b09a01ee0442
      src/core/SkPathEffect.cpp
      src/core/SkPathIter.cpp
      src/core/SkPathMeasure.cpp
-@@ -1084,6 +1085,18 @@ target_compile_definitions(Skia PUBLIC
+@@ -1084,6 +1086,18 @@ target_compile_definitions(Skia PUBLIC
      SK_ASSUME_WEBGL=0
  )
  
@@ -3792,7 +3800,7 @@ index 679b31f339a04bb1a8633f5d8b149701c17b43e5..69cada4c1dfff257dd46b09a01ee0442
  if (WIN32)
      target_compile_definitions(Skia PRIVATE SK_TYPEFACE_FACTORY_DIRECTWRITE)
  else ()
-@@ -1134,16 +1147,16 @@ if (WTF_CPU_X86 OR WTF_CPU_X86_64)
+@@ -1134,16 +1148,16 @@ if (WTF_CPU_X86 OR WTF_CPU_X86_64)
  
      WEBKIT_CHECK_COMPILER_FLAGS(CXX Skia_CXX_USE_x86_64_v3 "-march=x86-64-v3")
      if (Skia_CXX_USE_x86_64_v3)
@@ -3813,6 +3821,70 @@ index 679b31f339a04bb1a8633f5d8b149701c17b43e5..69cada4c1dfff257dd46b09a01ee0442
      endif ()
  endif ()
  
+diff --git a/Source/ThirdParty/skia/src/core/SkBlitMask_opts.cpp b/Source/ThirdParty/skia/src/core/SkBlitMask_opts.cpp
+index 21420314a09289edc0634092a6623a41c3662d56..0a423fbf11c687c3ddaf3cbaae20b535539d5b30 100644
+--- a/Source/ThirdParty/skia/src/core/SkBlitMask_opts.cpp
++++ b/Source/ThirdParty/skia/src/core/SkBlitMask_opts.cpp
+@@ -21,6 +21,7 @@ namespace SkOpts {
+     DEFINE_DEFAULT(blit_mask_d32_a8);
+ 
+     void Init_BlitMask_ssse3();
++    void Init_BlitMask_ml3();
+ 
+     static bool init() {
+     #if defined(SK_ENABLE_OPTIMIZE_SIZE)
+@@ -29,6 +30,9 @@ namespace SkOpts {
+         #if SK_CPU_X64_LEVEL < SK_CPU_X64_LEVEL_SSSE3
+             if (SkCpu::Supports(SkX64::SSSE3)) { Init_BlitMask_ssse3(); }
+         #endif
++        #if SK_CPU_X64_LEVEL < SK_CPU_X64_LEVEL_AVX2
++            if (SkCpu::Supports(SkX64::ML3)) { Init_BlitMask_ml3(); }
++        #endif
+     #endif
+       return true;
+     }
+diff --git a/Source/ThirdParty/skia/src/core/SkBlitMask_opts_ml3.cpp b/Source/ThirdParty/skia/src/core/SkBlitMask_opts_ml3.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..a4177146295892bee55c077619cd9f539c11f61e
+--- /dev/null
++++ b/Source/ThirdParty/skia/src/core/SkBlitMask_opts_ml3.cpp
+@@ -0,0 +1,36 @@
++/*
++ * Copyright 2023 Google LLC
++ *
++ * Use of this source code is governed by a BSD-style license that can be
++ * found in the LICENSE file.
++ */
++
++#include "include/private/SkFeatures.h"
++#include "src/core/SkBlitMask.h"
++#include "src/core/SkOptsTargets.h"
++
++// Haiku port (Summit): the A8 glyph mask blend at AVX2 width. Text painted
++// on the CPU spent 58 % of its time in the SSSE3 build of this blit (X399,
++// MotionMark Design); this build of the same code is 19 % faster there and
++// gives identical pixels.
++#if defined(SK_CPU_X86) && !defined(SK_ENABLE_OPTIMIZE_SIZE)
++
++// The order of these includes is important:
++// 1) Select the target CPU architecture by defining SK_OPTS_TARGET and including SkOpts_SetTarget
++// 2) Include the code to compile, typically in a _opts.h file.
++// 3) Include SkOpts_RestoreTarget to switch back to the default CPU architecture
++
++#define SK_OPTS_TARGET SK_OPTS_TARGET_ML3
++#include "src/opts/SkOpts_SetTarget.h"
++
++#include "src/opts/SkBlitMask_opts.h"
++
++#include "src/opts/SkOpts_RestoreTarget.h"
++
++namespace SkOpts {
++    void Init_BlitMask_ml3() {
++        blit_mask_d32_a8 = ml3::blit_mask_d32_a8;
++    }
++}  // namespace SkOpts
++
++#endif // SK_CPU_X86 && !SK_ENABLE_OPTIMIZE_SIZE
 diff --git a/Source/WTF/Scripts/Preferences/UnifiedWebPreferences.yaml b/Source/WTF/Scripts/Preferences/UnifiedWebPreferences.yaml
 index b6d135a1282843e5d5c81d4a56a6e6cd4d46379d..69905c855dd7e885d653ae23562cf9c3bb13de6c 100644
 --- a/Source/WTF/Scripts/Preferences/UnifiedWebPreferences.yaml
