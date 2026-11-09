@@ -1,0 +1,132 @@
+diff --git a/src/gallium/auxiliary/util/u_threaded_context.c b/src/gallium/auxiliary/util/u_threaded_context.c
+index d3c977a..2190e94 100644
+--- a/src/gallium/auxiliary/util/u_threaded_context.c
++++ b/src/gallium/auxiliary/util/u_threaded_context.c
+@@ -95,6 +95,24 @@ tc_buffer_subdata(struct pipe_context *_pipe,
+                   unsigned usage, unsigned offset,
+                   unsigned size, const void *data);
+ 
++#include <stdio.h>
++#include <stdlib.h>
++static inline void haiku_upload_stat(const char *what, unsigned bytes)
++{
++   static int on = -1;
++   if (on < 0) on = getenv("ZINK_HAIKU_UPLOAD_STATS") != NULL;
++   if (!on) return;
++   static struct { const char *w; unsigned n; unsigned long long b; } s[16];
++   unsigned i;
++   for (i = 0; i < 16 && s[i].w && s[i].w != what; i++);
++   if (i == 16) return;
++   s[i].w = what;
++   unsigned n = __atomic_add_fetch(&s[i].n, 1, __ATOMIC_RELAXED);
++   __atomic_add_fetch(&s[i].b, bytes, __ATOMIC_RELAXED);
++   if (!(n % 2000))
++      fprintf(stderr, "UPSTAT %s n=%u MiB=%llu\n", what, n, s[i].b >> 20);
++}
++
+ static void
+ tc_batch_check(UNUSED struct tc_batch *batch)
+ {
+@@ -3308,6 +3326,7 @@ tc_texture_subdata(struct pipe_context *_pipe,
+ 
+    /* Small uploads can be enqueued, big uploads must sync. */
+    if (size <= TC_MAX_SUBDATA_BYTES) {
++      haiku_upload_stat("tc-small", size);
+       struct tc_texture_subdata *p =
+          tc_add_slot_based_call(tc, TC_CALL_texture_subdata, tc_texture_subdata, size);
+ 
+@@ -3327,17 +3346,59 @@ tc_texture_subdata(struct pipe_context *_pipe,
+                         tc->options.is_resource_busy &&
+                         !tc->options.is_resource_busy(tc->pipe->screen, tres->latest, usage | unsync_usage);
+ 
++#if DETECT_OS_HAIKU
++      /* An image the GPU may still be reading (every compositor tile: it
++       * was drawn last frame) was uploaded after a tc_sync, the application
++       * thread waiting for the driver thread to drain its queue, for each
++       * upload (X399, NVK: 1.5 million times in one MotionMark run). The
++       * pixels are copied into a streaming buffer instead and the copy into
++       * the image is queued in order, like the tiler path below but with
++       * the buffer suballocated rather than created per upload.
++       * TC_HAIKU_ASYNC_SUBDATA=0 syncs as before. */
++      static int async_subdata = -1;
++      if (async_subdata < 0) {
++         const char *value = getenv("TC_HAIKU_ASYNC_SUBDATA");
++         async_subdata = !value || value[0] != '0';
++      }
++      if (!can_unsync && async_subdata && pipe->image_copy_buffer &&
++          resource->target != PIPE_BUFFER && resource->nr_samples <= 1 &&
++          !util_format_is_depth_or_stencil(resource->format) &&
++          stride && size <= 16 * 1024 * 1024) {
++         if (!tc->haiku_subdata_uploader)
++            tc->haiku_subdata_uploader = u_upload_create(&tc->base, 32 * 1024 * 1024,
++                                                         0, PIPE_USAGE_STREAM, 0);
++         struct pipe_resource *pres = NULL;
++         unsigned offset = 0;
++         void *map = NULL;
++         if (tc->haiku_subdata_uploader)
++            u_upload_alloc_ref(tc->haiku_subdata_uploader, 0, size, 256,
++                               &offset, &pres, &map);
++         if (pres && map) {
++            haiku_upload_stat("tc-async", size);
++            memcpy(map, data, size);
++            uintptr_t buffer_layer_stride = box->depth > 1 ? layer_stride : (uintptr_t)stride * box->height;
++            tc->base.image_copy_buffer(&tc->base, resource, pres, offset, stride,
++                                       buffer_layer_stride, level, box);
++            pipe_resource_reference(&pres, NULL);
++            return;
++         }
++         pipe_resource_reference(&pres, NULL);
++      }
++#endif
+       if (!can_unsync && resource->usage != PIPE_USAGE_STAGING &&
+           tc->options.parse_renderpass_info && tc->in_renderpass) {
+          /* upload to staging buffer and then buf2img copy */
++         haiku_upload_stat("tc-bufcreate", size);
+          struct pipe_resource *pres = pipe_buffer_create(pipe->screen, 0, PIPE_USAGE_STREAM, layer_stride * box->depth);
+          pipe->buffer_subdata(pipe, pres, unsync_usage, 0, layer_stride * box->depth, data);
+          tc->base.image_copy_buffer(&tc->base, resource, pres, 0, stride, layer_stride, level, box);
+          pipe_resource_reference(&pres, NULL);
+       } else {
+          if (can_unsync) {
++            haiku_upload_stat("tc-unsync", size);
+             usage |= unsync_usage;
+          } else {
++            haiku_upload_stat("tc-sync", size);
+             tc_sync(tc);
+             tc_set_driver_thread(tc);
+          }
+@@ -5428,6 +5489,11 @@ tc_destroy(struct pipe_context *_pipe)
+    if (tc->base.stream_uploader)
+       u_upload_destroy(tc->base.stream_uploader);
+ 
++#if DETECT_OS_HAIKU
++   if (tc->haiku_subdata_uploader)
++      u_upload_destroy(tc->haiku_subdata_uploader);
++#endif
++
+    tc_sync(tc);
+ 
+    if (util_queue_is_initialized(&tc->queue)) {
+diff --git a/src/gallium/auxiliary/util/u_threaded_context.h b/src/gallium/auxiliary/util/u_threaded_context.h
+index f0c592d..f19fa19 100644
+--- a/src/gallium/auxiliary/util/u_threaded_context.h
++++ b/src/gallium/auxiliary/util/u_threaded_context.h
+@@ -206,6 +206,7 @@
+ #include "util/u_thread.h"
+ #include "util/slab.h"
+ #include "util/u_dynarray.h"
++#include "util/detect_os.h"
+ 
+ #ifdef __cplusplus
+ extern "C" {
+@@ -690,6 +691,10 @@ struct threaded_context {
+    struct tc_renderpass_info *renderpass_info;
+    /* internal-only: if dsa/fs are bound between render passes */
+    void *pending_renderpass_dsa, *pending_renderpass_fs;
++#if DETECT_OS_HAIKU
++   /* accessed by main thread: staging for texture uploads to busy images */
++   struct u_upload_mgr *haiku_subdata_uploader;
++#endif
+ };
+ 
+ 
