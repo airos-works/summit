@@ -331,7 +331,11 @@ models other than `whisper-tiny.en`, and languages other than English.
   is not waited for.
 - Under WebDriver the recogniser is the real one (there is no mock
   recogniser), and without `SUMMIT_RECOGNITION_WAV` it hears the mock
-  microphone's beeps.
+  microphone's beeps. A page a WebDriver session controls always gets
+  WebKit's mock microphone (#188), so the WebDriver test never exercises the
+  real capture path (HaikuCaptureNode). Check a real microphone by hand: a
+  sound card that an earlier recorder left disabled sent no buffers at all
+  until the capture node turned its output on again (#204).
 
 ## Packaging
 
