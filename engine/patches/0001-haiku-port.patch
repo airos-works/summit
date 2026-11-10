@@ -67561,7 +67561,7 @@ index ec1913422db0d8b09376627bf859ea6a40c13ebb..c16f04c3a9a5d873f8fbf3ca7ad5bc2b
      computeHeadroom();
  }
 diff --git a/Source/WebCore/platform/graphics/skia/PlatformDisplaySkia.cpp b/Source/WebCore/platform/graphics/skia/PlatformDisplaySkia.cpp
-index 776466ea87d3d721d32ac4e52db702bb2b544e46..e2addc5186a9623c0ba79863deefba9b71b6eee3 100644
+index 776466ea87d3d721d32ac4e52db702bb2b544e46..7df8a8859b7c07bec978aca3fa3770a21fe6d95c 100644
 --- a/Source/WebCore/platform/graphics/skia/PlatformDisplaySkia.cpp
 +++ b/Source/WebCore/platform/graphics/skia/PlatformDisplaySkia.cpp
 @@ -29,6 +29,9 @@
@@ -67584,19 +67584,26 @@ index 776466ea87d3d721d32ac4e52db702bb2b544e46..e2addc5186a9623c0ba79863deefba9b
  #include <skia/gpu/ganesh/gl/epoxy/GrGLMakeEpoxyEGLInterface.h>
  #else
  #include <EGL/egl.h>
-@@ -55,6 +61,11 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
+@@ -55,6 +61,18 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
  #include <wtf/ThreadSafeWeakPtr.h>
  #include <wtf/text/StringToIntegerConversion.h>
  
 +#if PLATFORM(HAIKU)
++#include <FindDirectory.h>
 +#include <OS.h>
++#include <cstdio>
 +#include <locale.h>
++#include <skia/core/SkData.h>
++#include <sys/stat.h>
++#include <unistd.h>
++#include <string>
++#include <wtf/SHA1.h>
 +#endif
 +
  #if USE(LIBDRM)
  #include <fcntl.h>
  #include <unistd.h>
-@@ -95,6 +106,31 @@ static sk_sp<const GrGLInterface> skiaGLInterface()
+@@ -95,6 +113,31 @@ static sk_sp<const GrGLInterface> skiaGLInterface()
  
  static thread_local RefPtr<SkiaGLContext> s_skiaGLContext;
  
@@ -67628,7 +67635,116 @@ index 776466ea87d3d721d32ac4e52db702bb2b544e46..e2addc5186a9623c0ba79863deefba9b
  #if USE(LIBDRM)
  static inline bool isNewIntelDevice()
  {
-@@ -280,8 +316,13 @@ public:
+@@ -257,6 +300,108 @@ static size_t initializeMaxResourceCacheBytes(GrDirectContext* grContext)
+     return grContext->getResourceCacheLimit();
+ }
+ 
++#if PLATFORM(HAIKU)
++// Skia's compiled GL programs, kept on disk for every web process
++// (GrContextOptions::fPersistentCache, program binaries). Each new process
++// compiled each of Skia's programs again: on the X399's zink/NVK a program
++// is 8-11 ms to compile and link and 2-3 ms more to draw with first, against
++// 0.1 ms to load its binary and 0.5 ms to draw: a good part of a new tab's
++// first frame and of a page's first canvas. One file a program in the
++// user's cache directory, under a directory for the GL renderer and version
++// (the driver refuses a binary that is not its own; Skia then compiles).
++// Written to a temporary name and renamed, so a process never reads half a
++// file. SUMMIT_SKIA_PROGRAM_CACHE=0 turns it off.
++class SkiaProgramCacheHaiku final : public GrContextOptions::PersistentCache {
++public:
++    static SkiaProgramCacheHaiku* forCurrentContext()
++    {
++        static const bool enabled = [] {
++            const char* value = getenv("SUMMIT_SKIA_PROGRAM_CACHE");
++            return !value || strcmp(value, "0");
++        }();
++        if (!enabled)
++            return nullptr;
++        static SkiaProgramCacheHaiku* cache = [] () -> SkiaProgramCacheHaiku* {
++            char base[B_PATH_NAME_LENGTH];
++            if (find_directory(B_USER_CACHE_DIRECTORY, -1, true, base, sizeof(base)) != B_OK)
++                return nullptr;
++            const char* renderer = reinterpret_cast<const char*>(glGetString(GL_RENDERER));
++            const char* version = reinterpret_cast<const char*>(glGetString(GL_VERSION));
++            if (!renderer || !version)
++                return nullptr;
++            SHA1 sha1;
++            sha1.addBytes(std::span { reinterpret_cast<const uint8_t*>(renderer), strlen(renderer) });
++            sha1.addBytes(std::span { reinterpret_cast<const uint8_t*>(version), strlen(version) });
++            SHA1::Digest digest;
++            sha1.computeHash(digest);
++            auto driver = SHA1::hexDigest(digest);
++            std::string directory = std::string(base) + "/Summit";
++            mkdir(directory.c_str(), 0755);
++            directory += "/skia-programs";
++            mkdir(directory.c_str(), 0755);
++            directory += "/" + std::string(driver.data(), 16);
++            mkdir(directory.c_str(), 0755);
++            return new SkiaProgramCacheHaiku(WTF::move(directory));
++        }();
++        return cache;
++    }
++
++    sk_sp<SkData> load(const SkData& key) final
++    {
++        auto path = pathFor(key);
++        FILE* file = fopen(path.c_str(), "rb");
++        if (!file)
++            return nullptr;
++        sk_sp<SkData> data;
++        struct stat info;
++        if (!fstat(fileno(file), &info) && info.st_size > 0 && info.st_size <= maxEntryBytes) {
++            data = SkData::MakeUninitialized(info.st_size);
++            if (fread(data->writable_data(), 1, info.st_size, file) != static_cast<size_t>(info.st_size))
++                data = nullptr;
++        }
++        fclose(file);
++        return data;
++    }
++
++    void store(const SkData& key, const SkData& data, const SkString&) final
++    {
++        if (!data.size() || data.size() > maxEntryBytes)
++            return;
++        auto path = pathFor(key);
++        char suffix[32];
++        snprintf(suffix, sizeof(suffix), ".%d.%d", static_cast<int>(getpid()), static_cast<int>(find_thread(nullptr)));
++        std::string temporary = path + suffix;
++        FILE* file = fopen(temporary.c_str(), "wb");
++        if (!file)
++            return;
++        bool written = fwrite(data.data(), 1, data.size(), file) == data.size();
++        written = !fclose(file) && written;
++        if (!written || rename(temporary.c_str(), path.c_str()))
++            unlink(temporary.c_str());
++    }
++
++private:
++    static constexpr off_t maxEntryBytes = 4 * 1024 * 1024;
++
++    explicit SkiaProgramCacheHaiku(std::string&& directory)
++        : m_directory(WTF::move(directory))
++    {
++    }
++
++    std::string pathFor(const SkData& key) const
++    {
++        SHA1 sha1;
++        sha1.addBytes(std::span { static_cast<const uint8_t*>(key.data()), key.size() });
++        SHA1::Digest digest;
++        sha1.computeHash(digest);
++        auto name = SHA1::hexDigest(digest);
++        return m_directory + "/" + std::string(name.data(), name.length());
++    }
++
++    const std::string m_directory;
++};
++#endif
++
+ class SkiaGLContext : public ThreadSafeRefCountedAndCanMakeThreadSafeWeakPtr<SkiaGLContext> {
+ public:
+     static Ref<SkiaGLContext> create(PlatformDisplay& display)
+@@ -280,8 +425,13 @@ public:
          // terminates the display. Once it is terminated, drop the Skia resources without calling into GL.
          RefPtr display = glContext->display();
          bool didRelease = display && display->runIfNotTerminated([&](EGLDisplay) {
@@ -67644,7 +67760,7 @@ index 776466ea87d3d721d32ac4e52db702bb2b544e46..e2addc5186a9623c0ba79863deefba9b
              grContext = nullptr;
          });
          if (!didRelease)
-@@ -317,6 +358,10 @@ public:
+@@ -317,6 +467,10 @@ public:
              return;
  
          GLContext::ScopedGLContextCurrent scopedCurrent(*m_skiaGLContext);
@@ -67655,7 +67771,17 @@ index 776466ea87d3d721d32ac4e52db702bb2b544e46..e2addc5186a9623c0ba79863deefba9b
          switch (critical) {
          case Critical::No:
              m_skiaGrContext->purgeUnlockedResources(GrPurgeResourceOptions::kScratchResourcesOnly);
-@@ -369,10 +414,68 @@ private:
+@@ -350,6 +504,9 @@ private:
+         options.fExecutor = s_executor.get();
+         if (auto bytes = glyphCacheTextureMaximumBytes())
+             options.fGlyphCacheTextureMaximumBytes = *bytes;
++#if PLATFORM(HAIKU)
++        options.fPersistentCache = SkiaProgramCacheHaiku::forCurrentContext();
++#endif
+ 
+         if (auto grContext = GrDirectContexts::MakeGL(skiaGLInterface(), options)) {
+             m_skiaGLContext = WTF::move(glContext);
+@@ -369,10 +526,68 @@ private:
  
  GLContext* PlatformDisplay::skiaGLContext()
  {
@@ -67725,7 +67851,7 @@ index 776466ea87d3d721d32ac4e52db702bb2b544e46..e2addc5186a9623c0ba79863deefba9b
      }
      return s_skiaGLContext->skiaGLContext();
  #else
-@@ -389,6 +492,9 @@ void PlatformDisplay::setSkiaGLContextForCurrentThread(std::unique_ptr<GLContext
+@@ -389,6 +604,9 @@ void PlatformDisplay::setSkiaGLContextForCurrentThread(std::unique_ptr<GLContext
          return;
      }
      ASSERT(!s_skiaGLContext);
