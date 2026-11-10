@@ -203,6 +203,18 @@ constexpr uint32 kMoveTabToNewWindow = 'mtnw';
 constexpr uint32 kDuplicateTab = 'dtab';
 constexpr uint32 kCloseOtherTabs = 'cotb';
 constexpr uint32 kReloadTab = 'rtbx';
+// A crashed web process's report (CrashReporter.h), from the reporter to the
+// application, which passes it to every window: "team" (int32), "path" (the
+// full report), "title" (for the issue), "heading" (its crash lines) and
+// "frame" (the crashed thread's stack, one string per frame).
+constexpr uint32 kCrashReportReady = 'crrd';
+// The crash page's answer to "send this report?" (to the window: "path",
+// "send" bool), then to every window from the application ("path"): the
+// report is answered and no crash page asks about it any more.
+constexpr uint32 kCrashReportAnswer = 'crra';
+constexpr uint32 kCrashReportAnswered = 'crrz';
+// The crash page's Show Report: opens "path".
+constexpr uint32 kShowCrashReport = 'crsh';
 constexpr uint32 kProfileChanged = 'prfc';
 // File › Check for Updates… and Preferences › General › Check Now (to the
 // application, which asks its UpdateChecker).

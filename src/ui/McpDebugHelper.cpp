@@ -105,8 +105,10 @@ public:
         if (sDebug.createLookup(context, -1, &fLookup) != B_OK) fLookup = nullptr;
         int32 cookie = 0;
         image_info image;
-        while (get_next_image_info(team, &cookie, &image) == B_OK)
+        while (get_next_image_info(team, &cookie, &image) == B_OK) {
             fText.push_back({addr_t(image.text), addr_t(image.text) + addr_t(image.text_size)});
+            fImages.push_back(image);
+        }
         // JavaScript and the engine's generated code, when the process writes
         // JITDump files (JSC_useJITDump=1), where JavaScriptCore puts them:
         // this helper has Summit's environment, as the web processes do.
@@ -119,6 +121,22 @@ public:
     {
         if (fLookup) sDebug.deleteLookup(fLookup);
     }
+    // "libWebKit.so.1+0x1a2b3c": the image and the offset from its text,
+    // which addr2line takes with the image's unstripped build; empty outside
+    // every image (JIT code).
+    std::string Location(addr_t address) const
+    {
+        for (const auto& image : fImages) {
+            const addr_t start = addr_t(image.text);
+            if (address < start || address >= start + addr_t(image.text_size)) continue;
+            const char* slash = std::strrchr(image.name, '/');
+            char offset[32];
+            std::snprintf(offset, sizeof(offset), "+0x%lx", static_cast<unsigned long>(address - start));
+            return std::string(slash ? slash + 1 : image.name) + offset;
+        }
+        return { };
+    }
+    const std::vector<image_info>& Images() const { return fImages; }
     bool InText(addr_t address) const
     {
         for (const auto& [start, end] : fText)
@@ -189,6 +207,7 @@ public:
 private:
     SymbolLookup* fLookup = nullptr;
     std::vector<std::pair<addr_t, addr_t>> fText;
+    std::vector<image_info> fImages;
     summit::JitCodeMap fJit;
     std::string fJitDirectory;
     team_id fTeam = -1;
@@ -339,6 +358,103 @@ int Stacks(team_id team, const std::set<thread_id>& only, int depth)
     }
     for (thread_id thread : stopped) ContinueThread(attachment.nub, thread);
     std::printf("%s\n", json{{"team", team}, {"threads", list}}.dump(-1, ' ', false, json::error_handler_t::replace).c_str());
+    return 0;
+}
+
+// A crashed web process (BWebKitCrashReport): its crashing thread waits in
+// the crash handler, so its stack is walked from where it crashed (the
+// registers the handler passed), and the others from where they are. Every
+// frame says its address, image and offset as well as its symbol: release
+// builds name few functions, and the offset finds the rest. The team stays
+// stopped; the caller ends it.
+int Crash(team_id team, thread_id crashed, addr_t crashIP, addr_t crashFP, addr_t crashSP, int depth)
+{
+    Attachment attachment;
+    if (std::string error = attachment.Attach(team); !error.empty()) {
+        std::printf("%s\n", json{{"error", error}}.dump().c_str());
+        return 1;
+    }
+    const auto threads = Threads(team, {});
+    std::map<thread_id, thread_info> before;
+    for (const auto& info : threads) before[info.thread] = info;
+    for (const auto& info : threads) debug_thread(info.thread);
+    std::set<thread_id> stopped;
+    const bigtime_t deadline = system_time() + 3000000;
+    while (stopped.size() < threads.size() && system_time() < deadline) {
+        debug_debugger_message_data message;
+        int32 code = 0;
+        const ssize_t size = read_port_etc(attachment.port, &code, &message, sizeof(message), B_ABSOLUTE_TIMEOUT, deadline);
+        if (size < 0) {
+            if (size == B_INTERRUPTED) continue;
+            break;
+        }
+        if (code == B_DEBUGGER_MESSAGE_THREAD_DEBUGGED) stopped.insert(message.origin.thread);
+    }
+    Symbols symbols(&attachment.context, team);
+    // A return address is named by the call before it (address - 1): after
+    // a call that never returns (abort()) it is already the next function.
+    auto frameOf = [&](addr_t address, bool returnAddress) {
+        char hex[32];
+        std::snprintf(hex, sizeof(hex), "0x%lx", static_cast<unsigned long>(address));
+        const addr_t lookup = returnAddress ? address - 1 : address;
+        return json{{"address", hex}, {"location", symbols.Location(lookup)}, {"symbol", symbols.Name(lookup)}};
+    };
+    auto walk = [&](addr_t ip, addr_t framePointer) {
+        json frames = json::array();
+        frames.push_back(frameOf(ip, false));
+        addr_t frame = framePointer;
+        for (int i = 0; i < depth && frame; ++i) {
+            StackFrameInfo frameInfo {};
+            if (sDebug.getStackFrame(&attachment.context, reinterpret_cast<void*>(frame), &frameInfo) != B_OK
+                || !frameInfo.returnAddress)
+                break;
+            frames.push_back(frameOf(addr_t(frameInfo.returnAddress), true));
+            if (addr_t(frameInfo.parentFrame) <= frame) break;
+            frame = addr_t(frameInfo.parentFrame);
+        }
+        return frames;
+    };
+    json list = json::array();
+    for (const auto& info : threads) {
+        const thread_info& was = before[info.thread];
+        json entry = {{"thread", info.thread}, {"name", info.name}, {"state", StateName(was.state)}};
+        if (info.thread == crashed) {
+            entry["crashed"] = true;
+            entry["frames"] = walk(crashIP, crashFP);
+            // Code addresses on its stack, for the frames that keep no frame
+            // pointer (system libraries).
+            std::vector<addr_t> words(2048);
+            const ssize_t got = sDebug.readMemoryPartial(&attachment.context, reinterpret_cast<void*>(crashSP), words.data(),
+                words.size() * sizeof(addr_t));
+            json scanned = json::array();
+            for (size_t i = 0; got > 0 && i < size_t(got) / sizeof(addr_t) && scanned.size() < size_t(depth); ++i)
+                if (symbols.InText(words[i])) scanned.push_back(frameOf(words[i], true));
+            entry["stackScan"] = scanned;
+            list.push_back(entry);
+            continue;
+        }
+        debug_debugger_message code;
+        debug_cpu_state cpu;
+        if (!stopped.count(info.thread) || sDebug.getCPUState(&attachment.context, info.thread, &code, &cpu) != B_OK) {
+            entry["error"] = "did not stop";
+            list.push_back(entry);
+            continue;
+        }
+#if defined(__x86_64__)
+        entry["frames"] = walk(cpu.rip, cpu.rbp);
+#elif defined(__aarch64__)
+        entry["frames"] = walk(cpu.elr, cpu.x[29]);
+#endif
+        list.push_back(entry);
+    }
+    json images = json::array();
+    for (const auto& image : symbols.Images()) {
+        char range[64];
+        std::snprintf(range, sizeof(range), "0x%lx-0x%lx", static_cast<unsigned long>(addr_t(image.text)),
+            static_cast<unsigned long>(addr_t(image.text) + addr_t(image.text_size)));
+        images.push_back({{"path", image.name}, {"text", range}});
+    }
+    std::printf("%s\n", json{{"team", team}, {"threads", list}, {"images", images}}.dump(-1, ' ', false, json::error_handler_t::replace).c_str());
     return 0;
 }
 
@@ -503,6 +619,13 @@ int RunMcpDebugHelper(int argc, char** argv)
         std::set<thread_id> only;
         for (int i = 5; i < argc; ++i) only.insert(thread_id(std::atoi(argv[i])));
         return Stacks(team_id(std::atoi(argv[3])), only, std::clamp(std::atoi(argv[4]), 1, 256));
+    }
+    // Summit --mcp-debug-helper crash TEAM THREAD IP FP SP DEPTH [OUTPUT] (CrashReporter.cpp)
+    // With OUTPUT after DEPTH, the JSON goes to that file.
+    if (argc >= 9 && !std::strcmp(argv[2], "crash")) {
+        if (argc >= 10 && !std::freopen(argv[9], "w", stdout)) return 1;
+        return Crash(team_id(std::atoi(argv[3])), thread_id(std::atoi(argv[4])), addr_t(std::strtoull(argv[5], nullptr, 0)),
+            addr_t(std::strtoull(argv[6], nullptr, 0)), addr_t(std::strtoull(argv[7], nullptr, 0)), std::clamp(std::atoi(argv[8]), 1, 256));
     }
     if (argc >= 7 && !std::strcmp(argv[2], "profile")) {
         std::set<thread_id> only;

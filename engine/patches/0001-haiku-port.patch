@@ -109615,10 +109615,10 @@ index 0000000000000000000000000000000000000000..abdba4dff009ff314eecd9f825a128aa
 +} // namespace WebKit
 diff --git a/Source/WebKit/PlatformHaiku.cmake b/Source/WebKit/PlatformHaiku.cmake
 new file mode 100644
-index 0000000000000000000000000000000000000000..5cc6a01fdcd7c87db9e0479155dd4f1eed20ccef
+index 0000000000000000000000000000000000000000..e02b02e592bb4b1c67db048fc2c735f579ef4949
 --- /dev/null
 +++ b/Source/WebKit/PlatformHaiku.cmake
-@@ -0,0 +1,612 @@
+@@ -0,0 +1,616 @@
 +include(Headers.cmake)
 +include(Platform/Curl.cmake)
 +
@@ -109991,13 +109991,17 @@ index 0000000000000000000000000000000000000000..5cc6a01fdcd7c87db9e0479155dd4f1e
 +    )
 +endif ()
 +
++# main() with the crash handler that reports crashes to the host
++# (BWebKitCrashReport). Its debugger() replaces libroot's for every library
++# of the process, so it must be in the executable's dynamic symbols.
 +list(APPEND WebProcess_SOURCES
-+    WebProcess/EntryPoint/unix/WebProcessMain.cpp
++    WebProcess/EntryPoint/haiku/WebProcessMain.cpp
 +)
 +
 +find_program(HAIKU_RESOURCE_COMPILER rc REQUIRED)
 +find_program(HAIKU_RESOURCE_LINKER xres REQUIRED)
 +set_property(TARGET WebProcess APPEND PROPERTY LINK_DEPENDS "${WEBKIT_DIR}/WebProcess/haiku/WebProcess.rdef")
++target_link_options(WebProcess PRIVATE "LINKER:--export-dynamic-symbol=debugger")
 +add_custom_command(TARGET WebProcess POST_BUILD
 +    COMMAND ${HAIKU_RESOURCE_COMPILER} -o "$<TARGET_FILE_DIR:WebProcess>/WebProcess.rsrc" "${WEBKIT_DIR}/WebProcess/haiku/WebProcess.rdef"
 +    COMMAND ${HAIKU_RESOURCE_LINKER} -o "$<TARGET_FILE:WebProcess>" "$<TARGET_FILE_DIR:WebProcess>/WebProcess.rsrc"
@@ -120587,10 +120591,10 @@ index 0000000000000000000000000000000000000000..4155355766961a58d7b6f419c5181360
 +}
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitDiagnostics.h b/Source/WebKit/UIProcess/API/haiku/WebKitDiagnostics.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..a01adc63a79750299cb52a405f82e7e4ef79c1cc
+index 0000000000000000000000000000000000000000..95cdb518170cc380ddb34b14f0b3c643c26e015d
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitDiagnostics.h
-@@ -0,0 +1,34 @@
+@@ -0,0 +1,70 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -120625,6 +120629,42 @@ index 0000000000000000000000000000000000000000..a01adc63a79750299cb52a405f82e7e4
 +// saying so. Any thread; waits at most timeout. An empty string: no answer
 +// (not an engine process, or one without diagnostics).
 +WK_EXPORT std::string BWebKitProcessDiagnostics(team_id, const char* request, bigtime_t timeout = 5000000);
++
++// Crash reports. A host that wants to hear about a web process that crashes
++// creates a port and puts its id in the environment, as
++// B_WEBKIT_CRASH_REPORT_PORT_ENV, before the engine starts web processes
++// (they inherit it). A web process that then crashes (a bad memory access,
++// an illegal instruction, abort(), a failed release assertion, debugger())
++// writes a BWebKitCrashReport to that port with code B_WEBKIT_CRASH_REPORT
++// instead of entering Haiku's debugger, and its crashing thread waits, so the
++// host can attach a debugger and read every thread's stack. The host then
++// ends the team (kill_team) or writes anything to resumePort; the process
++// ends either way, and its pages see an ordinary crash. Without the variable,
++// or when the port is gone, a crash goes to debug_server as before.
++#define B_WEBKIT_HAS_CRASH_REPORTS 1
++#define B_WEBKIT_CRASH_REPORT_PORT_ENV "WEBKIT_CRASH_REPORT_PORT"
++enum : int32 { B_WEBKIT_CRASH_REPORT = 'wcrs' };
++
++struct BWebKitCrashReport {
++    int32 version; // 1
++    team_id team;
++    // The thread that crashed and what stopped it: a signal (SIGSEGV,
++    // SIGBUS, SIGILL, SIGFPE, SIGABRT) with its si_code and the address it
++    // names, or 0 for a debugger() call, whose text is in message.
++    thread_id thread;
++    int32 signal;
++    int32 signalCode;
++    uint64 faultAddress;
++    // Where it was: the instruction, frame and stack pointers of the
++    // crashing code (of the caller for debugger()). The thread itself now
++    // waits in the crash handler, so walk its stack from these.
++    uint64 instructionPointer;
++    uint64 framePointer;
++    uint64 stackPointer;
++    port_id resumePort;
++    char process[32]; // "WebProcess"
++    char message[512]; // debugger() and CRASH() text, or empty
++};
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitEmbedding.h b/Source/WebKit/UIProcess/API/haiku/WebKitEmbedding.h
 new file mode 100644
 index 0000000000000000000000000000000000000000..f7fe5c8dcba9df0aa191d1bb73461bfb805c0631
@@ -177055,6 +177095,197 @@ index 0000000000000000000000000000000000000000..dfc5c233c557b57a79b02c0e7852a223
 +} // namespace WebKit
 +
 +#endif // ENABLE(WEB_AUTHN) && PLATFORM(HAIKU)
+diff --git a/Source/WebKit/WebProcess/EntryPoint/haiku/WebProcessMain.cpp b/Source/WebKit/WebProcess/EntryPoint/haiku/WebProcessMain.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..7cba55c95936bc9812568ad7a50177778c50d7a2
+--- /dev/null
++++ b/Source/WebKit/WebProcess/EntryPoint/haiku/WebProcessMain.cpp
+@@ -0,0 +1,185 @@
++/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
++
++// The web process's main(), with the crash handler that tells the host about
++// a crash before the process ends (WebKitDiagnostics.h, BWebKitCrashReport).
++//
++// Haiku hands a crashing team to debug_server, which shows its "Debug / Save
++// report / Kill" alert, unless the team handles the signal itself: a fault
++// with a handler for its signal is delivered to the handler instead. So this
++// handler, installed before anything else runs, catches SIGSEGV, SIGBUS,
++// SIGILL, SIGFPE and SIGABRT (abort(), std::terminate). WebKit's CRASH() and
++// failed release assertions call debugger() before abort(); this executable
++// defines debugger(), which every library of the process binds to (the
++// runtime loader looks symbols up in the executable first), so those come
++// here too. JavaScriptCore installs its own SIGSEGV/SIGBUS handler later (for
++// WebAssembly memory faults) and passes faults it does not own to the one it
++// replaced, this one.
++//
++// The crashing thread writes a report to the host's port and waits there:
++// the host attaches a debugger, reads every thread's stack, then ends the
++// team. Without a host (no variable, or the port is gone) the crash goes to
++// debug_server as it did before.
++
++#include "config.h"
++#include "WebProcessMain.h"
++
++#include "WebKitDiagnostics.h"
++#include <OS.h>
++#include <atomic>
++#include <csignal>
++#include <cstdlib>
++#include <iterator>
++#include <unistd.h>
++
++extern "C" status_t _kern_debugger(const char* message);
++
++namespace {
++
++port_id s_reportPort = -1;
++port_id s_resumePort = -1;
++std::atomic<thread_id> s_crashingThread { -1 };
++// The text of the last debugger() call (CRASH() passes its function).
++char s_message[512];
++
++constexpr int kSignals[] = { SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT };
++struct sigaction s_previousActions[std::size(kSignals)];
++// A stack for the handler, for the main thread's stack overflowing.
++char s_alternateStack[64 * 1024];
++
++void copyText(char* destination, size_t size, const char* source)
++{
++    size_t i = 0;
++    for (; source && source[i] && i + 1 < size; ++i)
++        destination[i] = source[i];
++    destination[i] = '\0';
++}
++
++// Only async-signal-safe calls from here on: system calls and plain stores.
++// Returns when the report could not be sent; otherwise the team ends.
++void reportCrash(int signal, int signalCode, void* faultAddress, uint64 instructionPointer, uint64 framePointer, uint64 stackPointer)
++{
++    const thread_id self = find_thread(nullptr);
++    thread_id expected = -1;
++    if (!s_crashingThread.compare_exchange_strong(expected, self)) {
++        // A crash inside the handler: end now.
++        if (expected == self)
++            _exit(128 + (signal ? signal : SIGABRT));
++        // Another thread crashed first and is reporting: wait for the end.
++        for (;;)
++            snooze(1000000);
++    }
++
++    BWebKitCrashReport report { };
++    report.version = 1;
++    report.team = getpid();
++    report.thread = self;
++    report.signal = signal;
++    report.signalCode = signalCode;
++    report.faultAddress = reinterpret_cast<uint64>(faultAddress);
++    report.instructionPointer = instructionPointer;
++    report.framePointer = framePointer;
++    report.stackPointer = stackPointer;
++    report.resumePort = s_resumePort;
++    copyText(report.process, sizeof(report.process), "WebProcess");
++    copyText(report.message, sizeof(report.message), s_message);
++    if (write_port_etc(s_reportPort, B_WEBKIT_CRASH_REPORT, &report, sizeof(report), B_RELATIVE_TIMEOUT, 2000000) != B_OK) {
++        s_crashingThread.store(-1);
++        return;
++    }
++
++    // The host reads the stacks and kills the team. Should it not, the team
++    // ends after a minute anyway.
++    const bigtime_t deadline = system_time() + 60000000;
++    for (;;) {
++        int32 code;
++        char byte;
++        if (read_port_etc(s_resumePort, &code, &byte, sizeof(byte), B_ABSOLUTE_TIMEOUT, deadline) != B_INTERRUPTED)
++            break;
++    }
++    _exit(128 + (signal ? signal : SIGABRT));
++}
++
++void restorePreviousAction(int signal)
++{
++    for (size_t i = 0; i < std::size(kSignals); ++i) {
++        if (kSignals[i] == signal)
++            sigaction(signal, &s_previousActions[i], nullptr);
++    }
++}
++
++void crashSignalHandler(int signal, siginfo_t* info, void* context)
++{
++    uint64 instructionPointer = 0, framePointer = 0, stackPointer = 0;
++    if (auto* ucontext = static_cast<ucontext_t*>(context)) {
++#if defined(__x86_64__)
++        instructionPointer = ucontext->uc_mcontext.rip;
++        framePointer = ucontext->uc_mcontext.rbp;
++        stackPointer = ucontext->uc_mcontext.rsp;
++#elif defined(__aarch64__)
++        instructionPointer = ucontext->uc_mcontext.elr;
++        framePointer = ucontext->uc_mcontext.x[29];
++        stackPointer = ucontext->uc_mcontext.sp;
++#endif
++    }
++    reportCrash(signal, info ? info->si_code : 0, info ? info->si_addr : nullptr, instructionPointer, framePointer, stackPointer);
++
++    // Not reported: what would have happened without this handler.
++    restorePreviousAction(signal);
++    if (signal == SIGABRT) {
++        // abort() without a handler calls debugger() first.
++        _kern_debugger(s_message[0] ? s_message : "abort() called");
++        return;
++    }
++    // A fault happens again on return, now going to debug_server; a signal
++    // that was sent is sent again.
++    if (info && (info->si_code == SI_USER || info->si_code == SI_QUEUE))
++        raise(signal);
++}
++
++void installCrashHandler()
++{
++    const char* port = std::getenv(B_WEBKIT_CRASH_REPORT_PORT_ENV);
++    if (!port || !*port)
++        return;
++    port_info info;
++    s_reportPort = static_cast<port_id>(std::atol(port));
++    if (s_reportPort < 0 || get_port_info(s_reportPort, &info) != B_OK)
++        return;
++    s_resumePort = create_port(1, "crash report resume");
++    if (s_resumePort < 0)
++        return;
++
++    stack_t alternateStack { };
++    alternateStack.ss_sp = s_alternateStack;
++    alternateStack.ss_size = sizeof(s_alternateStack);
++    sigaltstack(&alternateStack, nullptr);
++
++    struct sigaction action { };
++    action.sa_sigaction = crashSignalHandler;
++    action.sa_flags = SA_SIGINFO | SA_ONSTACK;
++    sigemptyset(&action.sa_mask);
++    for (size_t i = 0; i < std::size(kSignals); ++i)
++        sigaction(kSignals[i], &action, &s_previousActions[i]);
++}
++
++} // namespace
++
++// Replaces libroot's debugger() for the whole process (see above).
++extern "C" __attribute__((visibility("default"))) void debugger(const char* message)
++{
++    copyText(s_message, sizeof(s_message), message);
++    if (s_reportPort >= 0) {
++        // Walk from this frame: its caller is the code that called debugger().
++        void* frame = __builtin_frame_address(0);
++        reportCrash(0, 0, nullptr, reinterpret_cast<uint64>(&debugger), reinterpret_cast<uint64>(frame), reinterpret_cast<uint64>(frame));
++    }
++    // As libroot's debugger() does.
++    debug_printf("%" B_PRId32 ": DEBUGGER: %s\n", find_thread(nullptr), message);
++    _kern_debugger(message);
++}
++
++int main(int argc, char** argv)
++{
++    installCrashHandler();
++    return WebKit::WebProcessMain(argc, argv);
++}
 diff --git a/Source/WebKit/WebProcess/Extensions/API/Cocoa/WebExtensionAPIActionCocoa.mm b/Source/WebKit/WebProcess/Extensions/API/Cocoa/WebExtensionAPIActionCocoa.mm
 index 7ea95830d9e2de1a30ca4e496f12a7c06a9ed116..faec0b35a638d7a297aeafa4a25f1c099629729b 100644
 --- a/Source/WebKit/WebProcess/Extensions/API/Cocoa/WebExtensionAPIActionCocoa.mm

@@ -1,4 +1,5 @@
 #include "ui/Containers.h"
+#include "ui/CrashReporter.h"
 #include "ui/BrowserWindow.h"
 #if SUMMIT_MODERN_WEBKIT
 #include "ui/DevToolsWindow.h"
@@ -467,6 +468,12 @@ public:
 #if SUMMIT_MODERN_WEBKIT
         if (summit::HandleTranslationContextMessage(message)) return;
         if (ProfilesMessage(message)) return;
+        if (message->what == summit::kCrashReportReady || message->what == summit::kCrashReportAnswered) {
+            // Every window: any of its tabs may have shown the crashed process.
+            for (int32 i = 0; BWindow* window = WindowAt(i); ++i)
+                if (dynamic_cast<summit::BrowserWindow*>(window)) BMessenger(window).SendMessage(message);
+            return;
+        }
         if (message->what == kReleaseDownloadContexts) {
             ReleaseRetiredPrivateContexts();
             return;
@@ -2921,6 +2928,11 @@ int main(int argc, char** argv)
     // in 80 s of YouTube (issue #22). The web processes inherit this; set it
     // to override.
     setenv("JSC_defaultErrorStackTraceLimit", "10", 0);
+#if SUMMIT_MODERN_WEBKIT
+    // Web processes started from now on report their crashes to Summit,
+    // whose crash page offers to send the report.
+    summit::StartCrashReporter();
+#endif
     // The application thread runs WebKit's main loop: every frame, input
     // reply and IPC message of every tab passes through it. Under the load of
     // many tabs it competes with dozens of web processes, so it runs at the

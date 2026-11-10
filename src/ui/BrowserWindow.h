@@ -289,6 +289,13 @@ private:
         std::string exitReason;
         BView* crashView = nullptr;
         bool exitedInBackground = false;
+        // The report of its process's crash that the crash page offers to
+        // send (CrashReporter.h), until the user answers: the full report's
+        // file (empty: none), the issue's title, crash lines and stack.
+        struct CrashReport {
+            std::string path, title, heading;
+            std::vector<std::string> frames;
+        } crashReport;
         // The page stopped answering input (#71).
         bool unresponsive = false, waitedForPage = false;
         // The page area says why the last page could not be loaded (#89):
@@ -781,6 +788,12 @@ private:
     void ShowCrashView(Tab& tab);
     void RemoveCrashView(Tab& tab);
     void ReloadCrashedTab(Tab& tab);
+    // A crashed process's report (kCrashReportReady) for the tabs it showed,
+    // and the user's answer to sending one (kCrashReportAnswer), then every
+    // window's (kCrashReportAnswered).
+    void CrashReportReady(const BMessage& message);
+    void AnswerCrashReport(const BMessage& message);
+    void CrashReportAnswered(const std::string& path);
     // The bar between the toolbar and the page: an unresponsive page, a
     // password to save, a blocked pop-up (NoticeBar.h).
     void RefreshNoticeBar();

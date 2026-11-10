@@ -21,6 +21,7 @@
 #include "core/Bookmarks.h"
 #include "core/HistoryVisits.h"
 #include "core/Protocol.h"
+#include "CrashReporter.h"
 #include <Alert.h>
 #include <Application.h>
 #include <Button.h>
@@ -87,7 +88,8 @@ const char* CrashTitle(const std::string& reason)
 // The page area of a tab whose web process ended.
 class CrashView : public BView {
 public:
-    CrashView(int64 tab, const std::string& title, const std::string& url, const std::string& reason)
+    // With a saved report (reportPath), the page asks whether to send it.
+    CrashView(int64 tab, const std::string& title, const std::string& url, const std::string& reason, const std::string& reportPath)
         : BView("crashed-page", B_WILL_DRAW)
     {
         SetViewUIColor(B_DOCUMENT_BACKGROUND_COLOR);
@@ -113,14 +115,42 @@ public:
         BMessage* report = new BMessage(kOpenLinkInNewTab);
         report->AddString("url", ReportURL(title, url, reason).c_str());
         auto* reportButton = new BButton("report", "Report a Problem…", report);
-        BLayoutBuilder::Group<>(this, B_VERTICAL, 12)
+        auto layout = BLayoutBuilder::Group<>(this, B_VERTICAL, 12)
             .AddGlue(1)
             .AddGroup(B_HORIZONTAL).AddGlue().Add(heading).AddGlue().End()
             .AddGroup(B_HORIZONTAL).AddGlue().Add(text).AddGlue().End()
-            .AddGroup(B_HORIZONTAL).AddGlue().Add(address).AddGlue().End()
-            .AddGroup(B_HORIZONTAL, 8).AddGlue().Add(reportButton).Add(reloadButton).AddGlue().End()
-            .AddGlue(2)
-            .SetInsets(20);
+            .AddGroup(B_HORIZONTAL).AddGlue().Add(address).AddGlue().End();
+        if (reportPath.empty()) {
+            layout.AddGroup(B_HORIZONTAL, 8).AddGlue().Add(reportButton).Add(reloadButton).AddGlue().End();
+        } else {
+            // The crash was caught with its stacks (CrashReporter.h): ask.
+            delete reportButton;
+            auto answer = [&](bool send) {
+                auto* message = new BMessage(kCrashReportAnswer);
+                message->AddInt64("id", tab);
+                message->AddString("path", reportPath.c_str());
+                message->AddBool("send", send);
+                return message;
+            };
+            auto* show = new BMessage(kShowCrashReport);
+            show->AddString("path", reportPath.c_str());
+            auto* question = new BStringView("question", "Summit saved a report of this crash. Send it to Summit's developers?");
+            question->SetHighUIColor(B_DOCUMENT_TEXT_COLOR);
+            auto* explanation = new BStringView("explanation",
+                "Sending opens a new GitHub issue with the report filled in, for you to check and submit.");
+            explanation->SetHighUIColor(B_DOCUMENT_TEXT_COLOR);
+            layout.AddStrut(8)
+                .AddGroup(B_HORIZONTAL).AddGlue().Add(question).AddGlue().End()
+                .AddGroup(B_HORIZONTAL).AddGlue().Add(explanation).AddGlue().End()
+                .AddGroup(B_HORIZONTAL, 8).AddGlue()
+                    .Add(new BButton("show-report", "Show Report", show))
+                    .Add(new BButton("dont-send", "Don't Send", answer(false)))
+                    .Add(new BButton("send-report", "Send Report…", answer(true)))
+                    .AddGlue().End()
+                .AddStrut(8)
+                .AddGroup(B_HORIZONTAL).AddGlue().Add(reloadButton).AddGlue().End();
+        }
+        layout.AddGlue(2).SetInsets(20);
         SetExplicitMinSize(BSize(320, 200));
         SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
     }
@@ -128,8 +158,8 @@ public:
     {
         BView::AttachedToWindow();
         // The buttons talk to the browser window, not to this view.
-        if (auto* button = dynamic_cast<BButton*>(FindView("reload"))) button->SetTarget(Window());
-        if (auto* button = dynamic_cast<BButton*>(FindView("report"))) button->SetTarget(Window());
+        for (const char* name : { "reload", "report", "show-report", "dont-send", "send-report" })
+            if (auto* button = dynamic_cast<BButton*>(FindView(name))) button->SetTarget(Window());
     }
 private:
     // A new GitHub issue with the versions filled in; the site only as its
@@ -459,7 +489,7 @@ void BrowserWindow::AdoptTab(BMessage& message)
 void BrowserWindow::ShowCrashView(Tab& tab)
 {
     if (tab.crashView) return;
-    tab.crashView = new CrashView(tab.id, CrashTitle(tab.exitReason), DisplayURL(tab.url), tab.exitReason);
+    tab.crashView = new CrashView(tab.id, CrashTitle(tab.exitReason), DisplayURL(tab.url), tab.exitReason, tab.crashReport.path);
     fCards->AddView(tab.crashView);
     if (tab.id == fSelected) ShowCard(tab.crashView);
 }
@@ -475,12 +505,66 @@ void BrowserWindow::RemoveCrashView(Tab& tab)
 void BrowserWindow::ReloadCrashedTab(Tab& tab)
 {
     RemoveCrashView(tab);
+    // Reloading passes over the report's question (the report stays saved).
+    tab.crashReport = {};
     tab.exitReason.clear();
     tab.exitedInBackground = false;
     tab.unresponsive = tab.waitedForPage = false;
     if (!PrepareTabNavigation(tab)) return;
     tab.view->Reload();
     RefreshNoticeBar();
+}
+
+void BrowserWindow::CrashReportReady(const BMessage& message)
+{
+    const int32 team = message.GetInt32("team", -1);
+    Tab::CrashReport report { message.GetString("path", ""), message.GetString("title", ""), message.GetString("heading", "") };
+    for (int32 i = 0; const char* frame = message.GetString("frame", i, nullptr); ++i) report.frames.push_back(frame);
+    if (team < 0 || report.path.empty()) return;
+    for (auto& tab : fTabs) {
+        if (tab.processID != team) continue;
+        tab.crashReport = report;
+        // The report came after the crash page: the page asks now.
+        if (tab.crashView) {
+            RemoveCrashView(tab);
+            ShowCrashView(tab);
+        }
+    }
+}
+
+void BrowserWindow::AnswerCrashReport(const BMessage& message)
+{
+    const std::string path = message.GetString("path", "");
+    if (path.empty()) return;
+    if (message.GetBool("send", false)) {
+        // The issue is filed from the tab whose page crashed: its site, as
+        // an origin only (the issue is public).
+        const Tab* from = FindTabByID(message.GetInt64("id", 0));
+        for (const auto& tab : fTabs)
+            if (!from && tab.crashReport.path == path) from = &tab;
+        if (from) {
+            const auto& report = from->crashReport;
+            BMessage open(kOpenLinkInNewTab);
+            open.AddString("url", CrashIssueURL(report.title, report.heading, report.frames, OriginOf(from->url), path).c_str());
+            PostMessage(&open);
+        }
+    }
+    // Every window's tabs of that process stop asking.
+    BMessage answered(kCrashReportAnswered);
+    answered.AddString("path", path.c_str());
+    be_app_messenger.SendMessage(&answered);
+}
+
+void BrowserWindow::CrashReportAnswered(const std::string& path)
+{
+    for (auto& tab : fTabs) {
+        if (path.empty() || tab.crashReport.path != path) continue;
+        tab.crashReport = {};
+        if (tab.crashView) {
+            RemoveCrashView(tab);
+            ShowCrashView(tab);
+        }
+    }
 }
 
 void BrowserWindow::ProcessExitReason(Tab& tab, const std::string& reason)

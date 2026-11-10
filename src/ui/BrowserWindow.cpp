@@ -1949,8 +1949,12 @@ void BrowserWindow::SelectTab(int64 id, bool forClose)
         ShowCard(fTabs[i].view);
 #if SUMMIT_MODERN_WEBKIT
         // A page whose process ended while the tab was behind loads again;
-        // the one that ended in front says what happened.
-        if (fTabs[i].processExited && fTabs[i].exitedInBackground && !fRestoringSession) ReloadCrashedTab(fTabs[i]);
+        // the one that ended in front says what happened, and so does one
+        // with a crash report to ask about.
+        if (fTabs[i].processExited && fTabs[i].exitedInBackground && !fTabs[i].crashReport.path.empty()) {
+            fTabs[i].exitedInBackground = false;
+            ShowCrashView(fTabs[i]);
+        } else if (fTabs[i].processExited && fTabs[i].exitedInBackground && !fRestoringSession) ReloadCrashedTab(fTabs[i]);
         else if (fTabs[i].crashView) ShowCard(fTabs[i].crashView);
 #endif
 #if !SUMMIT_MODERN_WEBKIT
@@ -5073,6 +5077,23 @@ void BrowserWindow::MessageReceived(BMessage* message)
             if (auto* target = FindTabByID(static_cast<int64>(message->GetUInt64("identifier", 0))))
                 target->backForward = *message;
             break;
+#endif
+#if SUMMIT_MODERN_WEBKIT
+        case kCrashReportReady:
+            CrashReportReady(*message);
+            break;
+        case kCrashReportAnswer:
+            AnswerCrashReport(*message);
+            break;
+        case kCrashReportAnswered:
+            CrashReportAnswered(message->GetString("path", ""));
+            break;
+        case kShowCrashReport: {
+            // In the text editor the system opens text files with.
+            entry_ref ref;
+            if (get_ref_for_path(message->GetString("path", ""), &ref) == B_OK) be_roster->Launch(&ref);
+            break;
+        }
 #endif
         case kReloadTab: case kDuplicateTab: case kMoveTabToNewWindow: case kCloseOtherTabs: {
             int64 id;

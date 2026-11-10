@@ -137,7 +137,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Haiku")
         src/ui/AddressSuggestions.cpp src/ui/SitePermissions.cpp src/ui/Location.cpp
         src/ui/SourceView.cpp src/ui/DevToolsWindow.cpp src/ui/DevToolsNetwork.cpp src/ui/DevToolsConsole.cpp src/ui/DevToolsStorage.cpp src/ui/DevToolsElements.cpp src/ui/DevToolsSources.cpp src/ui/DevToolsPerformance.cpp src/ui/PageSourceWindow.cpp
         src/ui/BrowserWindowMcp.cpp src/ui/McpService.cpp src/ui/McpLog.cpp src/ui/McpBrowserTools.cpp src/ui/McpSystemTools.cpp
-        src/ui/McpPageTools.cpp src/ui/McpEngineTools.cpp src/ui/McpDebugHelper.cpp src/ui/UpdateChecker.cpp
+        src/ui/McpPageTools.cpp src/ui/McpEngineTools.cpp src/ui/McpDebugHelper.cpp src/ui/UpdateChecker.cpp src/ui/CrashReporter.cpp
         src/ui/SafeBrowsingService.cpp src/ui/BrowserWindowSafeBrowsing.cpp
         src/ui/ResponsiveDesign.cpp src/ui/BrowserWindowResponsive.cpp
         src/ui/Profiles.cpp src/ui/BrowserWindowProfiles.cpp src/ui/BrowserWindowReadingList.cpp)
