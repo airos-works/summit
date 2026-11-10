@@ -12,7 +12,7 @@ HOST=${SUMMIT_HOST:-192.168.1.247}
 X=$DIR/$BUILD
 scores=()
 for run in $(seq "$RUNS"); do
-	$SSH "for sig in TERM KILL; do kill -\$sig \$(ps | grep -E '$DIR/x[a-z]*/(apps/Summit|lib/summit-webkit/)' | grep -v grep | awk '{print \$(NF-3)}') 2>/dev/null; sleep 2; done; rm -rf $DIR/pbench; mkdir -p $DIR/pbench; cp $DIR/pbench.seed $DIR/pbench/profile.json" < /dev/null
+	$SSH "for sig in TERM KILL; do kill -\$sig \$(ps | grep -E '$DIR/x[a-z0-9]*/(apps/Summit|lib/summit-webkit/)' | grep -v grep | awk '{print \$(NF-3)}') 2>/dev/null; sleep 2; done; rm -rf $DIR/pbench; mkdir -p $DIR/pbench; cp $DIR/pbench.seed $DIR/pbench/profile.json" < /dev/null
 	# -f: the started Summit keeps the session open; do not wait for it.
 	${SSH/ssh /ssh -f -n } "cd $X && WEBKIT_EXEC_PATH=$X/lib/summit-webkit exec env ${SP3_ENV:-} $X/apps/Summit --profile $DIR/pbench 'https://browserbench.org/Speedometer3.1/?startAutomatically' > $DIR/sp3-$BUILD.log 2>&1 < /dev/null"
 	# SP3_PROFILE=SECONDS: a system-wide sample of that long, 40 s into the run
@@ -56,7 +56,7 @@ EOF
 	echo "$BUILD run $run: $score"
 	scores+=("$score")
 done
-$SSH "for sig in TERM KILL; do kill -\$sig \$(ps | grep -E '$DIR/x[a-z]*/(apps/Summit|lib/summit-webkit/)' | grep -v grep | awk '{print \$(NF-3)}') 2>/dev/null; sleep 2; done; true" < /dev/null
+$SSH "for sig in TERM KILL; do kill -\$sig \$(ps | grep -E '$DIR/x[a-z0-9]*/(apps/Summit|lib/summit-webkit/)' | grep -v grep | awk '{print \$(NF-3)}') 2>/dev/null; sleep 2; done; true" < /dev/null
 python3 -c "
 import sys
 v=[float(x) for x in sys.argv[1:] if x.replace('.','',1).isdigit()]
