@@ -518,7 +518,10 @@ void BrowserWindow::ReloadCrashedTab(Tab& tab)
 void BrowserWindow::CrashReportReady(const BMessage& message)
 {
     const int32 team = message.GetInt32("team", -1);
-    Tab::CrashReport report { message.GetString("path", ""), message.GetString("title", ""), message.GetString("heading", "") };
+    Tab::CrashReport report;
+    report.path = message.GetString("path", "");
+    report.title = message.GetString("title", "");
+    report.heading = message.GetString("heading", "");
     for (int32 i = 0; const char* frame = message.GetString("frame", i, nullptr); ++i) report.frames.push_back(frame);
     if (team < 0 || report.path.empty()) return;
     for (auto& tab : fTabs) {
