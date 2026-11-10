@@ -592,6 +592,32 @@ index 4568d4def1a18aa09d89e0aaec72a60e41567adc..8dfb5b54bbdba5d6961ab927831ac50f
      UncheckedKeyHashMap<const void*, ptrdiff_t> m_ptrToOffsetMap;
      LeafExecutableMap m_leafExecutables;
  };
+diff --git a/Source/JavaScriptCore/runtime/CodeCache.h b/Source/JavaScriptCore/runtime/CodeCache.h
+index c6839ef2e993472601ed03c8a3dc2e5a4a92ba8b..2e9c6a417739353f4604a00f80910f99a1580509 100644
+--- a/Source/JavaScriptCore/runtime/CodeCache.h
++++ b/Source/JavaScriptCore/runtime/CodeCache.h
+@@ -100,8 +100,20 @@ public:
+         prune();
+ 
+         iterator findResult = m_map.find(key);
+-        if (findResult == m_map.end())
++        if (findResult == m_map.end()) {
++#if OS(HAIKU)
++            // Haiku feeds web content through the disk cache (CachedScriptSourceProviderHaiku).
++            // Keep what it decoded in memory like a freshly generated block: otherwise every
++            // later load of the same script (reloads, same-site navigations, other tabs)
++            // decodes the program and each function it calls again (Speedometer -6 %).
++            UnlinkedCodeBlockType* codeBlock = fetchFromDisk<UnlinkedCodeBlockType>(vm, key);
++            if (codeBlock && Options::useCodeCache())
++                addCache(key, SourceCodeValue(vm, codeBlock, m_age));
++            return codeBlock;
++#else
+             return fetchFromDisk<UnlinkedCodeBlockType>(vm, key);
++#endif
++        }
+ 
+         int64_t age = m_age - findResult->value.age;
+         if (age > m_capacity) {
 diff --git a/Source/JavaScriptCore/runtime/Exception.cpp b/Source/JavaScriptCore/runtime/Exception.cpp
 index dcb5b60fde3d0c9fa524712c5b6b3e68ccc8064a..260e6c459b7fe0a5ddbf289b27fdf3fc8241b296 100644
 --- a/Source/JavaScriptCore/runtime/Exception.cpp
