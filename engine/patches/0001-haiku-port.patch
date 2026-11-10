@@ -67818,7 +67818,7 @@ index c2d6ac748ed19ad7daf8887b9678a32eef10e3f5..e1edefcf3bb920ab49e1bd244577ff75
      bool isColorBitmapFont() const { return m_isColorBitmapFont; }
  
 diff --git a/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.cpp b/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.cpp
-index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..d3fada39be7d8a6e545f32efafa815a22a62cc22 100644
+index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..5919dc5b6e7e87c71deb951fe0b40e20779fbbef 100644
 --- a/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.cpp
 +++ b/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.cpp
 @@ -33,6 +33,9 @@
@@ -67831,7 +67831,16 @@ index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..d3fada39be7d8a6e545f32efafa815a2
  #include "GraphicsContextSkia.h"
  #include "GraphicsLayerCoordinated.h"
  #include "PlatformDisplay.h"
-@@ -58,6 +61,13 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
+@@ -55,9 +58,26 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
+ #include <skia/gpu/ganesh/GrBackendSurface.h>
+ #include <skia/gpu/ganesh/GrDirectContext.h>
+ #include <skia/gpu/ganesh/SkImageGanesh.h>
++#if PLATFORM(HAIKU)
++#include <skia/core/SkBitmap.h>
++#include <skia/core/SkFont.h>
++#include <skia/core/SkRRect.h>
++#include <skia/effects/SkGradient.h>
++#endif
  #include <skia/gpu/ganesh/SkSurfaceGanesh.h>
  WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
  #include <wtf/NumberOfCores.h>
@@ -67839,13 +67848,17 @@ index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..d3fada39be7d8a6e545f32efafa815a2
 +#include <OS.h>
 +#include <cstdio>
 +#include <wtf/Deque.h>
++#include <memory>
++#include <mutex>
++#include <wtf/NeverDestroyed.h>
++#include <wtf/Condition.h>
 +#include <wtf/Lock.h>
 +#include <wtf/ThreadSafeRefCounted.h>
 +#endif
  #include <wtf/SystemTracing.h>
  #include <wtf/text/StringToIntegerConversion.h>
  
-@@ -67,11 +77,115 @@ WTF_MAKE_TZONE_ALLOCATED_IMPL(SkiaPaintingEngine);
+@@ -67,16 +87,243 @@ WTF_MAKE_TZONE_ALLOCATED_IMPL(SkiaPaintingEngine);
  
  static bool canPerformAcceleratedRendering()
  {
@@ -67872,13 +67885,131 @@ index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..d3fada39be7d8a6e545f32efafa815a2
 +#else
      return ProcessCapabilities::canUseAcceleratedBuffers() && PlatformDisplay::sharedDisplay().skiaGLContext();
 +#endif
- }
- 
++}
++
 +#if PLATFORM(HAIKU)
 +bool SkiaPaintingEngine::paintsTilesOnGPUHaiku()
 +{
 +    return canPerformAcceleratedRendering();
+ }
+ 
++#if USE(TEXTURE_MAPPER)
++// One pool of GPU painting threads per process. A pool per page meant new
++// threads for every page, each making its own GL context and compiling
++// Skia's programs again before its first tile: 24-37 ms for a new tab's
++// first tile on each thread on the X399, about 50 ms of its first frame,
++// against 1 ms a tile once warm. The threads also exited with their page,
++// releasing GL state late in thread teardown. SUMMIT_GPU_WORKERS_PER_PAGE=1
++// brings back a pool per page.
++static RefPtr<WorkerPool> gpuPaintingWorkerPoolHaiku()
++{
++    static const bool perPage = [] {
++        const char* value = getenv("SUMMIT_GPU_WORKERS_PER_PAGE");
++        return value && value[0] == '1' && !value[1];
++    }();
++    auto threads = SkiaPaintingEngine::numberOfGPUPaintingThreads();
++    if (!threads)
++        return nullptr;
++    if (perPage)
++        return WorkerPool::create("SkiaGPUWorker"_s, threads);
++    static LazyNeverDestroyed<Ref<WorkerPool>> pool;
++    static std::once_flag once;
++    std::call_once(once, [threads] {
++        pool.construct(WorkerPool::create("SkiaGPUWorker"_s, threads));
++    });
++    return pool.get().ptr();
 +}
++
++// Draws what most pages' tiles start with (fills, rounded rectangles, a
++// gradient, a stroke, a clipped translucent layer, an image, text) on this
++// thread's Skia GL context, so that its programs are compiled.
++static void warmGPUPaintingThreadHaiku(const std::optional<SkFont>& font)
++{
++    auto& display = PlatformDisplay::sharedDisplay();
++    auto* glContext = display.skiaGLContext();
++    if (!glContext || !glContext->makeContextCurrent())
++        return;
++    auto* grContext = display.skiaGrContext();
++    if (!grContext)
++        return;
++    auto surface = SkSurfaces::RenderTarget(grContext, skgpu::Budgeted::kNo, SkImageInfo::MakeN32Premul(256, 256));
++    if (!surface)
++        return;
++    auto* canvas = surface->getCanvas();
++    canvas->clear(SK_ColorWHITE);
++    SkPaint paint;
++    paint.setAntiAlias(true);
++    paint.setColor(0xff4e8d8a);
++    canvas->drawRect(SkRect::MakeXYWH(4, 4, 100, 40), paint);
++    canvas->drawRRect(SkRRect::MakeRectXY(SkRect::MakeXYWH(10, 50, 120, 60), 12, 12), paint);
++    SkPoint points[2] = { { 0, 0 }, { 256, 0 } };
++    const SkColor4f colors[2] = { SkColor4f::FromColor(0xff8ecae6), SkColor4f::FromColor(0xffffb703) };
++    paint.setShader(SkShaders::LinearGradient(points, SkGradient(SkGradient::Colors(SkSpan(colors), SkTileMode::kClamp), SkGradient::Interpolation())));
++    canvas->drawRect(SkRect::MakeXYWH(0, 120, 256, 60), paint);
++    paint.setShader(nullptr);
++    paint.setStyle(SkPaint::kStroke_Style);
++    paint.setStrokeWidth(2);
++    canvas->drawCircle(200, 60, 30, paint);
++    paint.setStyle(SkPaint::kFill_Style);
++    canvas->saveLayerAlpha(nullptr, 128);
++    canvas->clipRRect(SkRRect::MakeRectXY(SkRect::MakeXYWH(20, 190, 200, 50), 8, 8), true);
++    canvas->drawPaint(paint);
++    canvas->restore();
++    SkBitmap bitmap;
++    if (bitmap.tryAllocN32Pixels(32, 32)) {
++        bitmap.eraseColor(0xff336699);
++        canvas->drawImageRect(bitmap.asImage(), SkRect::MakeXYWH(140, 10, 64, 64), SkSamplingOptions(SkFilterMode::kLinear));
++    }
++    if (font) {
++        paint.setColor(SK_ColorBLACK);
++        static constexpr char text[] = "Summit Aa 0123";
++        canvas->drawSimpleText(text, sizeof(text) - 1, SkTextEncoding::kUTF8, 10, 30, *font, paint);
++    }
++    grContext->flushAndSubmit(surface.get(), GrSyncCpu::kYes);
++}
++
++void SkiaPaintingEngine::prewarmGPUPaintingThreadsHaiku(const SkFont* font)
++{
++    if (!canPerformAcceleratedRendering())
++        return;
++    RefPtr pool = gpuPaintingWorkerPoolHaiku();
++    if (!pool)
++        return;
++    unsigned threads = numberOfGPUPaintingThreads();
++    struct State {
++        Lock lock;
++        Condition condition;
++        unsigned started WTF_GUARDED_BY_LOCK(lock) { 0 };
++        unsigned finished WTF_GUARDED_BY_LOCK(lock) { 0 };
++    };
++    auto state = std::make_shared<State>();
++    std::optional<SkFont> warmFont;
++    if (font)
++        warmFont = *font;
++    for (unsigned i = 0; i < threads; ++i) {
++        pool->postTask([state, threads, warmFont] {
++            {
++                // Hold each task until all have started, so that every thread
++                // of the pool takes one.
++                Locker locker { state->lock };
++                ++state->started;
++                state->condition.notifyAll();
++                state->condition.waitFor(state->lock, 1_s, [&]() WTF_REQUIRES_LOCK(state->lock) {
++                    return state->started >= threads;
++                });
++            }
++            warmGPUPaintingThreadHaiku(warmFont);
++            Locker locker { state->lock };
++            ++state->finished;
++            state->condition.notifyAll();
++        });
++    }
++    Locker locker { state->lock };
++    state->condition.waitFor(state->lock, 2_s, [&]() WTF_REQUIRES_LOCK(state->lock) {
++        return state->finished >= threads;
++    });
++}
++#endif
 +#endif
 +
 +#if PLATFORM(HAIKU)
@@ -67961,7 +68092,17 @@ index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..d3fada39be7d8a6e545f32efafa815a2
  {
  #if USE(TEXTURE_MAPPER)
      if (canPerformAcceleratedRendering()) {
-@@ -109,7 +223,18 @@ void SkiaPaintingEngine::paintIntoGraphicsContext(const GraphicsLayer& layer, Gr
++#if PLATFORM(HAIKU)
++        if (RefPtr pool = gpuPaintingWorkerPoolHaiku())
++            lazyInitialize(m_paintingWorkerPool, pool.releaseNonNull());
++#else
+         if (auto numberOfGPUThreads = numberOfGPUPaintingThreads())
+             lazyInitialize(m_paintingWorkerPool, WorkerPool::create("SkiaGPUWorker"_s, numberOfGPUThreads));
++#endif
+ 
+         return;
+     }
+@@ -109,7 +356,18 @@ void SkiaPaintingEngine::paintIntoGraphicsContext(const GraphicsLayer& layer, Gr
  
      context.translate(-dirtyRect.x(), -dirtyRect.y());
      context.scale(contentsScale);
@@ -67980,7 +68121,7 @@ index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..d3fada39be7d8a6e545f32efafa815a2
  }
  
  Ref<CoordinatedTileBuffer> SkiaPaintingEngine::createBuffer(RenderingMode renderingMode, const IntSize& size, bool contentsOpaque) const
-@@ -247,11 +372,20 @@ Ref<SkiaRecordingResult> SkiaPaintingEngine::record(const GraphicsLayerCoordinat
+@@ -247,11 +505,20 @@ Ref<SkiaRecordingResult> SkiaPaintingEngine::record(const GraphicsLayerCoordinat
      return result;
  }
  
@@ -68001,7 +68142,7 @@ index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..d3fada39be7d8a6e545f32efafa815a2
  
      auto renderingMode = recording->renderingMode();
  #if USE(TEXTURE_MAPPER)
-@@ -259,10 +393,38 @@ Ref<CoordinatedTileBuffer> SkiaPaintingEngine::replay(const GraphicsLayerCoordin
+@@ -259,10 +526,38 @@ Ref<CoordinatedTileBuffer> SkiaPaintingEngine::replay(const GraphicsLayerCoordin
  #else
      auto bufferSize = renderingMode == RenderingMode::Accelerated ? tileRect.size() : dirtyRect.size();
  #endif
@@ -68041,7 +68182,7 @@ index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..d3fada39be7d8a6e545f32efafa815a2
          if (auto* canvas = buffer->canvas()) {
              auto replayPicture = [](const sk_sp<SkPicture>& picture, SkCanvas* canvas, const IntRect& recordRect, const IntRect& tileRect, const IntRect& dirtyRect, bool isDDLBuffer) {
                  canvas->save();
-@@ -297,9 +459,41 @@ Ref<CoordinatedTileBuffer> SkiaPaintingEngine::replay(const GraphicsLayerCoordin
+@@ -297,9 +592,41 @@ Ref<CoordinatedTileBuffer> SkiaPaintingEngine::replay(const GraphicsLayerCoordin
              WTFEndSignpost(canvas, PaintTile);
          }
  
@@ -68084,7 +68225,7 @@ index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..d3fada39be7d8a6e545f32efafa815a2
  
      return buffer;
  }
-@@ -310,7 +504,20 @@ unsigned SkiaPaintingEngine::numberOfCPUPaintingThreads()
+@@ -310,7 +637,20 @@ unsigned SkiaPaintingEngine::numberOfCPUPaintingThreads()
      static unsigned numberOfThreads = 0;
  
      std::call_once(onceFlag, [] {
@@ -68106,10 +68247,19 @@ index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..d3fada39be7d8a6e545f32efafa815a2
          if (const char* envString = getenv("WEBKIT_SKIA_CPU_PAINTING_THREADS")) {
              auto newValue = parseInteger<unsigned>(StringView::fromLatin1(envString));
 diff --git a/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.h b/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.h
-index 6600c24f0265dfae370e5c195967424f74f1ceae..3127304fe907324fbfe72d988a71e4b930e94b08 100644
+index 6600c24f0265dfae370e5c195967424f74f1ceae..b9317dff67c4aeaf4c782c8a14da06737ed48c70 100644
 --- a/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.h
 +++ b/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.h
-@@ -48,6 +48,10 @@ class SkiaImageAtlasLayout;
+@@ -34,6 +34,8 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
+ #include <wtf/WorkQueue.h>
+ #include <wtf/WorkerPool.h>
+ 
++class SkFont;
++
+ namespace WebCore {
+ 
+ class AtlasUploadCondition;
+@@ -48,6 +50,10 @@ class SkiaImageAtlasLayout;
  class SkiaRecordingResult;
  enum class RenderingMode : uint8_t;
  
@@ -68120,13 +68270,18 @@ index 6600c24f0265dfae370e5c195967424f74f1ceae..3127304fe907324fbfe72d988a71e4b9
  class SkiaPaintingEngine {
      WTF_MAKE_TZONE_ALLOCATED(SkiaPaintingEngine);
      WTF_MAKE_NONCOPYABLE(SkiaPaintingEngine);
-@@ -64,11 +68,21 @@ public:
+@@ -64,11 +70,26 @@ public:
      static bool shouldUseDMABufAtlasTextures();
      static bool shouldUseLinearTileTextures();
      static bool shouldUseVivanteSuperTiledTileTextures();
 +#if PLATFORM(HAIKU)
 +    // Whether the page's tiles are painted on the GPU (SUMMIT_GPU_TILES).
 +    static bool paintsTilesOnGPUHaiku();
++    // The GPU painting threads are one pool per process; a spare process
++    // calls this so that its first page's tiles do not wait for each
++    // thread's GL context and Skia's first programs (about 50 ms of a new
++    // tab on the X399). font, when given, warms text drawing too.
++    static void prewarmGPUPaintingThreadsHaiku(const SkFont* font);
 +#endif
  
      const sk_sp<GrContextThreadSafeProxy>& threadSafeGrContext() const { return m_threadSafeGrContext; }
@@ -68142,7 +68297,7 @@ index 6600c24f0265dfae370e5c195967424f74f1ceae..3127304fe907324fbfe72d988a71e4b9
  
  private:
      Ref<CoordinatedTileBuffer> createBuffer(RenderingMode, const IntSize&, bool contentsOpaque) const;
-@@ -77,6 +91,10 @@ private:
+@@ -77,6 +98,10 @@ private:
      bool tryReuseCachedAtlases(SkiaRecordingResult&, unsigned fingerprint);
  
      sk_sp<GrContextThreadSafeProxy> m_threadSafeGrContext;
@@ -209215,10 +209370,10 @@ index 0000000000000000000000000000000000000000..a150bd67553ae6f1864c655cd04be661
 +} // namespace WebKit
 diff --git a/Source/WebKit/WebProcess/haiku/WebProcessHaiku.cpp b/Source/WebKit/WebProcess/haiku/WebProcessHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..71c54b9da3837d040944f7b23539619dba11a8e8
+index 0000000000000000000000000000000000000000..3d00c43c270b4611e669721013af4a39377f8548
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/haiku/WebProcessHaiku.cpp
-@@ -0,0 +1,318 @@
+@@ -0,0 +1,332 @@
 +/*
 + * Copyright (C) 2014,2019 Haiku, Inc.
 + *
@@ -209253,6 +209408,7 @@ index 0000000000000000000000000000000000000000..71c54b9da3837d040944f7b23539619d
 +#include "WebSleepDisablerClient.h"
 +#include <Application.h>
 +#if USE(COORDINATED_GRAPHICS)
++#include <WebCore/SkiaPaintingEngine.h>
 +#include <WebCore/PlatformDisplayHaiku.h>
 +#include "StartupTraceHaiku.h"
 +#endif
@@ -209381,8 +209537,11 @@ index 0000000000000000000000000000000000000000..71c54b9da3837d040944f7b23539619d
 +    // Pages also name the generic families themselves (Wikipedia: serif,
 +    // sans-serif, monospace), in italic too: 9 more matches of its first
 +    // layout on the ROCK 5.
++    RefPtr<WebCore::Font> bodyFont;
 +    for (auto& generic : genericFamilies) {
 +        RefPtr font = warm(generic.name, WebCore::normalWeightValue());
++        if (!bodyFont)
++            bodyFont = font;
 +        String resolved = font ? font->platformData().familyName() : String { };
 +        for (int weight : generic.weights) {
 +            if (!weight)
@@ -209424,8 +209583,18 @@ index 0000000000000000000000000000000000000000..71c54b9da3837d040944f7b23539619d
 +        for (auto* block : blocks)
 +            fastFree(block);
 +    }
++    // The GPU painting threads: their GL contexts and Skia's first programs
++    // (SkiaPaintingEngine::prewarmGPUPaintingThreadsHaiku).
++    // SUMMIT_PREWARM_GPU_TILES=0: off.
++    auto gpuStart = MonotonicTime::now();
++    static const bool prewarmGPU = [] {
++        const char* value = getenv("SUMMIT_PREWARM_GPU_TILES");
++        return !value || strcmp(value, "0");
++    }();
++    if (prewarmGPU)
++        WebCore::SkiaPaintingEngine::prewarmGPUPaintingThreadsHaiku(bodyFont ? &bodyFont->platformData().skFont() : nullptr);
 +    if (getenv("SUMMIT_NAV_TRACE"))
-+        fprintf(stderr, "Summit nav: spare web process %d warmed up in %.1f ms (fonts %.1f ms)\n", getpid(), (MonotonicTime::now() - start).milliseconds(), (MonotonicTime::now() - fontsStart).milliseconds());
++        fprintf(stderr, "Summit nav: spare web process %d warmed up in %.1f ms (fonts %.1f ms, GPU painting %.1f ms)\n", getpid(), (MonotonicTime::now() - start).milliseconds(), (gpuStart - fontsStart).milliseconds(), (MonotonicTime::now() - gpuStart).milliseconds());
 +}
 +
 +void WebProcess::platformInitializeWebProcess(WebProcessCreationParameters& parameters)
