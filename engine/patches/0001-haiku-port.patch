@@ -67561,7 +67561,7 @@ index ec1913422db0d8b09376627bf859ea6a40c13ebb..c16f04c3a9a5d873f8fbf3ca7ad5bc2b
      computeHeadroom();
  }
 diff --git a/Source/WebCore/platform/graphics/skia/PlatformDisplaySkia.cpp b/Source/WebCore/platform/graphics/skia/PlatformDisplaySkia.cpp
-index 776466ea87d3d721d32ac4e52db702bb2b544e46..c97dea6bdef5117b4bb18225eb489ea90730717f 100644
+index 776466ea87d3d721d32ac4e52db702bb2b544e46..e2addc5186a9623c0ba79863deefba9b71b6eee3 100644
 --- a/Source/WebCore/platform/graphics/skia/PlatformDisplaySkia.cpp
 +++ b/Source/WebCore/platform/graphics/skia/PlatformDisplaySkia.cpp
 @@ -29,6 +29,9 @@
@@ -67584,7 +67584,51 @@ index 776466ea87d3d721d32ac4e52db702bb2b544e46..c97dea6bdef5117b4bb18225eb489ea9
  #include <skia/gpu/ganesh/gl/epoxy/GrGLMakeEpoxyEGLInterface.h>
  #else
  #include <EGL/egl.h>
-@@ -280,8 +286,13 @@ public:
+@@ -55,6 +61,11 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
+ #include <wtf/ThreadSafeWeakPtr.h>
+ #include <wtf/text/StringToIntegerConversion.h>
+ 
++#if PLATFORM(HAIKU)
++#include <OS.h>
++#include <locale.h>
++#endif
++
+ #if USE(LIBDRM)
+ #include <fcntl.h>
+ #include <unistd.h>
+@@ -95,6 +106,31 @@ static sk_sp<const GrGLInterface> skiaGLInterface()
+ 
+ static thread_local RefPtr<SkiaGLContext> s_skiaGLContext;
+ 
++#if PLATFORM(HAIKU)
++// Haiku runs a thread's C++ thread_local destructors from a pthread key
++// destructor: after the thread's on_exit_thread() hooks (where libroot frees
++// the thread's locale state) and in no set order with EGL's thread state.
++// A Skia GL context released that late calls GL on a half torn-down thread;
++// idle SkiaGPUWorker threads that time out crashed in libepoxy and in
++// libroot's locale lookup. Release it from an on_exit_thread() hook instead.
++// Hooks run newest first: touch the locale first, so libroot's own hook is
++// registered before this one and runs after it.
++static void releaseSkiaGLContextAtThreadExitHaiku(void*)
++{
++    s_skiaGLContext = nullptr;
++}
++
++static void releaseSkiaGLContextBeforeThreadTeardownHaiku()
++{
++    static thread_local bool registered;
++    if (registered)
++        return;
++    registered = true;
++    uselocale(static_cast<locale_t>(0));
++    on_exit_thread(releaseSkiaGLContextAtThreadExitHaiku, nullptr);
++}
++#endif
++
+ #if USE(LIBDRM)
+ static inline bool isNewIntelDevice()
+ {
+@@ -280,8 +316,13 @@ public:
          // terminates the display. Once it is terminated, drop the Skia resources without calling into GL.
          RefPtr display = glContext->display();
          bool didRelease = display && display->runIfNotTerminated([&](EGLDisplay) {
@@ -67600,7 +67644,7 @@ index 776466ea87d3d721d32ac4e52db702bb2b544e46..c97dea6bdef5117b4bb18225eb489ea9
              grContext = nullptr;
          });
          if (!didRelease)
-@@ -317,6 +328,10 @@ public:
+@@ -317,6 +358,10 @@ public:
              return;
  
          GLContext::ScopedGLContextCurrent scopedCurrent(*m_skiaGLContext);
@@ -67611,7 +67655,7 @@ index 776466ea87d3d721d32ac4e52db702bb2b544e46..c97dea6bdef5117b4bb18225eb489ea9
          switch (critical) {
          case Critical::No:
              m_skiaGrContext->purgeUnlockedResources(GrPurgeResourceOptions::kScratchResourcesOnly);
-@@ -369,10 +384,65 @@ private:
+@@ -369,10 +414,68 @@ private:
  
  GLContext* PlatformDisplay::skiaGLContext()
  {
@@ -67647,6 +67691,9 @@ index 776466ea87d3d721d32ac4e52db702bb2b544e46..c97dea6bdef5117b4bb18225eb489ea9
 +    }
 +#endif
      if (!s_skiaGLContext) {
++#if PLATFORM(HAIKU)
++        releaseSkiaGLContextBeforeThreadTeardownHaiku();
++#endif
          s_skiaGLContext = SkiaGLContext::create(*this);
          m_skiaGLContexts.add(*s_skiaGLContext);
 +#if PLATFORM(HAIKU)
@@ -67678,6 +67725,16 @@ index 776466ea87d3d721d32ac4e52db702bb2b544e46..c97dea6bdef5117b4bb18225eb489ea9
      }
      return s_skiaGLContext->skiaGLContext();
  #else
+@@ -389,6 +492,9 @@ void PlatformDisplay::setSkiaGLContextForCurrentThread(std::unique_ptr<GLContext
+         return;
+     }
+     ASSERT(!s_skiaGLContext);
++#if PLATFORM(HAIKU)
++    releaseSkiaGLContextBeforeThreadTeardownHaiku();
++#endif
+     s_skiaGLContext = SkiaGLContext::create(WTF::move(glContext));
+     m_skiaGLContexts.add(*s_skiaGLContext);
+ }
 diff --git a/Source/WebCore/platform/graphics/skia/SkiaHarfBuzzFont.cpp b/Source/WebCore/platform/graphics/skia/SkiaHarfBuzzFont.cpp
 index daeed3e5dc0bf77c433fb0df23a09ecf4a677d10..b82600ddb9fc56c5f5a24efe5048378fed16107a 100644
 --- a/Source/WebCore/platform/graphics/skia/SkiaHarfBuzzFont.cpp
