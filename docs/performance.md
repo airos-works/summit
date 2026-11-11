@@ -58,6 +58,28 @@ recovers badly from the losses a fuller queue causes), so 256 KB is the
 default until that is better (#119). libcurl passes the socket type with
 `SOCK_CLOEXEC` added: the check masks it.
 
+**Hidden pages' video (#209).** A media source video that plays with sound in
+a hidden page (another tab, a minimized window) stops decoding its pictures
+after 5 s; the sound and the clock go on, and when the page is shown the video
+track is given again from the key frame before the current time
+(`SourceBufferPrivate::reenqueSamples`). Not while something asks for the
+pictures (Picture in Picture reads them while its tab is hidden; a canvas may),
+and not for the DASH player; `SUMMIT_HIDDEN_VIDEO=1` keeps decoding. A test
+page with Akamai's 1080p30 H.264 + AAC test stream in two source buffers,
+software decoding (`SUMMIT_HARDWARE_VIDEO=0`), tab hidden for 15 s: web
+process 0.15 → 0.01 of a core while hidden; 30 frames a second again within
+half a second of showing it, the clock 15 s on (also after 70 s hidden). With
+NVDEC: 0.04 → 0.01.
+
+**One decoding queue per picture (#213).** Every picture decoded off the main
+thread had a thread and a BLooper of its own, made and dropped for it with
+two waits on the main thread, and a page started as many at once as it had
+pictures waiting. Pictures now share a few serial queues (half the cores, 2 to
+4; `SUMMIT_IMAGE_DECODE_POOL`, 0 for the old way), one task per request, and a
+picture keeps its queue so its requests stay in order. 400 decodes of
+800x600 JPEGs on the X399: 109-118 → 51 threads in the web process at the
+peak, 1.7 → 1.3-1.6 s; an animated GIF still animates.
+
 ## 6-7 November 2026: profile-guided optimization in CI, fallback fonts, tile painters, GPU tiles measured
 
 Measured on the X399 (Threadripper 1950X, GTX 1070 with NVK/Zink, 3840x2160

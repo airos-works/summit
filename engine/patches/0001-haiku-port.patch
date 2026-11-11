@@ -39340,18 +39340,25 @@ index 273ae0526c97ae7781401f3bce589413f8a0dcbe..52b97dd351a66bb3493af60bb46b702a
  using ImageBufferPlatformBackend = ImageBufferSkiaBackend;
  using ImageBufferPlatformBitmapBackend = ImageBufferSkiaUnacceleratedBackend;
 diff --git a/Source/WebCore/platform/graphics/ImageFrameWorkQueue.cpp b/Source/WebCore/platform/graphics/ImageFrameWorkQueue.cpp
-index b52d0d526daf52795c9a38ba4f1feff951287204..74cbe66d722b82d732df505e356f2c75efb70915 100644
+index b52d0d526daf52795c9a38ba4f1feff951287204..7f67b2767cd013ef177f46fc34db90e42a107da0 100644
 --- a/Source/WebCore/platform/graphics/ImageFrameWorkQueue.cpp
 +++ b/Source/WebCore/platform/graphics/ImageFrameWorkQueue.cpp
-@@ -29,6 +29,7 @@
+@@ -29,6 +29,14 @@
  #include "BitmapImageSource.h"
  #include "ImageDecoder.h"
  #include "Logging.h"
 +#include <wtf/MainThread.h>
++#if PLATFORM(HAIKU)
++#include <algorithm>
++#include <cstdlib>
++#include <wtf/NeverDestroyed.h>
++#include <wtf/NumberOfCores.h>
++#include <wtf/Vector.h>
++#endif
  #include <wtf/SystemTracing.h>
  #include <wtf/text/TextStream.h>
  
-@@ -63,7 +64,11 @@ void ImageFrameWorkQueue::start()
+@@ -63,7 +71,11 @@ void ImageFrameWorkQueue::start()
  
      m_workQueue = WorkQueue::create("org.webkit.ImageDecoder"_s, WorkQueue::QOS::Default);
  
@@ -39364,6 +39371,136 @@ index b52d0d526daf52795c9a38ba4f1feff951287204..74cbe66d722b82d732df505e356f2c75
          Request request;
          while (protectedRequestQueue->dequeue(request)) {
              TraceScope tracingScope(AsyncImageDecodeStart, AsyncImageDecodeEnd);
+@@ -119,8 +131,101 @@ void ImageFrameWorkQueue::start()
+     });
+ }
+ 
++#if PLATFORM(HAIKU)
++// A thread and a BLooper were made for every picture decoded off the main
++// thread, with two handshakes on the main thread, and dropped after it: one
++// per picture on a page, as many at once as the page had pictures waiting.
++// Static pictures go to one of a few serial queues the process shares (a
++// picture keeps its queue, so its requests stay in order); a picture that is
++// animated from its first request keeps a queue of its own, whose loop waits
++// for its next frames.
++// SUMMIT_IMAGE_DECODE_POOL=0 gives every picture its own queue again; a number
++// sets how many queues are shared (default: half the cores, 2 to 4).
++static WorkQueue* pooledImageDecodeQueueHaiku()
++{
++    static const unsigned count = [] {
++        const char* value = getenv("SUMMIT_IMAGE_DECODE_POOL");
++        if (value)
++            return static_cast<unsigned>(std::clamp(atoi(value), 0, 16));
++        return static_cast<unsigned>(std::clamp(WTF::numberOfProcessorCores() / 2, 2, 4));
++    }();
++    if (!count)
++        return nullptr;
++    static NeverDestroyed<Vector<Ref<WorkQueue>>> queues = [] {
++        Vector<Ref<WorkQueue>> queues;
++        for (unsigned i = 0; i < count; ++i)
++            queues.append(WorkQueue::create("org.webkit.ImageDecoder.pool"_s, WorkQueue::QOS::Default));
++        return queues;
++    }();
++    static std::atomic<unsigned> next { 0 };
++    return queues.get()[next++ % count].ptr();
++}
++
++void ImageFrameWorkQueue::dispatchToPoolHaiku(const Request& request)
++{
++    RefPtr decoder = m_source.get()->decoder();
++    if (!decoder)
++        return;
++
++    RunLoop& replyRunLoop = isMainThread() ? RunLoop::currentSingleton() : RunLoop::mainSingleton();
++    unsigned generation = m_generationHaiku;
++    protect(m_pooledQueueHaiku)->dispatch([protectedThis = Ref { *this }, weakRunLoop = ThreadSafeWeakPtr { replyRunLoop }, protectedSource = m_source.get(), protectedDecoder = decoder.releaseNonNull(), request = Request { request }, generation] () mutable {
++        RefPtr<NativeImage> nativeImage;
++        // Not wanted any more (stop()): nothing is decoded, and the
++        // references still go back to the picture's own thread.
++        bool wanted = protectedThis->m_generationHaiku == generation;
++        if (wanted) {
++            TraceScope tracingScope(AsyncImageDecodeStart, AsyncImageDecodeEnd);
++            auto minimumDecodingDuration = protectedThis->minimumDecodingDurationForTesting();
++            MonotonicTime startingTime;
++            if (minimumDecodingDuration > 0_s)
++                startingTime = MonotonicTime::now();
++
++            DecodingDestination decodingDestination = request.options.decodingDestination();
++            if (auto result = protectedDecoder->createNativeImageAtIndex(request.index, request.subsamplingLevel, request.options)) {
++                nativeImage = WTF::move(std::get<Ref<NativeImage>>(*result));
++                decodingDestination = std::get<DecodingDestination>(*result);
++            }
++            request.options = { request.options.decodingMode(), decodingDestination, request.options.sizeForDrawing() };
++
++            if (minimumDecodingDuration > 0_s) {
++                auto actualDecodingDuration = MonotonicTime::now() - startingTime;
++                if (minimumDecodingDuration > actualDecodingDuration)
++                    sleep(minimumDecodingDuration - actualDecodingDuration);
++            }
++        }
++
++        RefPtr protectedRunLoop = weakRunLoop.get();
++        if (!protectedRunLoop)
++            return;
++        callOnRunLoop(*protectedRunLoop, [protectedThis = WTF::move(protectedThis), protectedSource = WTF::move(protectedSource), protectedDecoder = WTF::move(protectedDecoder), request, generation, wanted, nativeImage = WTF::move(nativeImage)] () mutable {
++            if (!wanted || protectedThis->m_generationHaiku != generation || protectedSource.ptr() != protectedThis->m_source.get().ptr())
++                return;
++            // The DecodeQueue may have been cleared before the frame was decoded.
++            if (protectedThis->decodeQueue().isEmpty() || !request.isCompatibleWith(protectedThis->decodeQueue().first()))
++                return;
++            protectedThis->decodeQueue().removeFirst();
++            protectedSource->imageFrameDecodeAtIndexHasFinished(request.index, request.subsamplingLevel, request.animatingState, request.options, WTF::move(nativeImage));
++        });
++    });
++}
++#endif
++
+ void ImageFrameWorkQueue::dispatch(const Request& request)
+ {
++#if PLATFORM(HAIKU)
++    // A picture that starts on a shared queue stays there, animated or not,
++    // so its requests are decoded and answered in order.
++    if (!m_workQueue && (m_pooledQueueHaiku || request.animatingState == ImageAnimatingState::No)) {
++        if (!m_pooledQueueHaiku)
++            m_pooledQueueHaiku = pooledImageDecodeQueueHaiku();
++        if (m_pooledQueueHaiku) {
++            decodeQueue().append(request);
++            dispatchToPoolHaiku(request);
++            return;
++        }
++    }
++#endif
+     protect(requestQueue())->enqueue(request);
+     decodeQueue().append(request);
+ 
+@@ -143,6 +248,9 @@ void ImageFrameWorkQueue::stop()
+ 
+     m_decodeQueue.clear();
+     m_workQueue = nullptr;
++#if PLATFORM(HAIKU)
++    ++m_generationHaiku;
++#endif
+ }
+ 
+ bool ImageFrameWorkQueue::isPendingDecodingAtIndex(unsigned index, SubsamplingLevel subsamplingLevel, const DecodingOptions& options) const
+diff --git a/Source/WebCore/platform/graphics/ImageFrameWorkQueue.h b/Source/WebCore/platform/graphics/ImageFrameWorkQueue.h
+index 30ec6a48d6379f119b877d68577e002eccce6649..a7d166d8ac26534cef525cdffc98df3ce4db6b8e 100644
+--- a/Source/WebCore/platform/graphics/ImageFrameWorkQueue.h
++++ b/Source/WebCore/platform/graphics/ImageFrameWorkQueue.h
+@@ -80,6 +80,13 @@ private:
+     RefPtr<RequestQueue> m_requestQueue;
+     DecodeQueue m_decodeQueue;
+     RefPtr<WorkQueue> m_workQueue;
++#if PLATFORM(HAIKU)
++    void dispatchToPoolHaiku(const Request&);
++    // Static pictures are decoded on a few threads shared by the process,
++    // one task per request, rather than on a thread of their own (#213).
++    RefPtr<WorkQueue> m_pooledQueueHaiku;
++    std::atomic<unsigned> m_generationHaiku { 0 };
++#endif
+ 
+     Seconds m_minimumDecodingDurationForTesting;
+ };
 diff --git a/Source/WebCore/platform/graphics/IntPoint.h b/Source/WebCore/platform/graphics/IntPoint.h
 index a8828bd8fff92aea9fc07e1e65d7e55cc287a161..1b473e72a76c89487824d5bb8150e8fe847bf6f5 100644
 --- a/Source/WebCore/platform/graphics/IntPoint.h
@@ -57465,10 +57602,10 @@ index 0000000000000000000000000000000000000000..697a5429ec08d45368e96da133c8a0ae
 +#endif
 diff --git a/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.cpp b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..98c0aea6b002917237029f105ed324529de42e1d
+index 0000000000000000000000000000000000000000..a4d90d5d9942334bf7e5c66f70bc8b27efbeb372
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.cpp
-@@ -0,0 +1,3394 @@
+@@ -0,0 +1,3488 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -58145,10 +58282,26 @@ index 0000000000000000000000000000000000000000..98c0aea6b002917237029f105ed32452
 +
 +    void enqueue(Ref<MediaSampleHaiku>&& sample)
 +    {
++        // A hidden page's video is not decoded: its samples are let go as
++        // they come, and the source buffer gives them again on resuming.
++        if (m_suspendedHaiku) {
++            ++m_samplesSkippedHiddenHaiku;
++            return;
++        }
 +        if (!m_enqueuedSinceFlush.exchange(true))
 +            MSE_TRACE("video first sample enqueued pts=%.3f sync=%d\n", sample->presentationTime().toDouble(), sample->isSync());
 +        m_queue.enqueue(WTF::move(sample));
 +    }
++    void setSuspendedHaiku(bool suspended)
++    {
++        if (m_suspendedHaiku == suspended)
++            return;
++        m_suspendedHaiku = suspended;
++        MSE_TRACE("video %s for a hidden page (%u samples skipped)\n", suspended ? "suspended" : "resumed", m_samplesSkippedHiddenHaiku.load());
++        if (suspended)
++            flush();
++    }
++    bool isSuspendedHaiku() const { return m_suspendedHaiku; }
 +    bool isReadyForMore() { return m_queue.isReadyForMore(); }
 +#if ENABLE(ENCRYPTED_MEDIA)
 +    bool waitingForKey() const { return m_queue.waitingForKey(); }
@@ -58981,6 +59134,8 @@ index 0000000000000000000000000000000000000000..98c0aea6b002917237029f105ed32452
 +    std::atomic<bool> m_repaintQueued { false };
 +    std::atomic<bool> m_hasFrameSinceFlush { false };
 +    std::atomic<bool> m_enqueuedSinceFlush { false };
++    std::atomic<bool> m_suspendedHaiku { false };
++    std::atomic<unsigned> m_samplesSkippedHiddenHaiku { 0 };
 +    std::atomic<unsigned> m_presentedFrames { 0 };
 +    std::atomic<unsigned> m_droppedFrames { 0 };
 +    std::atomic<unsigned> m_unshownFrames { 0 };
@@ -59677,6 +59832,7 @@ index 0000000000000000000000000000000000000000..98c0aea6b002917237029f105ed32452
 +#endif
 +    m_player(player)
 +    , m_playbackTimer(RunLoop::mainSingleton(), "MediaPlayerPrivateHaikuMSE::PlaybackTimer"_s, this, &MediaPlayerPrivateHaikuMSE::playbackTimerFired)
++    , m_hiddenVideoTimerHaiku(RunLoop::mainSingleton(), "MediaPlayerPrivateHaikuMSE::HiddenVideoTimer"_s, this, &MediaPlayerPrivateHaikuMSE::hiddenVideoTimerFiredHaiku)
 +{
 +}
 +
@@ -60086,12 +60242,74 @@ index 0000000000000000000000000000000000000000..98c0aea6b002917237029f105ed32452
 +    return promise;
 +}
 +
++// A playing video whose page is hidden (another tab, a minimized window) was
++// decoded frame by frame for nobody: 0.55 of a core for software VP9 at
++// 1080p60 on the X399, heat on the boards. After 5 s hidden, a media source
++// video that plays with sound stops decoding its pictures; the sound and the
++// clock go on. Shown again, the video track is given again from the key
++// frame before the current time. Not while something asks for its pictures
++// (Picture in Picture draws them while its tab is hidden, a canvas may), and
++// not for the DASH player. SUMMIT_HIDDEN_VIDEO=1 keeps decoding.
++static bool suspendsHiddenVideoHaiku()
++{
++    static const bool enabled = [] {
++        const char* value = getenv("SUMMIT_HIDDEN_VIDEO");
++        return !value || strcmp(value, "1");
++    }();
++    return enabled;
++}
++
++void MediaPlayerPrivateHaikuMSE::setPageIsVisible(bool visible)
++{
++    if (visible == m_pageVisibleHaiku)
++        return;
++    m_pageVisibleHaiku = visible;
++    if (visible) {
++        m_hiddenVideoTimerHaiku.stop();
++        resumeHiddenVideoHaiku();
++        return;
++    }
++    m_hiddenSinceHaiku = MonotonicTime::now();
++    if (suspendsHiddenVideoHaiku())
++        m_hiddenVideoTimerHaiku.startRepeating(1_s);
++}
++
++void MediaPlayerPrivateHaikuMSE::hiddenVideoTimerFiredHaiku()
++{
++    if (m_pageVisibleHaiku || !m_videoRenderer || m_videoRenderer->isSuspendedHaiku()) {
++        m_hiddenVideoTimerHaiku.stop();
++        return;
++    }
++    auto now = MonotonicTime::now();
++    if (m_dash || !m_mediaSourcePrivate || m_paused || !hasVideo() || !hasAudio()
++        || now - m_hiddenSinceHaiku < 5_s || now - m_lastFrameRequestHaiku < 3_s)
++        return;
++    m_videoRenderer->setSuspendedHaiku(true);
++    m_hiddenVideoTimerHaiku.stop();
++}
++
++void MediaPlayerPrivateHaikuMSE::resumeHiddenVideoHaiku()
++{
++    if (!m_videoRenderer || !m_videoRenderer->isSuspendedHaiku())
++        return;
++    m_videoRenderer->setSuspendedHaiku(false);
++    // Still hidden (pictures were asked for): look again later.
++    if (!m_pageVisibleHaiku && suspendsHiddenVideoHaiku())
++        m_hiddenVideoTimerHaiku.startRepeating(1_s);
++    if (RefPtr mediaSource = m_mediaSourcePrivate) {
++        for (auto& buffer : mediaSource->sourceBuffers()) {
++            if (buffer->platformType() == MediaPlatformType::Haiku)
++                static_cast<SourceBufferPrivateHaiku&>(buffer.get()).reenqueueVideoHaiku();
++        }
++    }
++}
++
 +void MediaPlayerPrivateHaikuMSE::resolveSeekWhenShown(MediaTime seekTime, unsigned generation, MonotonicTime since)
 +{
 +    if (generation != m_seekGeneration || !m_seekPromise)
 +        return;
 +    // Give up waiting after a second in case no picture comes (no decoder).
-+    if (hasVideo() && m_videoRenderer && !m_videoRenderer->hasFrameSinceFlush() && MonotonicTime::now() - since < 1_s) {
++    if (hasVideo() && m_videoRenderer && !m_videoRenderer->hasFrameSinceFlush() && !m_videoRenderer->isSuspendedHaiku() && MonotonicTime::now() - since < 1_s) {
 +        RunLoop::mainSingleton().dispatchAfter(10_ms, [weakThis = WeakPtr { *this }, seekTime, generation, since] {
 +            if (RefPtr protectedThis = weakThis.get())
 +                protectedThis->resolveSeekWhenShown(seekTime, generation, since);
@@ -60230,7 +60448,7 @@ index 0000000000000000000000000000000000000000..98c0aea6b002917237029f105ed32452
 +            // been decoded, or every frame decoded meanwhile arrives late and
 +            // is dropped. Give up waiting after a second in case no decoder
 +            // can be made for the video.
-+            if (run && hasVideo() && (!m_videoRenderer || !m_videoRenderer->hasFrameSinceFlush())) {
++            if (run && hasVideo() && (!m_videoRenderer || (!m_videoRenderer->hasFrameSinceFlush() && !m_videoRenderer->isSuspendedHaiku()))) {
 +                if (!m_prerollStartedAt)
 +                    m_prerollStartedAt = MonotonicTime::now();
 +                if (MonotonicTime::now() - m_prerollStartedAt < 1_s)
@@ -60354,6 +60572,11 @@ index 0000000000000000000000000000000000000000..98c0aea6b002917237029f105ed32452
 +#if USE(SKIA)
 +RefPtr<NativeImage> MediaPlayerPrivateHaikuMSE::nativeImageForCurrentTime()
 +{
++    // Someone wants the pictures (Picture in Picture, a canvas): a hidden
++    // page's video is decoded again.
++    m_lastFrameRequestHaiku = MonotonicTime::now();
++    if (m_videoRenderer && m_videoRenderer->isSuspendedHaiku())
++        resumeHiddenVideoHaiku();
 +    if (!m_videoRenderer)
 +        return nullptr;
 +    auto image = m_videoRenderer->currentFrame();
@@ -60731,6 +60954,14 @@ index 0000000000000000000000000000000000000000..98c0aea6b002917237029f105ed32452
 +        MediaTime(sample.trimStart, timescale), MediaTime(sample.trimEnd, timescale)));
 +}
 +
++void SourceBufferPrivateHaiku::reenqueueVideoHaiku()
++{
++    ensureOnDispatcher([protectedThis = Ref { *this }] {
++        if (protectedThis->m_videoTrackID)
++            protectedThis->reenqueSamples(*protectedThis->m_videoTrackID);
++    });
++}
++
 +SourceBufferPrivateHaiku::Renderer SourceBufferPrivateHaiku::rendererForTrack(TrackID trackID) const
 +{
 +    if (m_videoTrackID && *m_videoTrackID == trackID)
@@ -60865,10 +61096,10 @@ index 0000000000000000000000000000000000000000..98c0aea6b002917237029f105ed32452
 +#endif // ENABLE(MEDIA_SOURCE)
 diff --git a/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.h b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..ab43eb77437b26be01e5ae26ac5b0c484c4ba4e3
+index 0000000000000000000000000000000000000000..41a9a65f25b5e4a29973990ecf31f8e2939aa74f
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.h
-@@ -0,0 +1,423 @@
+@@ -0,0 +1,433 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -61110,7 +61341,13 @@ index 0000000000000000000000000000000000000000..ab43eb77437b26be01e5ae26ac5b0c48
 +    bool supportsFullscreen() const final { return true; }
 +    std::optional<bool> isCrossOrigin(const SecurityOrigin&) const final;
 +    bool hasAudio() const final;
-+    void setPageIsVisible(bool) final { }
++    void setPageIsVisible(bool) final;
++    // A hidden page's video (#209).
++    void hiddenVideoTimerFiredHaiku();
++    void resumeHiddenVideoHaiku();
++    bool m_pageVisibleHaiku { true };
++    MonotonicTime m_hiddenSinceHaiku;
++    MonotonicTime m_lastFrameRequestHaiku;
 +    Ref<MediaTimePromise> seekToTarget(const SeekTarget&) final;
 +    void resolveSeekWhenShown(MediaTime, unsigned generation, MonotonicTime since);
 +    MediaTime currentTime() const final;
@@ -61176,6 +61413,7 @@ index 0000000000000000000000000000000000000000..ab43eb77437b26be01e5ae26ac5b0c48
 +    double m_dashSeekableEnd { -1 };
 +    HaikuMSEClock m_clock;
 +    RunLoop::Timer m_playbackTimer;
++    RunLoop::Timer m_hiddenVideoTimerHaiku;
 +
 +    MediaTime m_duration { MediaTime::invalidTime() };
 +    std::optional<SeekTarget> m_pendingSeek;
@@ -61223,6 +61461,9 @@ index 0000000000000000000000000000000000000000..ab43eb77437b26be01e5ae26ac5b0c48
 +
 +    // Called by a renderer, on any thread, when it can take samples again.
 +    void rendererReadyForMoreSamples(TrackID);
++    // The video track's samples again from the key frame before the current
++    // time, after the player stopped decoding them for a hidden page (#209).
++    void reenqueueVideoHaiku();
 +    bool requiresParserFlush() const final { return m_parserNeedsEndFlush; }
 +
 +private:
