@@ -38612,7 +38612,7 @@ index ca354c1055ee4465976d2f7046ed16a6c457aee3..9cd622e52c033ad61ae48127123d8c0a
  
      // FIXME: This frame may not be destroyed. It can be reused for sync image decoding.
 diff --git a/Source/WebCore/platform/graphics/BitmapImageSource.cpp b/Source/WebCore/platform/graphics/BitmapImageSource.cpp
-index 67d32560260172fa51f5b535bed034165a14b0a7..bffc368c7b2657f3fb53e61d13a8cbe4508bf2f5 100644
+index 67d32560260172fa51f5b535bed034165a14b0a7..1ef0ce47173917441f460c41aa43f6eae79a98b7 100644
 --- a/Source/WebCore/platform/graphics/BitmapImageSource.cpp
 +++ b/Source/WebCore/platform/graphics/BitmapImageSource.cpp
 @@ -35,8 +35,43 @@
@@ -38690,7 +38690,25 @@ index 67d32560260172fa51f5b535bed034165a14b0a7..bffc368c7b2657f3fb53e61d13a8cbe4
      decodedSizeReset(decodedSize);
  }
  
-@@ -510,6 +560,28 @@ void BitmapImageSource::cacheNativeImageAtIndex(unsigned index, SubsamplingLevel
+@@ -499,6 +549,17 @@ void BitmapImageSource::cacheNativeImageAtIndex(unsigned index, SubsamplingLevel
+     if (index >= m_frames.size())
+         return;
+ 
++#if PLATFORM(HAIKU)
++    // The picture's full size, read before the frame is touched. Once data
++    // has arrived since the frame's metadata was read (dataChanged() drops
++    // the cached size), sourceSize() reads it again through
++    // frameAtIndexCacheIfNeeded(), and that destroys the native images of a
++    // frame that is not complete yet: read after the new picture was stored,
++    // it threw that picture away, and fetchFrameMetaDataAtIndex() read the
++    // size of the picture it had just been given from a null pointer (#222).
++    auto fullSize = sourceSize(ImageOrientation::Orientation::None);
++#endif
++
+     destroyNativeImageAtIndex(index, options.decodingDestination());
+ 
+     // Do not cache NativeImage if adding its sizeInBytes to MemoryCache will cause numerical overflow.
+@@ -510,6 +571,27 @@ void BitmapImageSource::cacheNativeImageAtIndex(unsigned index, SubsamplingLevel
      auto& destination = frame.destination(options.decodingDestination());
      destination.nativeImage = nativeImage.copyRef();
      destination.decodingOptions = options;
@@ -38705,21 +38723,20 @@ index 67d32560260172fa51f5b535bed034165a14b0a7..bffc368c7b2657f3fb53e61d13a8cbe4
 +        const char* value = std::getenv("SUMMIT_IMAGE_SIZE_FOR_DRAWING");
 +        return value && !std::strcmp(value, "1");
 +    }();
-+    if (!keepsSizeForDrawing && options.hasSizeForDrawing() && nativeImage->size() == sourceSize(ImageOrientation::Orientation::None))
++    if (!keepsSizeForDrawing && options.hasSizeForDrawing() && nativeImage->size() == fullSize)
 +        destination.decodingOptions = DecodingOptions { options.decodingMode(), options.decodingDestination() };
 +    // A frame decoded smaller than the picture (JPEG's scaled decode, #212)
 +    // serves draws up to its own size, not only up to the size it was asked
 +    // for: a tile painted at a slightly larger scale decoded the picture
 +    // again, in full and on the main thread. It never passes for the full
 +    // picture (a canvas or WebGL wants that).
-+    else if (nativeImage->size().width() < sourceSize(ImageOrientation::Orientation::None).width()
-+        || nativeImage->size().height() < sourceSize(ImageOrientation::Orientation::None).height())
++    else if (nativeImage->size().width() < fullSize.width() || nativeImage->size().height() < fullSize.height())
 +        destination.decodingOptions = DecodingOptions { options.decodingMode(), options.decodingDestination(), nativeImage->size() };
 +#endif
      destination.headroom = nativeImage->headroom();
  
      cacheMetadataAtIndex(index, subsamplingLevel, options);
-@@ -621,9 +693,28 @@ std::expected<Ref<NativeImage>, DecodingStatus> BitmapImageSource::nativeImageAt
+@@ -621,9 +703,28 @@ std::expected<Ref<NativeImage>, DecodingStatus> BitmapImageSource::nativeImageAt
      if (auto compatibleDecodingDestination = compatibleDecodingDestinationWithOptionsAtIndex(index, subsamplingLevel, options))
          decodingDestination = *compatibleDecodingDestination;
      else {
@@ -39404,6 +39421,31 @@ index 273ae0526c97ae7781401f3bce589413f8a0dcbe..52b97dd351a66bb3493af60bb46b702a
  #elif USE(SKIA)
  using ImageBufferPlatformBackend = ImageBufferSkiaBackend;
  using ImageBufferPlatformBitmapBackend = ImageBufferSkiaUnacceleratedBackend;
+diff --git a/Source/WebCore/platform/graphics/ImageDecoder.cpp b/Source/WebCore/platform/graphics/ImageDecoder.cpp
+index 1355bef498874fa3a24e258108efd81d72729a28..8cc7572a345cc4c7e7e0c2b4c788251d1f90a827 100644
+--- a/Source/WebCore/platform/graphics/ImageDecoder.cpp
++++ b/Source/WebCore/platform/graphics/ImageDecoder.cpp
+@@ -105,10 +105,20 @@ bool ImageDecoder::supportsMediaType(MediaType type)
+ bool ImageDecoder::fetchFrameMetaDataAtIndex(size_t index, SubsamplingLevel subsamplingLevel, const DecodingOptions& options, ImageFrame& frame) const
+ {
+     frame.m_naturalSize = frameSizeAtIndex(index, subsamplingLevel);
++#if PLATFORM(HAIKU)
++    // A frame whose picture is gone (#222) takes the natural size rather
++    // than reading the size of nothing.
++    RefPtr nativeImage = options.hasSizeForDrawing() ? frame.nativeImage(options.decodingDestination()) : nullptr;
++    ASSERT(!options.hasSizeForDrawing() || nativeImage);
++    if (nativeImage)
++        frame.m_size = nativeImage->size();
++    else
++#else
+     if (options.hasSizeForDrawing()) {
+         ASSERT(frame.hasNativeImage(options.decodingDestination()));
+         frame.m_size = frame.nativeImage(options.decodingDestination())->size();
+     } else
++#endif
+         frame.m_size = frame.m_naturalSize;
+ 
+     frame.m_densityCorrectedSize = frameDensityCorrectedSizeAtIndex(index);
 diff --git a/Source/WebCore/platform/graphics/ImageFrameWorkQueue.cpp b/Source/WebCore/platform/graphics/ImageFrameWorkQueue.cpp
 index b52d0d526daf52795c9a38ba4f1feff951287204..7f67b2767cd013ef177f46fc34db90e42a107da0 100644
 --- a/Source/WebCore/platform/graphics/ImageFrameWorkQueue.cpp
