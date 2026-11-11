@@ -5026,10 +5026,10 @@ index 0000000000000000000000000000000000000000..8c108d90e1cc50a099c7a4633fc1baa9
 +using WTF::setProcessBackgroundedHaiku;
 diff --git a/Source/WTF/wtf/haiku/RunLoopHaiku.cpp b/Source/WTF/wtf/haiku/RunLoopHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..2a6c3340631b04413b85a30132f5b71e096ef437
+index 0000000000000000000000000000000000000000..ef7c5d537c4a5023549f152014b498688f1b6182
 --- /dev/null
 +++ b/Source/WTF/wtf/haiku/RunLoopHaiku.cpp
-@@ -0,0 +1,588 @@
+@@ -0,0 +1,594 @@
 +/*
 + * Copyright (C) 2014, 2024 Haiku, Inc
 + *
@@ -5097,14 +5097,20 @@ index 0000000000000000000000000000000000000000..2a6c3340631b04413b85a30132f5b71e
 +
 +    void schedule(const BMessenger& target, RunLoop::TimerBase* timer, int64 identifier, MonotonicTime fireTime)
 +    {
++        bool earliest;
 +        {
 +            std::lock_guard locker(m_lock);
 +            removeWithLock(timer);
 +            Key key { fireTime, ++m_sequence };
 +            m_deadlines.emplace(key, Entry { target, timer, timer, identifier });
 +            m_keys.insert_or_assign(timer, key);
++            earliest = m_deadlines.begin()->first == key;
 +        }
-+        m_condition.notify_one();
++        // The thread waits for the earliest deadline and looks again when it
++        // wakes: only a new earliest one needs it now. Every timer start woke
++        // it (a system call and two context switches, #215).
++        if (earliest)
++            m_condition.notify_one();
 +    }
 +
 +    // A wake-up that is dropped because the looper's port is full suspends
@@ -33913,6 +33919,48 @@ index b52b305554da70194cd0751572f755112834ff02..7e385564853946c65019b59ec02faee5
      if (m_client.scrollAnimationEnabled() && !m_inScrollGesture) {
          if (!retargetAnimatedScrollBy({ deltaX, deltaY }))
              startAnimatedScrollToDestination(scrollOffset, scrollOffset + FloatSize { deltaX, deltaY });
+diff --git a/Source/WebCore/platform/SharedBuffer.cpp b/Source/WebCore/platform/SharedBuffer.cpp
+index fa80e0c9f6c386ab03c069fed28ab13b2598b979..9af9b2a7094679b2705dc9eff250771bb2979f26 100644
+--- a/Source/WebCore/platform/SharedBuffer.cpp
++++ b/Source/WebCore/platform/SharedBuffer.cpp
+@@ -706,9 +706,27 @@ void SharedBufferBuilder::appendDataSegment(Ref<DataSegment>&& segment)
+     m_size += size;
+ }
+ 
++#if PLATFORM(HAIKU)
++// Vector::appendContainerWithMapping() reserves exactly the new size, so
++// appending one segment at a time reallocated and moved every segment held so
++// far: a response the network process kept for the disk cache, 16 KB at a
++// time, cost it 93 % of a core and 6 MB/s for 200 MB (quadratic, #215). The
++// segment list grows geometrically instead.
++template<typename Segments>
++static void reserveForAppendHaiku(Segments& segments, size_t added)
++{
++    size_t needed = segments.size() + added;
++    if (needed > segments.capacity())
++        segments.reserveCapacity(std::max<size_t>(needed, segments.capacity() + segments.capacity() / 2 + 16));
++}
++#endif
++
+ void SharedBufferBuilder::append(const FragmentedSharedBuffer& data)
+ {
+     m_state = State::Stale;
++#if PLATFORM(HAIKU)
++    reserveForAppendHaiku(m_segments, data.m_segments.size());
++#endif
+     m_segments.appendContainerWithMapping(data.m_segments, [&](auto& element) {
+         SharedBuffer::DataSegmentVectorEntry entry { m_size, element.segment.copyRef() };
+         m_size += element.segment->size();
+@@ -732,6 +750,9 @@ void SharedBufferBuilder::append(Vector<uint8_t>&& data)
+ void SharedBufferBuilder::appendSpans(const Vector<std::span<const uint8_t>>& spans)
+ {
+     m_state = State::Stale;
++#if PLATFORM(HAIKU)
++    reserveForAppendHaiku(m_segments, spans.size());
++#endif
+     m_segments.appendContainerWithMapping(spans, [&](auto& span) {
+         SharedBuffer::DataSegmentVectorEntry entry { m_size, DataSegment::create(span) };
+         m_size += span.size();
 diff --git a/Source/WebCore/platform/SharedMemory.h b/Source/WebCore/platform/SharedMemory.h
 index 68f798ab3b4a968c6dba787ac524e4c39e326bd2..20f3145e8d62462c19fbe78fdf228dfcc7eb5ce2 100644
 --- a/Source/WebCore/platform/SharedMemory.h
@@ -38564,7 +38612,7 @@ index ca354c1055ee4465976d2f7046ed16a6c457aee3..9cd622e52c033ad61ae48127123d8c0a
  
      // FIXME: This frame may not be destroyed. It can be reused for sync image decoding.
 diff --git a/Source/WebCore/platform/graphics/BitmapImageSource.cpp b/Source/WebCore/platform/graphics/BitmapImageSource.cpp
-index 67d32560260172fa51f5b535bed034165a14b0a7..2ba4ba95b0f4ac4f67ce55c19d4d919b2e49f988 100644
+index 67d32560260172fa51f5b535bed034165a14b0a7..bffc368c7b2657f3fb53e61d13a8cbe4508bf2f5 100644
 --- a/Source/WebCore/platform/graphics/BitmapImageSource.cpp
 +++ b/Source/WebCore/platform/graphics/BitmapImageSource.cpp
 @@ -35,8 +35,43 @@
@@ -38642,7 +38690,7 @@ index 67d32560260172fa51f5b535bed034165a14b0a7..2ba4ba95b0f4ac4f67ce55c19d4d919b
      decodedSizeReset(decodedSize);
  }
  
-@@ -510,6 +560,20 @@ void BitmapImageSource::cacheNativeImageAtIndex(unsigned index, SubsamplingLevel
+@@ -510,6 +560,28 @@ void BitmapImageSource::cacheNativeImageAtIndex(unsigned index, SubsamplingLevel
      auto& destination = frame.destination(options.decodingDestination());
      destination.nativeImage = nativeImage.copyRef();
      destination.decodingOptions = options;
@@ -38659,13 +38707,30 @@ index 67d32560260172fa51f5b535bed034165a14b0a7..2ba4ba95b0f4ac4f67ce55c19d4d919b
 +    }();
 +    if (!keepsSizeForDrawing && options.hasSizeForDrawing() && nativeImage->size() == sourceSize(ImageOrientation::Orientation::None))
 +        destination.decodingOptions = DecodingOptions { options.decodingMode(), options.decodingDestination() };
++    // A frame decoded smaller than the picture (JPEG's scaled decode, #212)
++    // serves draws up to its own size, not only up to the size it was asked
++    // for: a tile painted at a slightly larger scale decoded the picture
++    // again, in full and on the main thread. It never passes for the full
++    // picture (a canvas or WebGL wants that).
++    else if (nativeImage->size().width() < sourceSize(ImageOrientation::Orientation::None).width()
++        || nativeImage->size().height() < sourceSize(ImageOrientation::Orientation::None).height())
++        destination.decodingOptions = DecodingOptions { options.decodingMode(), options.decodingDestination(), nativeImage->size() };
 +#endif
      destination.headroom = nativeImage->headroom();
  
      cacheMetadataAtIndex(index, subsamplingLevel, options);
-@@ -623,7 +687,19 @@ std::expected<Ref<NativeImage>, DecodingStatus> BitmapImageSource::nativeImageAt
+@@ -621,9 +693,28 @@ std::expected<Ref<NativeImage>, DecodingStatus> BitmapImageSource::nativeImageAt
+     if (auto compatibleDecodingDestination = compatibleDecodingDestinationWithOptionsAtIndex(index, subsamplingLevel, options))
+         decodingDestination = *compatibleDecodingDestination;
      else {
++#if PLATFORM(HAIKU)
++        // The size it is drawn at goes with it: a JPEG drawn small is decoded
++        // small here too (#212), and cacheNativeImageAtIndex() records what
++        // the frame can serve.
++        auto decodingOptions = DecodingOptions { DecodingMode::Synchronous, decodingDestination, options.sizeForDrawing() };
++#else
          auto decodingOptions = DecodingOptions { DecodingMode::Synchronous, decodingDestination };
++#endif
  
 +#if PLATFORM(HAIKU)
 +        auto decodeStart = MonotonicTime::now();
@@ -77774,10 +77839,10 @@ index 0000000000000000000000000000000000000000..b643509345de3c578337c746965cade3
 +#endif // SearchPopupMenuHaiku_h
 diff --git a/Source/WebCore/platform/haiku/SharedMemoryHaiku.cpp b/Source/WebCore/platform/haiku/SharedMemoryHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..d74ea7e8b2f8e4c3066db1f922fd2b11a5f59285
+index 0000000000000000000000000000000000000000..f9d11f4b2dd3ad928213710951c414a5ee6c323f
 --- /dev/null
 +++ b/Source/WebCore/platform/haiku/SharedMemoryHaiku.cpp
-@@ -0,0 +1,183 @@
+@@ -0,0 +1,186 @@
 +/*
 + * Copyright (C) 2019 Haiku, Inc. All rights reserved.
 + *
@@ -77902,8 +77967,9 @@ index 0000000000000000000000000000000000000000..d74ea7e8b2f8e4c3066db1f922fd2b11
 +    memory->m_data = data;
 +    memory->m_fileDescriptor = WTF::move(handle.m_handle);
 +    memory->m_isCopyOnWrite = copyOnWrite == CopyOnWrite::Yes;
-+    if ((fcntl(memory->m_fileDescriptor.value(), F_GETFL) & O_ACCMODE) == O_RDONLY)
-+        memory->m_readOnlyFileDescriptor = memory->m_fileDescriptor.duplicate();
++    // A read-only descriptor serves read-only handles itself (createHandle):
++    // no second one is kept. Every cached resource a web process maps holds
++    // its descriptor while it is in the memory cache (#210).
 +    return memory;
 +}
 +
@@ -77918,8 +77984,6 @@ index 0000000000000000000000000000000000000000..d74ea7e8b2f8e4c3066db1f922fd2b11
 +    memory->m_isWrappingMap = true;
 +    if (!memory->m_fileDescriptor)
 +        return nullptr;
-+    if ((fcntl(memory->m_fileDescriptor.value(), F_GETFL) & O_ACCMODE) == O_RDONLY)
-+        memory->m_readOnlyFileDescriptor = memory->m_fileDescriptor.duplicate();
 +    return memory;
 +}
 +
@@ -77937,8 +78001,12 @@ index 0000000000000000000000000000000000000000..d74ea7e8b2f8e4c3066db1f922fd2b11
 +        return Handle::createCopy(span(), protection);
 +    // An imported writable descriptor has no separate read-only capability.
 +    // Decline that conversion instead of exporting writable access as read-only.
-+    auto& descriptor = protection == Protection::ReadOnly ? m_readOnlyFileDescriptor : m_fileDescriptor;
-+    auto duplicate = descriptor.duplicate();
++    const UnixFileDescriptor* descriptor = protection == Protection::ReadOnly ? &m_readOnlyFileDescriptor : &m_fileDescriptor;
++    // A mapping of a read-only descriptor keeps only that one.
++    if (protection == Protection::ReadOnly && !m_readOnlyFileDescriptor && m_fileDescriptor
++        && (fcntl(m_fileDescriptor.value(), F_GETFL) & O_ACCMODE) == O_RDONLY)
++        descriptor = &m_fileDescriptor;
++    auto duplicate = descriptor->duplicate();
 +    if (!duplicate)
 +        return std::nullopt;
 +    if (protection == Protection::ReadWrite && (fcntl(duplicate.value(), F_GETFL) & O_ACCMODE) != O_RDWR)
@@ -79149,10 +79217,19 @@ index 0000000000000000000000000000000000000000..c70340c58ebc48c1f1a424319de275e9
 +}
 +#endif
 diff --git a/Source/WebCore/platform/image-decoders/jpeg/JPEGImageDecoder.cpp b/Source/WebCore/platform/image-decoders/jpeg/JPEGImageDecoder.cpp
-index f422397606c92c19aca1f27aafc07d77d66590ff..12eacd6cbe50d62ff922ab6f522bd01d4e70d9a2 100644
+index f422397606c92c19aca1f27aafc07d77d66590ff..39733700bfb0c09802d30799f6db2a5c7c2b4344 100644
 --- a/Source/WebCore/platform/image-decoders/jpeg/JPEGImageDecoder.cpp
 +++ b/Source/WebCore/platform/image-decoders/jpeg/JPEGImageDecoder.cpp
-@@ -48,6 +48,16 @@
+@@ -43,11 +43,25 @@
+ #include <wtf/TZoneMallocInlines.h>
+ #include <wtf/StdLibExtras.h>
+ #include <wtf/text/ParsingUtilities.h>
++#if PLATFORM(HAIKU)
++#include <cstdlib>
++#include <cstring>
++#endif
+ 
+ #if USE(LCMS)
  #include "LCMSUniquePtr.h"
  #endif
  
@@ -79169,7 +79246,7 @@ index f422397606c92c19aca1f27aafc07d77d66590ff..12eacd6cbe50d62ff922ab6f522bd01d
  extern "C" {
  #include <setjmp.h>
  }
-@@ -377,7 +387,7 @@ public:
+@@ -377,7 +391,7 @@ public:
                  return false;
  
              m_decoder->setOrientation(readImageOrientation(info()));
@@ -79178,7 +79255,20 @@ index f422397606c92c19aca1f27aafc07d77d66590ff..12eacd6cbe50d62ff922ab6f522bd01d
              if (!m_decoder->ignoresGammaAndColorProfile() && m_info.out_color_space == rgbOutputColorSpace())
                  m_decoder->setICCProfile(readICCProfile(&m_info));
  #endif
-@@ -406,6 +416,16 @@ public:
+@@ -386,6 +400,12 @@ public:
+             // image is a sequential JPEG.
+             m_info.buffered_image = jpeg_has_multiple_scans(&m_info);
+ 
++#if PLATFORM(HAIKU)
++            if (m_decoder->scaleEighthsHaiku() < 8) {
++                m_info.scale_num = m_decoder->scaleEighthsHaiku();
++                m_info.scale_denom = 8;
++            }
++#endif
+             // Used to set up image size so arrays can be allocated.
+             jpeg_calc_output_dimensions(&m_info);
+ 
+@@ -406,6 +426,16 @@ public:
              [[fallthrough]];
  
          case JPEG_START_DECOMPRESS:
@@ -79195,7 +79285,7 @@ index f422397606c92c19aca1f27aafc07d77d66590ff..12eacd6cbe50d62ff922ab6f522bd01d
              // Set parameters for decompression.
              // FIXME -- Should reset dct_method and dither mode for final pass
              // of progressive JPEG.
-@@ -514,6 +534,9 @@ private:
+@@ -514,6 +544,9 @@ private:
      jpeg_decompress_struct m_info;
      decoder_error_mgr m_err;
      jstate m_state;
@@ -79205,7 +79295,82 @@ index f422397606c92c19aca1f27aafc07d77d66590ff..12eacd6cbe50d62ff922ab6f522bd01d
  
      JSAMPARRAY m_samples;
  };
-@@ -578,7 +601,9 @@ ScalableImageDecoderFrame* JPEGImageDecoder::frameBufferAtIndex(size_t index)
+@@ -575,10 +608,84 @@ ScalableImageDecoderFrame* JPEGImageDecoder::frameBufferAtIndex(size_t index)
+     return &frame;
+ }
+ 
++#if PLATFORM(HAIKU)
++// The decoder made every picture at its full size whatever size it was drawn
++// at: a 4000x3000 photo in a 400x300 box was 48 MB of pixels and a full
++// decode (#212). libjpeg-turbo decodes at 1/2, 1/4 or 1/8 with its SIMD
++// scaled IDCTs; a draw that needs half the size or less gets the smallest of
++// those that covers it, from a decoder of its own, so this decoder's
++// full-size frame is untouched (a larger draw, a canvas or decode() still
++// make that). Only for complete data. SUMMIT_SCALED_JPEG_DECODE=0 turns it
++// off.
++static bool scaledJPEGDecodeHaiku()
++{
++    static const bool enabled = [] {
++        const char* value = getenv("SUMMIT_SCALED_JPEG_DECODE");
++        return !value || strcmp(value, "0");
++    }();
++    return enabled;
++}
++
++PlatformImagePtr JPEGImageDecoder::createFrameImageAtIndex(size_t index, SubsamplingLevel subsamplingLevel, const DecodingOptions& options)
++{
++    if (!index && m_scaleEighthsHaiku == 8 && options.hasSizeForDrawing() && scaledJPEGDecodeHaiku()) {
++        RefPtr<const SharedBuffer> data;
++        IntSize fullSize;
++        {
++            Locker locker { m_lock };
++            bool haveFullFrame = !m_frameBufferCache.isEmpty() && m_frameBufferCache[0].isComplete();
++            if (!haveFullFrame && !failed() && isAllDataReceived() && m_data)
++                data = m_data;
++            fullSize = size();
++        }
++        auto wanted = *options.sizeForDrawing();
++        unsigned eighths = 8;
++        if (data && !fullSize.isEmpty() && wanted.width() > 0 && wanted.height() > 0) {
++            for (unsigned candidate : { 1u, 2u, 4u }) {
++                if ((fullSize.width() * candidate + 7) / 8 >= static_cast<unsigned>(wanted.width())
++                    && (fullSize.height() * candidate + 7) / 8 >= static_cast<unsigned>(wanted.height())) {
++                    eighths = candidate;
++                    break;
++                }
++            }
++        }
++        if (eighths < 8) {
++            Ref scaled = adoptRef(*new JPEGImageDecoder(m_premultiplyAlpha ? AlphaOption::Premultiplied : AlphaOption::NotPremultiplied,
++                ignoresGammaAndColorProfile() ? GammaAndColorProfileOption::Ignored : GammaAndColorProfileOption::Applied));
++            scaled->m_scaleEighthsHaiku = eighths;
++            scaled->setData(*data, true);
++            if (auto image = scaled->ScalableImageDecoder::createFrameImageAtIndex(0, subsamplingLevel, options)) {
++                if (scaled->ScalableImageDecoder::frameIsCompleteAtIndex(0))
++                    m_scaledFrameCompleteHaiku = true;
++                return image;
++            }
++        }
++    }
++    return ScalableImageDecoder::createFrameImageAtIndex(index, subsamplingLevel, options);
++}
++
++bool JPEGImageDecoder::frameIsCompleteAtIndex(size_t index) const
++{
++    if (!index && m_scaledFrameCompleteHaiku)
++        return true;
++    return ScalableImageDecoder::frameIsCompleteAtIndex(index);
++}
++
++bool JPEGImageDecoder::frameHasAlphaAtIndex(size_t index) const
++{
++    // A finished JPEG frame is opaque (jpegComplete()).
++    if (!index && m_scaledFrameCompleteHaiku)
++        return false;
++    return ScalableImageDecoder::frameHasAlphaAtIndex(index);
++}
++#endif
++
  void JPEGImageDecoder::clear()
  {
      m_reader = nullptr;
@@ -79216,7 +79381,7 @@ index f422397606c92c19aca1f27aafc07d77d66590ff..12eacd6cbe50d62ff922ab6f522bd01d
      m_iccTransform.reset();
  #endif
  }
-@@ -640,7 +665,7 @@ bool JPEGImageDecoder::outputScanlines(ScalableImageDecoderFrame& buffer)
+@@ -640,7 +747,7 @@ bool JPEGImageDecoder::outputScanlines(ScalableImageDecoderFrame& buffer)
  
  #if USE(LCMS)
          if (m_iccTransform)
@@ -79225,7 +79390,25 @@ index f422397606c92c19aca1f27aafc07d77d66590ff..12eacd6cbe50d62ff922ab6f522bd01d
  #endif
      }
      return true;
-@@ -674,7 +699,7 @@ bool JPEGImageDecoder::outputScanlines()
+@@ -655,8 +762,17 @@ bool JPEGImageDecoder::outputScanlines()
+     // Initialize the framebuffer if needed.
+     auto& buffer = m_frameBufferCache[0];
+     if (buffer.isInvalid()) {
++#if PLATFORM(HAIKU)
++        // A scaled decode's frame has libjpeg's output size.
++        IntSize frameSize = size();
++        if (m_scaleEighthsHaiku < 8)
++            frameSize = IntSize(m_reader->info()->output_width, m_reader->info()->output_height);
++        if (!buffer.initialize(frameSize, m_premultiplyAlpha))
++            return setFailed();
++#else
+         if (!buffer.initialize(size(), m_premultiplyAlpha))
+             return setFailed();
++#endif
+         buffer.setDecodingStatus(DecodingStatus::Partial);
+         // The buffer is transparent outside the decoded area while the image is
+         // loading. The completed image will be marked fully opaque in jpegComplete().
+@@ -674,7 +790,7 @@ bool JPEGImageDecoder::outputScanlines()
  
  #if USE(LCMS)
              if (m_iccTransform)
@@ -79234,7 +79417,7 @@ index f422397606c92c19aca1f27aafc07d77d66590ff..12eacd6cbe50d62ff922ab6f522bd01d
  #endif
           }
           return true;
-@@ -738,12 +763,16 @@ void JPEGImageDecoder::setICCProfile(RefPtr<SharedBuffer>&& buffer)
+@@ -738,12 +854,16 @@ void JPEGImageDecoder::setICCProfile(RefPtr<SharedBuffer>&& buffer)
          return;
  
      auto span = buffer->span();
@@ -79252,10 +79435,18 @@ index f422397606c92c19aca1f27aafc07d77d66590ff..12eacd6cbe50d62ff922ab6f522bd01d
  #endif
  
 diff --git a/Source/WebCore/platform/image-decoders/jpeg/JPEGImageDecoder.h b/Source/WebCore/platform/image-decoders/jpeg/JPEGImageDecoder.h
-index 8772ef3e08846c534911e2166cebfbbd56f96185..4394326c43cff20d8f13b798419d3fb3598f4fa6 100644
+index 8772ef3e08846c534911e2166cebfbbd56f96185..9c67a13438663744f7347ab0a582373351e7c2a5 100644
 --- a/Source/WebCore/platform/image-decoders/jpeg/JPEGImageDecoder.h
 +++ b/Source/WebCore/platform/image-decoders/jpeg/JPEGImageDecoder.h
-@@ -35,6 +35,9 @@
+@@ -27,6 +27,7 @@
+ #pragma once
+ 
+ #include "ScalableImageDecoder.h"
++#include <atomic>
+ #include <stdio.h> // Needed by jpeglib.h for FILE.
+ 
+ // ICU defines TRUE and FALSE macros, breaking libjpeg v9 headers
+@@ -35,6 +36,9 @@
  
  #if USE(LCMS)
  #include "LCMSUniquePtr.h"
@@ -79265,11 +79456,33 @@ index 8772ef3e08846c534911e2166cebfbbd56f96185..4394326c43cff20d8f13b798419d3fb3
  #endif
  
  extern "C" {
-@@ -89,7 +92,9 @@ namespace WebCore {
+@@ -65,6 +69,17 @@ namespace WebCore {
+ 
+         bool outputScanlines();
+         void jpegComplete();
++#if PLATFORM(HAIKU)
++        // A picture shown at half its size or less is decoded smaller (#212).
++        PlatformImagePtr createFrameImageAtIndex(size_t, SubsamplingLevel = SubsamplingLevel::Default, const DecodingOptions& = DecodingOptions(DecodingMode::Synchronous)) override;
++        // libjpeg's scaled output in eighths: 8 is full size.
++        unsigned scaleEighthsHaiku() const { return m_scaleEighthsHaiku; }
++        // A complete picture came from a scaled decode, though this decoder's
++        // own frame was never made: the image source keeps that picture only
++        // while the frame counts as complete.
++        bool frameIsCompleteAtIndex(size_t) const override;
++        bool frameHasAlphaAtIndex(size_t) const override;
++#endif
+ 
+         void setOrientation(ImageOrientation orientation) { m_orientation = orientation; }
+ #if USE(LCMS)
+@@ -89,7 +104,13 @@ namespace WebCore {
          void clear();
  
          std::unique_ptr<JPEGImageReader> m_reader;
 -#if USE(LCMS)
++#if PLATFORM(HAIKU)
++        unsigned m_scaleEighthsHaiku { 8 };
++        std::atomic<bool> m_scaledFrameCompleteHaiku { false };
++#endif
 +#if USE(LCMS) && PLATFORM(HAIKU)
 +        RefPtr<SharedLCMSTransformHaiku> m_iccTransform;
 +#elif USE(LCMS)
@@ -90870,7 +91083,7 @@ index 2290fd7b85a5bdb4e711c36dc8a61d5f55073f75..accebc382c7680b5f1b1404c77abb7ee
  
  } // namespace WebCore
 diff --git a/Source/WebCore/platform/network/curl/CurlRequest.cpp b/Source/WebCore/platform/network/curl/CurlRequest.cpp
-index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..f8ed5a469df5f89a48e6446f8c6c17fa60d897b4 100644
+index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..63e12ee65c968b1aefb13e80ef10bc93bf736763 100644
 --- a/Source/WebCore/platform/network/curl/CurlRequest.cpp
 +++ b/Source/WebCore/platform/network/curl/CurlRequest.cpp
 @@ -25,6 +25,7 @@
@@ -91441,8 +91654,8 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..f8ed5a469df5f89a48e6446f8c6c17fa
  {
 -    ensureOnMainThread(WTF::move(task));
 +    ensureOnMainThread(std::move(task));
-+}
-+
+ }
+ 
 +#if PLATFORM(HAIKU)
 +void CurlRequest::watchDownloadStallsHaiku(Seconds stallTimeout)
 +{
@@ -91455,9 +91668,9 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..f8ed5a469df5f89a48e6446f8c6c17fa
 +        if (!isCompletedOrCancelled() && m_curlHandle)
 +            m_curlHandle->setTimeout(stallTimeout);
 +    });
- }
++}
 +#endif
- 
++
  void CurlRequest::runOnWorkerThreadIfRequired(Function<void()>&& task)
  {
      if (isMainThread())
@@ -91466,7 +91679,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..f8ed5a469df5f89a48e6446f8c6c17fa
      else
          task();
  }
-@@ -190,6 +682,17 @@ CURL* CurlRequest::setupTransfer()
+@@ -190,9 +682,50 @@ CURL* CurlRequest::setupTransfer()
      appendAcceptLanguageHeaderIfNeeded(httpHeaderFields);
  
      m_curlHandle = makeUnique<CurlHandle>();
@@ -91484,7 +91697,40 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..f8ed5a469df5f89a48e6446f8c6c17fa
  
      m_curlHandle->setURL(m_request.url(), m_localhostAlias);
  
-@@ -209,8 +712,9 @@ CURL* CurlRequest::setupTransfer()
++#if PLATFORM(HAIKU)
++    // Request priorities on the wire (#214): every stream went at libcurl's
++    // default weight, so a page's style sheet shared the connection evenly
++    // with its pictures, and fetchpriority stopped at the engine's own
++    // scheduler. HTTP/2 gets a stream weight; servers that read RFC 9218's
++    // Priority header (HTTP/2 and HTTP/3) get that, unless the page set one.
++    // SUMMIT_REQUEST_PRIORITY=0 sends neither.
++    static const bool sendsPriority = [] {
++        const char* value = getenv("SUMMIT_REQUEST_PRIORITY");
++        return !value || strcmp(value, "0");
++    }();
++    if (sendsPriority && m_request.url().protocolIs("https"_s)) {
++        int urgency = 3;
++        long weight = 147;
++        switch (m_request.priority()) {
++        case ResourceLoadPriority::VeryHigh: urgency = 0; weight = 256; break;
++        case ResourceLoadPriority::High: urgency = 1; weight = 220; break;
++        case ResourceLoadPriority::Medium: urgency = 2; weight = 183; break;
++        case ResourceLoadPriority::Low: urgency = 3; weight = 147; break;
++        case ResourceLoadPriority::VeryLow: urgency = 4; weight = 110; break;
++        }
++        curl_easy_setopt(m_curlHandle->handle(), CURLOPT_STREAM_WEIGHT, weight);
++        if (!httpHeaderFields.contains("Priority"_s)) {
++            // Media are useful as their bytes come: incremental.
++            bool incremental = m_request.requester() == ResourceRequestRequester::Media;
++            httpHeaderFields.set("Priority"_s, makeString("u="_s, urgency, incremental ? ", i"_s : ""_s));
++        }
++    }
++#endif
++
+     m_curlHandle->appendRequestHeaders(httpHeaderFields);
+ 
+     const auto& method = m_request.httpMethod();
+@@ -209,8 +742,9 @@ CURL* CurlRequest::setupTransfer()
          setupPUT();
      }
  
@@ -91495,7 +91741,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..f8ed5a469df5f89a48e6446f8c6c17fa
  
      if (m_shouldDisableServerTrustEvaluation)
          m_curlHandle->disableServerTrustEvaluation();
-@@ -218,9 +722,52 @@ CURL* CurlRequest::setupTransfer()
+@@ -218,9 +752,52 @@ CURL* CurlRequest::setupTransfer()
      m_curlHandle->setHeaderCallbackFunction(didReceiveHeaderCallback, this);
      m_curlHandle->setWriteCallbackFunction(didReceiveDataCallback, this);
      m_curlHandle->setDebugCallbackFunction(didReceiveDebugInfoCallback, this);
@@ -91548,7 +91794,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..f8ed5a469df5f89a48e6446f8c6c17fa
      m_performStartTime = MonotonicTime::now();
  
      return m_curlHandle->handle();
-@@ -262,6 +809,10 @@ size_t CurlRequest::willSendData(char* buffer, size_t blockSize, size_t numberOf
+@@ -262,6 +839,10 @@ size_t CurlRequest::willSendData(char* buffer, size_t blockSize, size_t numberOf
          // Something went wrong so error the job.
          return CURL_READFUNC_ABORT;
      }
@@ -91559,7 +91805,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..f8ed5a469df5f89a48e6446f8c6c17fa
  
      callClient([totalReadSize = m_formDataStream.totalReadSize(), totalSize = m_formDataStream.totalSize()](CurlRequest& request, CurlRequestClient& client) {
          client.curlDidSendData(request, totalReadSize, totalSize);
-@@ -270,6 +821,27 @@ size_t CurlRequest::willSendData(char* buffer, size_t blockSize, size_t numberOf
+@@ -270,6 +851,27 @@ size_t CurlRequest::willSendData(char* buffer, size_t blockSize, size_t numberOf
      return *sendBytes;
  }
  
@@ -91587,7 +91833,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..f8ed5a469df5f89a48e6446f8c6c17fa
  // This is being called for each HTTP header in the response. This includes '\r\n'
  // for the last line of the header.
  
-@@ -294,12 +866,19 @@ size_t CurlRequest::didReceiveHeader(String&& header)
+@@ -294,12 +896,19 @@ size_t CurlRequest::didReceiveHeader(String&& header)
          m_didReceiveResponse = false;
          m_response = CurlResponse { };
          m_multipartHandle = nullptr;
@@ -91607,7 +91853,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..f8ed5a469df5f89a48e6446f8c6c17fa
          m_response.headers.append(WTF::move(header));
          return receiveBytes;
      }
-@@ -343,6 +922,26 @@ size_t CurlRequest::didReceiveHeader(String&& header)
+@@ -343,6 +952,40 @@ size_t CurlRequest::didReceiveHeader(String&& header)
  
      m_multipartHandle = CurlMultipartHandle::createIfNeeded(*this, m_response);
  
@@ -91631,10 +91877,24 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..f8ed5a469df5f89a48e6446f8c6c17fa
 +        m_curlHandle->setTimeout(0_s);
 +#endif
 +
++#if PLATFORM(HAIKU)
++    // 103 Early Hints were dropped with every other 1xx block; the network
++    // process starts the hints' preconnects for a navigation while its
++    // server is still making the page (#214). The final response's headers
++    // replace this block as they do for 100 Continue.
++    if (statusCode == 103) {
++        if (netTraceHaiku())
++            fprintf(stderr, "Summit net: early hints id=%p %s\n", this, netTraceURLHaiku(m_request.url()).legacyCStringPointer());
++        callClient([response = m_response.isolatedCopy()](CurlRequest& request, CurlRequestClient& client) mutable {
++            client.curlDidReceiveInformationalResponse(request, WTF::move(response));
++        });
++    }
++#endif
++
      // Response will send at didReceiveData() or didCompleteTransfer()
      // to receive continueDidRceiveResponse() for asynchronously.
  
-@@ -368,15 +967,33 @@ size_t CurlRequest::didReceiveData(std::span<const uint8_t> receivedData)
+@@ -368,15 +1011,33 @@ size_t CurlRequest::didReceiveData(std::span<const uint8_t> receivedData)
                      return;
  
                  // Unpause a connection
@@ -91668,7 +91928,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..f8ed5a469df5f89a48e6446f8c6c17fa
      if (receivedData.size()) {
          if (m_multipartHandle) {
              m_multipartHandle->didReceiveMessage(receivedData);
-@@ -393,7 +1010,7 @@ size_t CurlRequest::didReceiveData(std::span<const uint8_t> receivedData)
+@@ -393,7 +1054,7 @@ size_t CurlRequest::didReceiveData(std::span<const uint8_t> receivedData)
          }
      }
  
@@ -91677,7 +91937,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..f8ed5a469df5f89a48e6446f8c6c17fa
  }
  
  void CurlRequest::didReceiveHeaderFromMultipart(Vector<String>&& headers)
-@@ -446,6 +1063,31 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
+@@ -446,6 +1107,31 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
          return;
      }
  
@@ -91709,7 +91969,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..f8ed5a469df5f89a48e6446f8c6c17fa
      // Newer versions of curl/OpenSSL report CURLE_RECV_ERROR or CURLE_PARTIAL_FILE
      // when a server closes the connection to signal end-of-body on responses with
      // no Content-Length and no chunked encoding. This is valid HTTP/1.1 behavior,
-@@ -475,6 +1117,19 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
+@@ -475,6 +1161,19 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
          }
  
          auto metrics = networkLoadMetrics();
@@ -91729,7 +91989,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..f8ed5a469df5f89a48e6446f8c6c17fa
  
          finalizeTransfer();
          callClient([networkLoadMetrics = WTF::move(metrics)](CurlRequest& request, CurlRequestClient& client) mutable {
-@@ -484,8 +1139,28 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
+@@ -484,8 +1183,28 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
              client.curlDidComplete(request, WTF::move(networkLoadMetrics));
          });
      } else {
@@ -91758,7 +92018,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..f8ed5a469df5f89a48e6446f8c6c17fa
  
          CertificateInfo certificateInfo;
          if (auto info = m_curlHandle->certificateInfo())
-@@ -503,13 +1178,84 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
+@@ -503,13 +1222,84 @@ void CurlRequest::didCompleteTransfer(CURLcode result)
      }
  }
  
@@ -91843,7 +92103,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..f8ed5a469df5f89a48e6446f8c6c17fa
      m_formDataStream.clean();
      m_multipartHandle = nullptr;
      m_curlHandle = nullptr;
-@@ -553,7 +1299,9 @@ void CurlRequest::appendAcceptLanguageHeaderIfNeeded(HTTPHeaderMap& header)
+@@ -553,7 +1343,9 @@ void CurlRequest::appendAcceptLanguageHeaderIfNeeded(HTTPHeaderMap& header)
  
  void CurlRequest::setupPUT()
  {
@@ -91854,7 +92114,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..f8ed5a469df5f89a48e6446f8c6c17fa
  
      m_curlHandle->enableHttpPutRequest(totalSize);
      m_curlHandle->setReadCallbackFunction(willSendDataCallback, this);
-@@ -564,7 +1312,7 @@ void CurlRequest::setupPUT()
+@@ -564,7 +1356,7 @@ void CurlRequest::setupPUT()
  
  void CurlRequest::setupPOST()
  {
@@ -91863,7 +92123,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..f8ed5a469df5f89a48e6446f8c6c17fa
  
      m_curlHandle->enableHttpPostRequest(totalSize);
      m_curlHandle->setReadCallbackFunction(willSendDataCallback, this);
-@@ -632,6 +1380,88 @@ void CurlRequest::completeDidReceiveResponse()
+@@ -632,6 +1424,88 @@ void CurlRequest::completeDidReceiveResponse()
          responseCompletionHandler();
  }
  
@@ -91952,7 +92212,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..f8ed5a469df5f89a48e6446f8c6c17fa
  NetworkLoadMetrics CurlRequest::networkLoadMetrics()
  {
      ASSERT(m_curlHandle);
-@@ -653,6 +1483,57 @@ NetworkLoadMetrics CurlRequest::networkLoadMetrics()
+@@ -653,6 +1527,57 @@ NetworkLoadMetrics CurlRequest::networkLoadMetrics()
      return WTF::move(*networkLoadMetrics);
  }
  
@@ -92203,6 +92463,21 @@ index 3b060605bbff32f845804a848610eca23dea834c..75ccb1ce361778903d3bb434142a7c90
 +    MonotonicTime m_lastProgressHaiku;
 +    // watchDownloadStallsHaiku, in milliseconds (0: not a download).
 +    std::atomic<double> m_downloadStallTimeoutHaiku { 0 };
++#endif
+ };
+ 
+ } // namespace WebCore
+diff --git a/Source/WebCore/platform/network/curl/CurlRequestClient.h b/Source/WebCore/platform/network/curl/CurlRequestClient.h
+index 64dbc254d60ad4fb87da4d1c829e1d5ae7146544..9e5b8a12357ab534c66e33e17116db5d8e53f71e 100644
+--- a/Source/WebCore/platform/network/curl/CurlRequestClient.h
++++ b/Source/WebCore/platform/network/curl/CurlRequestClient.h
+@@ -44,6 +44,10 @@ public:
+     virtual void curlDidReceiveData(CurlRequest&, Ref<SharedBuffer>&&) = 0;
+     virtual void curlDidComplete(CurlRequest&, NetworkLoadMetrics&&) = 0;
+     virtual void curlDidFailWithError(CurlRequest&, ResourceError&&, CertificateInfo&&) = 0;
++#if PLATFORM(HAIKU)
++    // A 1xx response before the final one: 103 Early Hints (#214).
++    virtual void curlDidReceiveInformationalResponse(CurlRequest&, CurlResponse&&) { }
 +#endif
  };
  
@@ -99185,7 +99460,7 @@ index 1e30286a668e800d272ca12deeadb625631465ec..0d6a6e3058c34cecaeb18e90134d79da
      bool hitTest(const HitTestRequest&, const HitTestLocation&, HitTestResult&);
  
 diff --git a/Source/WebCore/rendering/RenderLayerBacking.cpp b/Source/WebCore/rendering/RenderLayerBacking.cpp
-index 95122a10cacc10b498c40d3447599bd2cd4d2795..6d42c0bfa02a4ef1c98a4eaf66322754c9143016 100644
+index 95122a10cacc10b498c40d3447599bd2cd4d2795..631ecbbf7da1afed6e8ba3dd63077ccaf64b35a9 100644
 --- a/Source/WebCore/rendering/RenderLayerBacking.cpp
 +++ b/Source/WebCore/rendering/RenderLayerBacking.cpp
 @@ -137,6 +137,15 @@
@@ -99486,7 +99761,37 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..6d42c0bfa02a4ef1c98a4eaf66322754
          m_graphicsLayer->setContentsToNativeImage(nativeImage.get());
  
      didUpdateContentsRect = true;
-@@ -4093,6 +4316,11 @@ void RenderLayerBacking::updateImageContents(PaintedContentsInfo& contentsInfo)
+@@ -3955,6 +4178,29 @@ bool RenderLayerBacking::isDirectlyCompositedImage() const
+         if (image->currentFrameOrientation() != ImageOrientation::Orientation::None)
+             return false;
+ 
++#if PLATFORM(HAIKU)
++        // A layer of its own showed the picture at its natural size: a 12 Mpx
++        // photo in a carousel was a 48 MB texture, uploaded in one go on the
++        // compositor thread, and minified without mipmaps in every frame
++        // (#212). A picture with more than four times the pixels its box has
++        // on the screen, or a side over 8192, is painted into the layer's
++        // tiles at their scale instead. SUMMIT_DIRECT_IMAGE_LIMIT=0 composites
++        // every picture directly, as before.
++        static const bool limited = [] {
++            const char* value = getenv("SUMMIT_DIRECT_IMAGE_LIMIT");
++            return !value || strcmp(value, "0");
++        }();
++        if (limited) {
++            auto natural = image->size();
++            auto box = imageRenderer->replacedContentRect().size();
++            float scale = deviceScaleFactor();
++            double shownPixels = std::max<double>(1, box.width().toFloat() * scale) * std::max<double>(1, box.height().toFloat() * scale);
++            if (natural.width() > 8192 || natural.height() > 8192
++                || static_cast<double>(natural.width()) * natural.height() > 4 * shownPixels)
++                return false;
++        }
++#endif
++
+         return m_graphicsLayer->canDirectlyCompositeNativeImage();
+     }
+ 
+@@ -4093,6 +4339,11 @@ void RenderLayerBacking::updateImageContents(PaintedContentsInfo& contentsInfo)
          if (!cachedImage->isLoaded())
              return;
  
@@ -99498,7 +99803,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..6d42c0bfa02a4ef1c98a4eaf66322754
          if (RefPtr nativeImage = nativeImageForDirectlyCompositedImage(*image))
              m_graphicsLayer->setContentsToNativeImage(nativeImage.get());
  
-@@ -4133,7 +4361,11 @@ LayoutRect RenderLayerBacking::contentsBox() const
+@@ -4133,7 +4384,11 @@ LayoutRect RenderLayerBacking::contentsBox() const
  #endif
  
      if (CheckedPtr renderViewTransitionCapture = dynamicDowncast<RenderViewTransitionCapture>(*renderBox))
@@ -103838,6 +104143,24 @@ index 1a77292fa9b83ddd1bad5a6685091914cff26c56..b8cfe4ef1c0f0577cd2219b7c0baeed1
  
      void synchronize();
  
+diff --git a/Source/WebKit/NetworkProcess/cache/NetworkCacheData.cpp b/Source/WebKit/NetworkProcess/cache/NetworkCacheData.cpp
+index 825b87fc5cbfd7702f9fa9d8462abd7dc119b544..e3c23cb1ad3170ec6045545d35791293a5d10d45 100644
+--- a/Source/WebKit/NetworkProcess/cache/NetworkCacheData.cpp
++++ b/Source/WebKit/NetworkProcess/cache/NetworkCacheData.cpp
+@@ -62,6 +62,13 @@ Data Data::mapToFile(const String& path) const
+     auto mappedFile = FileSystem::mapToFile(path, size(), WTF::move(applyData), &handle);
+     if (!mappedFile)
+         return { };
++#if PLATFORM(HAIKU)
++    // The body just written is handed to web processes as a read-only
++    // mapping (ShareableResource, #210), and a writable descriptor cannot be
++    // passed on as read-only: keep a read-only one, as mapFile() has.
++    if (auto readOnly = FileSystem::openFile(path, FileSystem::FileOpenMode::Read))
++        handle = WTF::move(readOnly);
++#endif
+     return Data::adoptMap(WTF::move(mappedFile), WTF::move(handle));
+ }
+ 
 diff --git a/Source/WebKit/NetworkProcess/cache/NetworkCacheData.h b/Source/WebKit/NetworkProcess/cache/NetworkCacheData.h
 index 44e007fe363106a596ab96dea93ea1c94f283da2..8fd62640b883ec6a8ef507abed5cc7c7544884c8 100644
 --- a/Source/WebKit/NetworkProcess/cache/NetworkCacheData.h
@@ -104100,7 +104423,7 @@ index be40151510176ea4e881fd41af8f79ab6ab6a306..b5fdd6e41375e8108fb406089992f8e5
      if (metaData.headerHash != computeSHA1(headerData, salt)) {
          LOG(NetworkCacheStorage, "(NetworkProcess) header checksum mismatch");
 diff --git a/Source/WebKit/NetworkProcess/curl/NetworkDataTaskCurl.cpp b/Source/WebKit/NetworkProcess/curl/NetworkDataTaskCurl.cpp
-index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..b4676405d3b6bf4e62d2d74d329da0992e3abef5 100644
+index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..48b95dc0c0cc7c02e0553295778c405be532b020 100644
 --- a/Source/WebKit/NetworkProcess/curl/NetworkDataTaskCurl.cpp
 +++ b/Source/WebKit/NetworkProcess/curl/NetworkDataTaskCurl.cpp
 @@ -36,11 +36,17 @@
@@ -104238,7 +104561,24 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..b4676405d3b6bf4e62d2d74d329da099
  
      return curlRequest;
  }
-@@ -168,11 +234,20 @@ void NetworkDataTaskCurl::curlDidReceiveResponse(CurlRequest& request, CurlRespo
+@@ -155,6 +221,16 @@ void NetworkDataTaskCurl::curlDidSendData(CurlRequest&, unsigned long long total
+     m_client->didSendData(totalBytesSent, totalBytesExpectedToSend);
+ }
+ 
++#if PLATFORM(HAIKU)
++void NetworkDataTaskCurl::curlDidReceiveInformationalResponse(CurlRequest&, CurlResponse&& receivedResponse)
++{
++    Ref protectedThis { *this };
++    if (state() == State::Canceling || state() == State::Completed || !m_client)
++        return;
++    didReceiveInformationalResponse(ResourceResponse(receivedResponse));
++}
++#endif
++
+ void NetworkDataTaskCurl::curlDidReceiveResponse(CurlRequest& request, CurlResponse&& receivedResponse)
+ {
+     Ref protectedThis { *this };
+@@ -168,11 +244,20 @@ void NetworkDataTaskCurl::curlDidReceiveResponse(CurlRequest& request, CurlRespo
  
      handleCookieHeaders(request.resourceRequest(), receivedResponse);
  
@@ -104260,7 +104600,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..b4676405d3b6bf4e62d2d74d329da099
      if (m_response.isUnauthorized() && receivedResponse.availableHttpAuth) {
          tryHttpAuthentication(AuthenticationChallenge(receivedResponse, m_authFailureCount, m_response));
          m_authFailureCount++;
-@@ -184,6 +259,15 @@ void NetworkDataTaskCurl::curlDidReceiveResponse(CurlRequest& request, CurlRespo
+@@ -184,6 +269,15 @@ void NetworkDataTaskCurl::curlDidReceiveResponse(CurlRequest& request, CurlRespo
          return;
      }
  
@@ -104276,7 +104616,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..b4676405d3b6bf4e62d2d74d329da099
      invokeDidReceiveResponse();
  }
  
-@@ -193,6 +277,15 @@ void NetworkDataTaskCurl::curlDidReceiveData(CurlRequest&, Ref<SharedBuffer>&& b
+@@ -193,6 +287,15 @@ void NetworkDataTaskCurl::curlDidReceiveData(CurlRequest&, Ref<SharedBuffer>&& b
      if (state() == State::Canceling || state() == State::Completed || (!m_client && !isDownload()))
          return;
  
@@ -104292,7 +104632,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..b4676405d3b6bf4e62d2d74d329da099
      if (isDownload()) {
          auto* download = m_session->networkProcess().downloadManager().download(*m_pendingDownloadID);
          RELEASE_ASSERT(download);
-@@ -218,6 +311,15 @@ void NetworkDataTaskCurl::curlDidComplete(CurlRequest&, NetworkLoadMetrics&& net
+@@ -218,6 +321,15 @@ void NetworkDataTaskCurl::curlDidComplete(CurlRequest&, NetworkLoadMetrics&& net
      if (state() == State::Canceling || state() == State::Completed || (!m_client && !isDownload()))
          return;
  
@@ -104308,7 +104648,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..b4676405d3b6bf4e62d2d74d329da099
      if (isDownload()) {
          auto* download = m_session->networkProcess().downloadManager().download(*m_pendingDownloadID);
          RELEASE_ASSERT(download);
-@@ -236,13 +338,32 @@ void NetworkDataTaskCurl::curlDidFailWithError(CurlRequest& request, ResourceErr
+@@ -236,13 +348,32 @@ void NetworkDataTaskCurl::curlDidFailWithError(CurlRequest& request, ResourceErr
      if (state() == State::Canceling || state() == State::Completed || (!m_client && !isDownload()))
          return;
  
@@ -104342,7 +104682,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..b4676405d3b6bf4e62d2d74d329da099
          if (m_client)
              m_client->didCompleteWithError(resourceError);
          else {
-@@ -256,22 +377,6 @@ void NetworkDataTaskCurl::curlDidFailWithError(CurlRequest& request, ResourceErr
+@@ -256,22 +387,6 @@ void NetworkDataTaskCurl::curlDidFailWithError(CurlRequest& request, ResourceErr
      m_client->didCompleteWithError(resourceError);
  }
  
@@ -104365,7 +104705,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..b4676405d3b6bf4e62d2d74d329da099
  bool NetworkDataTaskCurl::shouldRedirectAsGET(const ResourceRequest& request, bool crossOrigin)
  {
      if (request.httpMethod() == "GET"_s || request.httpMethod() == "HEAD"_s)
-@@ -300,6 +405,12 @@ void NetworkDataTaskCurl::invokeDidReceiveResponse()
+@@ -300,6 +415,12 @@ void NetworkDataTaskCurl::invokeDidReceiveResponse()
  
          switch (policyAction) {
          case PolicyAction::Use:
@@ -104378,7 +104718,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..b4676405d3b6bf4e62d2d74d329da099
              if (m_curlRequest)
                  m_curlRequest->completeDidReceiveResponse();
              break;
-@@ -307,6 +418,30 @@ void NetworkDataTaskCurl::invokeDidReceiveResponse()
+@@ -307,6 +428,30 @@ void NetworkDataTaskCurl::invokeDidReceiveResponse()
              invalidateAndCancel();
              break;
          case PolicyAction::Download: {
@@ -104409,7 +104749,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..b4676405d3b6bf4e62d2d74d329da099
              m_downloadDestinationFile = FileSystem::openFile(m_pendingDownloadLocation, FileSystem::FileOpenMode::Truncate, FileSystem::FileAccessPermission::All, { }, !m_allowOverwriteDownload);
              if (!m_downloadDestinationFile) {
                  if (m_client)
-@@ -319,6 +454,23 @@ void NetworkDataTaskCurl::invokeDidReceiveResponse()
+@@ -319,6 +464,23 @@ void NetworkDataTaskCurl::invokeDidReceiveResponse()
              Ref download = Download::create(downloadManager, *m_pendingDownloadID, *this, *m_session, suggestedFilename());
              downloadManager.dataTaskBecameDownloadTask(*m_pendingDownloadID, download.copyRef());
              download->didCreateDestination(m_pendingDownloadLocation);
@@ -104433,7 +104773,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..b4676405d3b6bf4e62d2d74d329da099
              if (m_curlRequest)
                  m_curlRequest->completeDidReceiveResponse();
              break;
-@@ -330,6 +482,118 @@ void NetworkDataTaskCurl::invokeDidReceiveResponse()
+@@ -330,6 +492,118 @@ void NetworkDataTaskCurl::invokeDidReceiveResponse()
      });
  }
  
@@ -104552,7 +104892,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..b4676405d3b6bf4e62d2d74d329da099
  void NetworkDataTaskCurl::willPerformHTTPRedirection()
  {
      static const int maxRedirects = 20;
-@@ -409,6 +673,7 @@ void NetworkDataTaskCurl::willPerformHTTPRedirection()
+@@ -409,6 +683,7 @@ void NetworkDataTaskCurl::willPerformHTTPRedirection()
              m_curlRequest->setUserPass(m_initialCredential.user(), m_initialCredential.password());
              m_curlRequest->setAuthenticationScheme(ProtectionSpace::AuthenticationScheme::HTTPBasic);
          }
@@ -104560,7 +104900,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..b4676405d3b6bf4e62d2d74d329da099
  
          if (m_state != State::Suspended) {
              m_state = State::Suspended;
-@@ -531,6 +796,7 @@ void NetworkDataTaskCurl::restartWithCredential(const ProtectionSpace& protectio
+@@ -531,6 +806,7 @@ void NetworkDataTaskCurl::restartWithCredential(const ProtectionSpace& protectio
      m_curlRequest->setUserPass(credential.user(), credential.password());
      if (shouldDisableServerTrustEvaluation)
          m_curlRequest->disableServerTrustEvaluation();
@@ -104568,7 +104908,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..b4676405d3b6bf4e62d2d74d329da099
  
      if (m_state != State::Suspended) {
          m_state = State::Suspended;
-@@ -538,11 +804,37 @@ void NetworkDataTaskCurl::restartWithCredential(const ProtectionSpace& protectio
+@@ -538,11 +814,37 @@ void NetworkDataTaskCurl::restartWithCredential(const ProtectionSpace& protectio
      }
  }
  
@@ -104607,7 +104947,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..b4676405d3b6bf4e62d2d74d329da099
          if (!cookieHeaderField.isEmpty())
              request.addHTTPHeaderField(HTTPHeaderName::Cookie, cookieHeaderField);
      }
-@@ -552,10 +844,33 @@ void NetworkDataTaskCurl::handleCookieHeaders(const WebCore::ResourceRequest& re
+@@ -552,10 +854,33 @@ void NetworkDataTaskCurl::handleCookieHeaders(const WebCore::ResourceRequest& re
  {
      static constexpr auto setCookieHeader = "set-cookie: "_s;
  
@@ -104642,7 +104982,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..b4676405d3b6bf4e62d2d74d329da099
              }
          }
 diff --git a/Source/WebKit/NetworkProcess/curl/NetworkDataTaskCurl.h b/Source/WebKit/NetworkProcess/curl/NetworkDataTaskCurl.h
-index 34a4d1cd69624e0f86025f8ee86667dffd0646dc..6c2b3805d9b1834906e8ac2bf8e3961b8e041778 100644
+index 34a4d1cd69624e0f86025f8ee86667dffd0646dc..4640159e6b03ceced0927c482811a98f59398eb7 100644
 --- a/Source/WebKit/NetworkProcess/curl/NetworkDataTaskCurl.h
 +++ b/Source/WebKit/NetworkProcess/curl/NetworkDataTaskCurl.h
 @@ -32,6 +32,10 @@
@@ -104656,7 +104996,16 @@ index 34a4d1cd69624e0f86025f8ee86667dffd0646dc..6c2b3805d9b1834906e8ac2bf8e3961b
  #include <wtf/FileHandle.h>
  #include <wtf/MonotonicTime.h>
  
-@@ -77,7 +81,6 @@ private:
+@@ -71,13 +75,15 @@ private:
+     Ref<WebCore::CurlRequest> createCurlRequest(WebCore::ResourceRequest&&, RequestStatus = RequestStatus::NewRequest);
+     void curlDidSendData(WebCore::CurlRequest&, unsigned long long, unsigned long long) override;
+     void curlDidReceiveResponse(WebCore::CurlRequest&, WebCore::CurlResponse&&) override;
++#if PLATFORM(HAIKU)
++    void curlDidReceiveInformationalResponse(WebCore::CurlRequest&, WebCore::CurlResponse&&) override;
++#endif
+     void curlDidReceiveData(WebCore::CurlRequest&, Ref<WebCore::SharedBuffer>&&) override;
+     void curlDidComplete(WebCore::CurlRequest&, WebCore::NetworkLoadMetrics&&) override;
+     void curlDidFailWithError(WebCore::CurlRequest&, WebCore::ResourceError&&, WebCore::CertificateInfo&&) override;
  
      void invokeDidReceiveResponse();
  
@@ -104664,7 +105013,7 @@ index 34a4d1cd69624e0f86025f8ee86667dffd0646dc..6c2b3805d9b1834906e8ac2bf8e3961b
      bool shouldRedirectAsGET(const WebCore::ResourceRequest&, bool crossOrigin);
      void willPerformHTTPRedirection();
  
-@@ -115,6 +118,22 @@ private:
+@@ -115,6 +121,22 @@ private:
      FileSystem::FileHandle m_downloadDestinationFile;
  
      bool m_blockingCookies { false };
@@ -108313,7 +108662,7 @@ index 0000000000000000000000000000000000000000..2b968b6ac3681112fefa4f50dc2da402
 +}
 diff --git a/Source/WebKit/Platform/IPC/haiku/ConnectionHaiku.cpp b/Source/WebKit/Platform/IPC/haiku/ConnectionHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..f63134a3a4c2fbd22c5cc7bc553f54e5b04786cb
+index 0000000000000000000000000000000000000000..074bca5bcc2d65018552476ada0a12b3e5059e0f
 --- /dev/null
 +++ b/Source/WebKit/Platform/IPC/haiku/ConnectionHaiku.cpp
 @@ -0,0 +1,205 @@
@@ -108436,7 +108785,7 @@ index 0000000000000000000000000000000000000000..f63134a3a4c2fbd22c5cc7bc553f54e5
 +        return false;
 +    }
 +    auto inlineOverhead = sizeof(MessageInfo) + message.attachments().size() * sizeof(AttachmentInfoHaiku);
-+    if (message.bodySize() > messageMaxSizeHaiku - inlineOverhead && !message.setBodyOutOfLine()) {
++    if (message.bodySize() + inlineOverhead > messageInlineLimitHaiku() && !message.setBodyOutOfLine()) {
 +        connectionDidClose();
 +        return false;
 +    }
@@ -108851,10 +109200,10 @@ index 0000000000000000000000000000000000000000..f8ac1cf7a24ba5194e4c6660c48c3cba
 +} // namespace IPC
 diff --git a/Source/WebKit/Platform/IPC/haiku/MessagePacketHaiku.cpp b/Source/WebKit/Platform/IPC/haiku/MessagePacketHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..b9dc3b78e581658907614722ac570eed82cdfeb1
+index 0000000000000000000000000000000000000000..53c4aacc103248f7ab0b1cb310ed3c634a9adc11
 --- /dev/null
 +++ b/Source/WebKit/Platform/IPC/haiku/MessagePacketHaiku.cpp
-@@ -0,0 +1,175 @@
+@@ -0,0 +1,187 @@
 +/*
 + * Copyright (C) 2026 KunanyiOS contributors.
 + *
@@ -108885,6 +109234,8 @@ index 0000000000000000000000000000000000000000..b9dc3b78e581658907614722ac570eed
 +
 +#include "MessageInfo.h"
 +#include <cerrno>
++#include <algorithm>
++#include <cstdlib>
 +#include <cstring>
 +#include <sys/socket.h>
 +
@@ -108913,6 +109264,16 @@ index 0000000000000000000000000000000000000000..b9dc3b78e581658907614722ac570eed
 +{
 +    message.msg_control = m_size ? m_bytes.data() : nullptr;
 +    message.msg_controllen = m_size;
++}
++
++size_t messageInlineLimitHaiku()
++{
++    static const size_t limit = [] {
++        const char* value = getenv("SUMMIT_IPC_INLINE_LIMIT");
++        long requested = value ? atol(value) : 0;
++        return requested > 0 ? std::min<size_t>(requested, messageMaxSizeHaiku) : messageMaxSizeHaiku;
++    }();
++    return limit;
 +}
 +
 +MessagePacketHaiku::Result MessagePacketHaiku::receive(int socket)
@@ -109032,10 +109393,10 @@ index 0000000000000000000000000000000000000000..b9dc3b78e581658907614722ac570eed
 +} // namespace IPC
 diff --git a/Source/WebKit/Platform/IPC/haiku/MessagePacketHaiku.h b/Source/WebKit/Platform/IPC/haiku/MessagePacketHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..193875098b547bec5d0ec938d443b4baa570610a
+index 0000000000000000000000000000000000000000..99d55a59cfe290afd9cc6f404f22b723faf341fd
 --- /dev/null
 +++ b/Source/WebKit/Platform/IPC/haiku/MessagePacketHaiku.h
-@@ -0,0 +1,80 @@
+@@ -0,0 +1,87 @@
 +/*
 + * Copyright (C) 2026 KunanyiOS contributors.
 + *
@@ -109072,7 +109433,14 @@ index 0000000000000000000000000000000000000000..193875098b547bec5d0ec938d443b4ba
 +
 +namespace IPC {
 +
-+inline constexpr size_t messageMaxSizeHaiku = 4096;
++// The largest packet a receiver accepts. Up to 4 KB, every larger message
++// went through a new shared memory file (two shm_open, shm_unlink, ftruncate,
++// mmap and a copy, then fstat, mmap and dup to read it): every 16 KB chunk of
++// a streamed response did (#215).
++inline constexpr size_t messageMaxSizeHaiku = 32 * 1024;
++// What a sender puts inline: messageMaxSizeHaiku, or less with
++// SUMMIT_IPC_INLINE_LIMIT (bytes; 4096 as before).
++size_t messageInlineLimitHaiku();
 +// Haiku caps the userspace control buffer at 1024 bytes and each kernel
 +// ancillary record at 32 descriptor pointers. Send larger lists in groups.
 +inline constexpr size_t descriptorGroupSizeHaiku = 32;
@@ -109338,10 +109706,28 @@ index 0000000000000000000000000000000000000000..8c9fadddd57b601c7a4e032a0362949e
 +
 +} // namespace IPC
 diff --git a/Source/WebKit/Platform/IPC/unix/IPCUtilitiesUnix.cpp b/Source/WebKit/Platform/IPC/unix/IPCUtilitiesUnix.cpp
-index 5ba3ea56961464cc7dc4c971340ad40069b095fa..10cb7a24242199fe64fb40e0a9cedf9845a0533a 100644
+index 5ba3ea56961464cc7dc4c971340ad40069b095fa..b161c64f6ebd85046ecdde8431d2a34825571123 100644
 --- a/Source/WebKit/Platform/IPC/unix/IPCUtilitiesUnix.cpp
 +++ b/Source/WebKit/Platform/IPC/unix/IPCUtilitiesUnix.cpp
-@@ -35,7 +35,7 @@ SocketPair createPlatformConnection(int socketType, unsigned options)
+@@ -31,11 +31,25 @@
+ 
+ namespace IPC {
+ 
++#if OS(HAIKU)
++// Messages up to 32 KB travel inline (MessagePacketHaiku.h); the 64 KB
++// default fifo would fill after a few, and a full socket is slow to wait on
++// (ConnectionHaiku.cpp). 128 KB is the most Haiku allows (#215).
++static void sizeSocketBuffersHaiku(std::array<int, 2>& sockets)
++{
++    const int size = 128 * 1024;
++    for (int socket : sockets) {
++        setsockopt(socket, SOL_SOCKET, SO_RCVBUF, &size, sizeof(size));
++        setsockopt(socket, SOL_SOCKET, SO_SNDBUF, &size, sizeof(size));
++    }
++}
++#endif
++
+ SocketPair createPlatformConnection(int socketType, unsigned options)
  {
      std::array<int, 2> sockets;
  
@@ -109350,6 +109736,26 @@ index 5ba3ea56961464cc7dc4c971340ad40069b095fa..10cb7a24242199fe64fb40e0a9cedf98
      if ((options & SetCloexecOnServer) || (options & SetCloexecOnClient)) {
          RELEASE_ASSERT(socketpair(AF_UNIX, socketType | SOCK_CLOEXEC, 0, sockets.data()) != -1);
  
+@@ -43,6 +57,9 @@ SocketPair createPlatformConnection(int socketType, unsigned options)
+             RELEASE_ASSERT(unsetCloseOnExec(sockets[1]));
+         if (!(options & SetCloexecOnClient))
+             RELEASE_ASSERT(unsetCloseOnExec(sockets[0]));
++#if OS(HAIKU)
++        sizeSocketBuffersHaiku(sockets);
++#endif
+ 
+         return { { sockets[0], UnixFileDescriptor::Adopt }, { sockets[1], UnixFileDescriptor::Adopt } };
+     }
+@@ -54,6 +71,9 @@ SocketPair createPlatformConnection(int socketType, unsigned options)
+         RELEASE_ASSERT(setCloseOnExec(sockets[1]));
+     if (options & SetCloexecOnClient)
+         RELEASE_ASSERT(setCloseOnExec(sockets[0]));
++#if OS(HAIKU)
++    sizeSocketBuffersHaiku(sockets);
++#endif
+ 
+     return { { sockets[0], UnixFileDescriptor::Adopt }, { sockets[1], UnixFileDescriptor::Adopt } };
+ }
 diff --git a/Source/WebKit/Platform/IPC/unix/MessageInfo.h b/Source/WebKit/Platform/IPC/unix/MessageInfo.h
 new file mode 100644
 index 0000000000000000000000000000000000000000..b67841835e54b055d7f6b9c6ce7260513cddee8d
@@ -226891,10 +227297,10 @@ index 359c3765d3a41ba1c6cfdb6b44fa292cc7811a0d..18a4d1524bbb7a68b2bec420d013fd89
  endif ()
 diff --git a/Source/cmake/OptionsHaiku.cmake b/Source/cmake/OptionsHaiku.cmake
 new file mode 100644
-index 0000000000000000000000000000000000000000..cee9ef1c3d2bb54f8c8c4b366ca7b2c3f8e50ee1
+index 0000000000000000000000000000000000000000..e0e44de1489a6683158552a106d98277f3480599
 --- /dev/null
 +++ b/Source/cmake/OptionsHaiku.cmake
-@@ -0,0 +1,471 @@
+@@ -0,0 +1,475 @@
 +include(GNUInstallDirs)
 +include(VersioningUtils)
 +
@@ -227030,6 +227436,10 @@ index 0000000000000000000000000000000000000000..cee9ef1c3d2bb54f8c8c4b366ca7b2c3
 +# speechSynthesis through eSpeak NG or eSpeak, loaded at run time
 +# (platform/haiku/PlatformSpeechSynthesizerHaiku.cpp).
 +WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_SPEECH_SYNTHESIS PUBLIC ON)
++# Cached responses are handed to web processes as mappings of the cache files
++# instead of copies, kept as clean pages that can be shared and reclaimed
++# (#210). SharedMemoryHaiku keeps one descriptor per mapping.
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_SHAREABLE_RESOURCE PRIVATE ON)
 +WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_SPELLCHECK PUBLIC OFF)
 +WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_VARIATION_FONTS PRIVATE ON)
 +WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_TOUCH_EVENTS PUBLIC OFF)

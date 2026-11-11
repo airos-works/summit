@@ -127,6 +127,43 @@ file of its own was left: the damaged-profile recovery and the daily copies
 - The extension installer polled ten times a second for the application's
   life; it now polls once a second unless an installation is pending.
 
+**Large responses in the network process, IPC, pictures shown small, cached
+bodies, request priorities (#215, #212, #210, #214).** Measured on the X399
+with a LAN server on the build host:
+- *Quadratic buffering.* A 200 MB `fetch()` from the LAN took 28-38 s and 33 s
+  of network-process CPU: 93 % of it in `SharedBufferBuilder::append`, which
+  calls `Vector::appendContainerWithMapping()`, which reserves exactly the new
+  size, so every 16 KB chunk kept for the disk cache moved every segment held
+  so far. Upstream has the same code. The segment list now grows
+  geometrically (`SharedBuffer.cpp`): 2.8 s, 1.7 s of CPU per 200 MB.
+- *IPC.* Messages up to 32 KB travel inline (were 4 KB; everything larger went
+  through a new shared-memory file), with 128 KB socket buffers;
+  `SUMMIT_IPC_INLINE_LIMIT=4096` for the old limit. 300 sequential 20 KB
+  fetches: about 525 → 500 ms. The timer thread is woken only for a new
+  earliest deadline. Left: the socket-monitor thread per connection and the
+  BLoopers of non-main run loops.
+- *JPEGs shown small (#212).* A JPEG drawn at half its size or less is decoded
+  at 1/2, 1/4 or 1/8 (libjpeg-turbo's scaled IDCT) by a decoder of its own; the
+  frame records the size it can serve, synchronous decodes keep the draw size,
+  and the decoder reports the frame complete. Twelve 4000x3000 photos in
+  400x300 boxes at 200 %: web process 894 → 216-235 MB, first load 667-808 →
+  513-638 ms; a full-size canvas copy gives the same pixels. Pictures with more
+  than four times the pixels of their box (or a side over 8192) are no longer
+  composited directly at natural size. `SUMMIT_SCALED_JPEG_DECODE=0` and
+  `SUMMIT_DIRECT_IMAGE_LIMIT=0` turn these off.
+- *Cached bodies (#210).* `ENABLE_SHAREABLE_RESOURCE` is on: cached bodies
+  reach web processes as read-only mappings of the cache files. It never
+  worked for new entries on this port: `mapToFile()` kept a writable
+  descriptor, which cannot be passed on as read-only; the body is reopened
+  read-only now, and a read-only mapping keeps one descriptor, not two.
+  Twelve 3.9 MB cached pictures: all twelve bodies mapped, heap 585 → 528 MiB
+  (1084 → 821 in a noisier pair).
+- *Priorities (#214).* Requests carry RFC 9218's `Priority: u=N` (navigation
+  u=0, `fetchpriority` high u=1, default u=2, low u=3) and an HTTP/2 stream
+  weight; `SUMMIT_REQUEST_PRIORITY=0` sends neither. 103 Early Hints reach the
+  loader (WebKit acts on their preconnects). On a fast link cloudflare.com's
+  first paint is the same either way (medians 711 and 752 ms in 600-1250).
+
 ## 6-7 November 2026: profile-guided optimization in CI, fallback fonts, tile painters, GPU tiles measured
 
 Measured on the X399 (Threadripper 1950X, GTX 1070 with NVK/Zink, 3840x2160
