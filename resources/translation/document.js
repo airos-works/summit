@@ -60,7 +60,14 @@
     // KiB limit does, and the walk costs time in proportion: on the ROCK 5
     // a Wikipedia article took 41 ms for 64 KiB and 18 ms for 16 KiB, on the
     // main thread right after every page load.
-    function sample(limit = 16384) {
+    function sample(limit = 16384, target = '') {
+        // A page that says it is in the language translations go to is not
+        // read at all: the walk calls getComputedStyle for every element, 12
+        // to 18 ms on the ROCK 5 at the end of every load (#219).
+        const declared = (document.documentElement.getAttribute('lang') || '').trim().toLowerCase().split(/[-_]/)[0];
+        const wanted = (target || navigator.languages[0] || '').toLowerCase().split(/[-_]/)[0];
+        if (target && !/[-_]/.test(target) && declared && declared === wanted)
+            return {url: document.URL, text: '', declaredTarget: true, languages: [...navigator.languages], ...state()};
         const parts = [];
         let bytes = 0;
         walk(node => {

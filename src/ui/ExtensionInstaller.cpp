@@ -82,10 +82,20 @@ ExtensionInstaller::~ExtensionInstaller()
 {
     if (fThread.joinable()) fThread.join();
 }
+// Ten times a second while something is pending, else once a second: the
+// installer polled at 10 Hz for the application's whole life (#219).
+static constexpr bigtime_t kBusyPoll = 100000, kIdlePoll = 1000000;
 void ExtensionInstaller::Start()
 {
     BMessage tick(pollImport);
-    fTimer = std::make_unique<BMessageRunner>(BMessenger(this), &tick, 100000);
+    fTimer = std::make_unique<BMessageRunner>(BMessenger(this), &tick, kIdlePoll);
+    fPollInterval = kIdlePoll;
+}
+void ExtensionInstaller::SetPollInterval(bigtime_t interval)
+{
+    if (!fTimer || interval == fPollInterval) return;
+    fPollInterval = interval;
+    fTimer->SetInterval(interval);
 }
 void ExtensionInstaller::Changed() { if (fChanged) fChanged(); }
 bool ExtensionInstaller::IsBusy() const { return fWork || fDraft || fPending; }
@@ -141,6 +151,7 @@ bool ExtensionInstaller::BeginImport(const std::filesystem::path& source, std::o
         Finish(error.what());
         return false;
     }
+    SetPollInterval(kBusyPoll);
     Changed();
     return true;
 }
@@ -171,12 +182,14 @@ void ExtensionInstaller::Poll()
     }
     if (fPending && system_time() - fPendingSince > PendingDeadline(fPending)) PendingTimedOut();
     bool pending = HasPendingWork();
+    SetPollInterval(pending ? kBusyPoll : kIdlePoll);
     if (pending != fHadWork) { fHadWork = pending; Changed(); }
 }
 void ExtensionInstaller::Await(uint32 operation)
 {
     fPending = operation;
     fPendingSince = system_time();
+    SetPollInterval(kBusyPoll);
 }
 void ExtensionInstaller::PendingTimedOut()
 {

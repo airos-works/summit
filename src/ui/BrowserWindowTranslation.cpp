@@ -30,7 +30,11 @@ void BrowserWindow::ProbeTranslation(Tab& tab, bool manual)
         || !(tab.url.starts_with("https://") || tab.url.starts_with("http://")) || TranslationDocumentScript().empty()) return;
     state.probed = tab.loadGeneration;
     state.probeAfter = 0; ++state.probeAttempts;
-    TranslationScript(tab, manual ? "manual-probe" : "probe", "__summitTranslation.sample()", true);
+    // An automatic probe names the language translations go to, so a page
+    // that declares it (<html lang>) is not read (#219).
+    const auto target = manual ? std::string() : PreferredTranslationLanguage();
+    TranslationScript(tab, manual ? "manual-probe" : "probe",
+        target.empty() ? "__summitTranslation.sample()" : "__summitTranslation.sample(16384," + json(target).dump() + ")", true);
 }
 void BrowserWindow::CancelTranslation(Tab& tab, bool invalidated)
 {
@@ -135,6 +139,8 @@ bool BrowserWindow::TranslationResult(const BMessage& message)
                 state.from = result.value("source", ""); state.to = result.value("target", "");
                 state.truncated = result.value("truncated", false);
                 ScheduleTranslationTick();
+            } else if (result.value("declaredTarget", false)) {
+                // Already in the language translations go to: nothing to offer.
             } else {
                 const auto detected = DetectPageLanguage(result.value("text", ""));
                 auto target = PreferredTranslationLanguage();

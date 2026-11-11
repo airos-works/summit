@@ -51,6 +51,8 @@ private:
     std::shared_ptr<ImportWork> fWork;
     std::thread fThread;
     std::unique_ptr<BMessageRunner> fTimer;
+    bigtime_t fPollInterval = 0;
+    void SetPollInterval(bigtime_t interval);
     std::unique_ptr<Draft> fDraft;
     std::string fStatus;
     uint64 fGeneration = 0, fRequest = 0;

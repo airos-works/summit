@@ -77,6 +77,8 @@
 #include <cstring>
 #include <ctime>
 #include <sys/stat.h>
+#include <fstream>
+#include <iterator>
 #include <sys/time.h>
 #include <netdb.h>
 
@@ -1588,12 +1590,47 @@ private:
             std::remove(temporary.c_str());
             return false;
         };
-        for (const auto& [name, file] : { std::pair { "emoji-font", "Noto-COLRv1.ttf" },
-                std::pair { "emoji-license", "OFL.txt" }, std::pair { "emoji-text-font", "NotoEmoji.ttf" },
-                std::pair { "emoji-text-license", "NotoEmoji-OFL.txt" } }) {
-            size_t size = 0;
-            const void* data = resources.LoadResource('RAWT', name, &size);
-            if (!store(directory / file, data, size)) return false;
+        // The fonts (7 MB) were read from the executable and compared with
+        // the profile's copies at every launch, before the engine started
+        // (0.4 s or more from an SD card when cold, #219). The copies are
+        // checked the whole way only when this executable (by its time and
+        // size) is not the one that wrote them, or a copy's size is wrong.
+        constexpr std::pair<const char*, const char*> fonts[] = { { "emoji-font", "Noto-COLRv1.ttf" },
+            { "emoji-license", "OFL.txt" }, { "emoji-text-font", "NotoEmoji.ttf" },
+            { "emoji-text-license", "NotoEmoji-OFL.txt" } };
+        std::string stamp;
+        {
+            struct stat status;
+            time_t modified = 0;
+            off_t length = 0;
+            if (executable.GetStat(&status) == B_OK) {
+                modified = status.st_mtime;
+                length = status.st_size;
+            }
+            stamp = std::to_string(modified) + " " + std::to_string(length) + "\n";
+        }
+        const auto stampPath = directory / "copied-from";
+        bool current = [&] {
+            std::ifstream stampFile(stampPath);
+            std::string previous((std::istreambuf_iterator<char>(stampFile)), std::istreambuf_iterator<char>());
+            if (previous != stamp) return false;
+            for (const auto& [name, file] : fonts) {
+                int32 id = 0;
+                size_t size = 0;
+                std::error_code sizeError;
+                if (!resources.GetResourceInfo('RAWT', name, &id, &size)
+                    || std::filesystem::file_size(directory / file, sizeError) != size || sizeError)
+                    return false;
+            }
+            return true;
+        }();
+        if (!current) {
+            for (const auto& [name, file] : fonts) {
+                size_t size = 0;
+                const void* data = resources.LoadResource('RAWT', name, &size);
+                if (!store(directory / file, data, size)) return false;
+            }
+            std::ofstream(stampPath, std::ios::trunc) << stamp;
         }
         BPath system;
         if (find_directory(B_SYSTEM_SETTINGS_DIRECTORY, &system) != B_OK) return false;
@@ -1642,9 +1679,16 @@ private:
                 BFile file(&info.ref, B_READ_ONLY);
                 BResources resources(&file);
                 for (const char* name : { "en_US.aff", "en_US.dic" }) {
-                    size_t size = 0;
-                    const void* data = resources.LoadResource('RAWT', ("dictionary-" + std::string(name)).c_str(), &size);
+                    const std::string resource = "dictionary-" + std::string(name);
                     const auto target = directory / name;
+                    // The copy is checked by size before the resource (0.5 MB)
+                    // is read (#219).
+                    int32 id = 0;
+                    size_t expected = 0;
+                    if (resources.GetResourceInfo('RAWT', resource.c_str(), &id, &expected)
+                        && std::filesystem::exists(target, error) && std::filesystem::file_size(target, error) == expected) continue;
+                    size_t size = 0;
+                    const void* data = resources.LoadResource('RAWT', resource.c_str(), &size);
                     if (!data || !size || (std::filesystem::exists(target, error) && std::filesystem::file_size(target, error) == size)) continue;
                     BFile out(target.c_str(), B_WRITE_ONLY | B_CREATE_FILE | B_ERASE_FILE);
                     if (out.InitCheck() == B_OK) out.Write(data, size);

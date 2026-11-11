@@ -111,6 +111,22 @@ written at once, and quitting writes the last title. Splitting history into a
 file of its own was left: the damaged-profile recovery and the daily copies
 (#93) work on the one file.
 
+**Fixed work at start-up and after every load (#219).**
+- The emoji fonts (7 MB) were read from the executable and compared with the
+  profile's copies at every launch, before the engine started. They are now
+  checked the whole way only when another executable (by time and size,
+  `Fonts/copied-from`) wrote them or a copy's size is wrong; the spelling
+  dictionary's copy is checked by size before its resource is read. On the
+  X399 the files are in the cache and launches take the same 220 ms; the
+  saving is the 14 MB read from an SD card or eMMC on a cold start.
+- The translation probe at the end of every load walked the page calling
+  `getComputedStyle` for every element. An automatic probe now names the
+  language translations go to, and a page whose `<html lang>` says it is in
+  that language is not read: an English Wikipedia article, 5-11 ms → 0 ms
+  on the X399 (18 ms on the ROCK 5 by the earlier measurement).
+- The extension installer polled ten times a second for the application's
+  life; it now polls once a second unless an installation is pending.
+
 ## 6-7 November 2026: profile-guided optimization in CI, fallback fonts, tile painters, GPU tiles measured
 
 Measured on the X399 (Threadripper 1950X, GTX 1070 with NVK/Zink, 3840x2160
