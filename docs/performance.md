@@ -13,9 +13,9 @@ from a LAN server on the build host.
   transfer read `altsvc-cache.txt` and rewrote it when it ended. The network
   process keeps its own HTTP/3 origins (2892da1), so the file is now used only
   with `SUMMIT_HTTP3=0` (or `SUMMIT_CURL_ALTSVC=1`). Loading the Guardian's
-  front page: 60 or more rewrites of the file in 20 s, now none. Neither build
-  used HTTP/3 for a reload of cloudflare.com (all h2), so that is unchanged and
-  still to look at.
+  front page: 60 or more rewrites of the file in 20 s, now none. HTTP/3 is
+  still used: a quick reload reuses the open HTTP/2 connection, and once it has
+  expired (118 s) cloudflare.com loads over h3 (#221).
 - **Cookie lookups scanned the whole table (#206).** The search for a request's
   cookies matched `domain GLOB '*.example.com'`, which cannot use the domain
   index. It now asks for the domains a cookie for the host can be stored under
@@ -44,8 +44,8 @@ from a LAN server on the build host.
   sRGB profile or Adobe RGB: web process 0.41 → 0.07 of a core over the 6 s
   sample, 2.7 → 2.1 s to finish; the pixels read back are the same.
 
-Found on the way, not changed: a server's `Set-Cookie: name=; Max-Age=0` does
-not delete the cookie in either build.
+(A server's `Set-Cookie: name=; Max-Age=0` looked as if it did not delete the
+cookie; that was the test server, which never sent the header, #220.)
 
 **Uploads (#216).** Haiku's TCP keeps a socket's send queue at 64 KB (only the
 receive side grows), so an upload had at most 64 KB in flight per round trip.
