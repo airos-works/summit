@@ -622,6 +622,10 @@ BSize TabStrip::MaxSize() { return BSize(B_SIZE_UNLIMITED, Height()); }
 BSize TabStrip::PreferredSize() { return BSize(400, Height()); }
 void TabStrip::SetTabs(std::vector<TabLabel> tabs, int64 selected, std::vector<TabGroupLabel> groups)
 {
+    // The window sends the whole list for every state change of any tab
+    // (progress, audio, a title): when nothing shown changed, nothing is
+    // drawn again (#217).
+    if (fHadTabs && selected == fSelected && tabs == fTabs && groups == fGroups) return;
     // A window being set up (a restored session) opens its tabs before it
     // shows; only tabs opened later draw attention.
     const bool shown = Window() && !Window()->IsHidden();
@@ -2120,7 +2124,13 @@ ProgressLine::ProgressLine() : BView("progress", B_WILL_DRAW)
     SetExplicitMinSize(BSize(0, 2));
     SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, 2));
 }
-void ProgressLine::SetProgress(float value) { fProgress = std::clamp(value, 0.0f, 1.0f); Invalidate(); }
+void ProgressLine::SetProgress(float value)
+{
+    value = std::clamp(value, 0.0f, 1.0f);
+    if (value == fProgress) return;
+    fProgress = value;
+    Invalidate();
+}
 void ProgressLine::Draw(BRect)
 {
     const auto colors = ChromeColorsFor(this);

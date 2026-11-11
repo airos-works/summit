@@ -168174,10 +168174,10 @@ index 0000000000000000000000000000000000000000..c9a119d02f85b7c5ad8fe9153bfc9604
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebView.cpp b/Source/WebKit/UIProcess/haiku/WebView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..f5f01198105d87a882e3554e98da8196c7a623c8
+index 0000000000000000000000000000000000000000..d0fc4079b710fe2d0da1607124f19fcb95aad6bb
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebView.cpp
-@@ -0,0 +1,3776 @@
+@@ -0,0 +1,3802 @@
 +/*
 + * Copyright (C) 2013 Intel Corporation. All rights reserved.
 + *
@@ -170469,7 +170469,7 @@ index 0000000000000000000000000000000000000000..f5f01198105d87a882e3554e98da8196
 +    m_page->setIntrinsicDeviceScaleFactor(geometry().scale);
 +    WKPageStateClientV0 observer { };
 +    observer.base.clientInfo = this;
-+    auto changed = [](const void* context) { static_cast<const WebView*>(context)->notifyState(); };
++    auto changed = [](const void* context) { static_cast<const WebView*>(context)->scheduleNotifyStateHaiku(); };
 +    observer.didChangeIsLoading = changed;
 +    observer.didChangeTitle = changed;
 +    observer.didChangeActiveURL = changed;
@@ -170683,8 +170683,22 @@ index 0000000000000000000000000000000000000000..f5f01198105d87a882e3554e98da8196
 +    notifyState();
 +}
 +
++void WebView::scheduleNotifyStateHaiku() const
++{
++    if (m_stateNotificationPendingHaiku)
++        return;
++    m_stateNotificationPendingHaiku = true;
++    RunLoop::mainSingleton().dispatch([protectedThis = Ref { const_cast<WebView&>(*this) }] {
++        // A state message sent meanwhile already had these changes.
++        if (protectedThis->m_stateNotificationPendingHaiku)
++            protectedThis->notifyState();
++    });
++}
++
 +void WebView::notifyState(uint32_t what) const
 +{
++    if (what == B_WEBKIT_STATE_CHANGED)
++        m_stateNotificationPendingHaiku = false;
 +    if (!m_page || m_state->closed)
 +        return;
 +    const auto& state = m_page->pageLoadState();
@@ -170700,7 +170714,19 @@ index 0000000000000000000000000000000000000000..f5f01198105d87a882e3554e98da8196
 +    // separate probe of the address. In particular a provisional navigation
 +    // must not display the previous document's certificate beside its URL.
 +    if (!state.isProvisional() && state.url().protocolIs("https"_s)) {
-+        if (auto certificate = describeCertificateHaiku(state.url().host().toString(), state.certificateInfo())) {
++        auto host = state.url().host().toString();
++        const auto& chain = state.certificateInfo().certificateChain();
++        auto leaf = chain.isEmpty() ? std::span<const uint8_t> { } : chain[0].span();
++        // Described again for another leaf or host, and once a minute (its
++        // validity is checked against the clock).
++        if (host != m_describedCertificateHostHaiku || !equalSpans(leaf, m_describedCertificateLeafHaiku.span())
++            || MonotonicTime::now() - m_describedCertificateTimeHaiku > 60_s) {
++            m_describedCertificateHaiku = describeCertificateHaiku(host, state.certificateInfo());
++            m_describedCertificateHostHaiku = host;
++            m_describedCertificateLeafHaiku = Vector<uint8_t>(leaf);
++            m_describedCertificateTimeHaiku = MonotonicTime::now();
++        }
++        if (const auto& certificate = m_describedCertificateHaiku) {
 +            BMessage details;
 +            details.AddString("url", state.url().string().utf8().legacyCStringPointer());
 +            details.AddString("host", certificate->host.utf8().legacyCStringPointer());
@@ -172684,10 +172710,10 @@ index 0000000000000000000000000000000000000000..f712608b72b963631ade0ec62755598a
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebViewPrivate.h b/Source/WebKit/UIProcess/haiku/WebViewPrivate.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..430fec59d4c15986eb59b0843accbaacefad5983
+index 0000000000000000000000000000000000000000..6e64d2716be872762af65ea69f673bc23d204f18
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebViewPrivate.h
-@@ -0,0 +1,250 @@
+@@ -0,0 +1,260 @@
 +/*
 +   Copyright (C) 2014 Haiku, inc.
 +
@@ -172776,6 +172802,16 @@ index 0000000000000000000000000000000000000000..430fec59d4c15986eb59b0843accbaac
 +    void bluetoothRequest(uint64_t, const String&, const String&, Vector<uint8_t>&&, CompletionHandler<void(String&&, Vector<uint8_t>&&)>&&) override;
 +#endif
 +    void notifyState(uint32_t = B_WEBKIT_STATE_CHANGED) const;
++    // One state message for the changes of a run loop turn (#217): a page
++    // load state commit calls each changed observer in turn.
++    void scheduleNotifyStateHaiku() const;
++    mutable bool m_stateNotificationPendingHaiku { false };
++    // The connection certificate as last described, by its encoded leaf
++    // and host: notifyState() parsed it twice for every state message.
++    mutable Vector<uint8_t> m_describedCertificateLeafHaiku;
++    mutable String m_describedCertificateHostHaiku;
++    mutable MonotonicTime m_describedCertificateTimeHaiku;
++    mutable std::optional<WebViewStateHaiku::LoadState::Certificate> m_describedCertificateHaiku;
 +    void didFallBackToSoftwareRenderingHaiku() override;
 +#if ENABLE(DRAG_SUPPORT)
 +    void startDragHaiku(WebCore::PasteboardCustomData&&, OptionSet<WebCore::DragOperation>, RefPtr<WebCore::ShareableBitmap>&&, const WebCore::IntPoint&, const String&) override;

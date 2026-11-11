@@ -124,6 +124,7 @@ bool FaviconCache::Store(const std::string& pageURL, const void* data, size_t si
     auto bitmap = ToBitmap(scaled);
     if (png.empty() || !bitmap) return false;
     if (auto* existing = Load(key); existing && existing->png == png) return false;
+    ++fChanges;
     if (!fPersistent) {
         fEntries[key] = std::make_unique<Entry>(Entry{std::move(bitmap), std::move(png)});
         return true;
@@ -158,6 +159,7 @@ void FaviconCache::Forget(const std::string& pageURL)
 {
     const auto key = FaviconKey(pageURL);
     if (key.empty()) return;
+    ++fChanges;
     fEntries.erase(key);
     fEntries.erase(key.rfind("www.", 0) == 0 ? key.substr(4) : "www." + key);
 }

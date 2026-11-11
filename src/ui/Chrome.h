@@ -158,6 +158,14 @@ struct TabLabel {
     bool container = false; rgb_color containerColor = {0, 0, 0, 255}; std::string containerName;
     // The tab group it is in (TabGroupLabel::id), 0 for none.
     int64 group = 0;
+    bool operator==(const TabLabel& other) const
+    {
+        return id == other.id && title == other.title && loading == other.loading && icon == other.icon
+            && capturing == other.capturing && pinned == other.pinned && audio == other.audio && url == other.url
+            && container == other.container && containerName == other.containerName && group == other.group
+            && containerColor.red == other.containerColor.red && containerColor.green == other.containerColor.green
+            && containerColor.blue == other.containerColor.blue && containerColor.alpha == other.containerColor.alpha;
+    }
 };
 // A tab group as the strip shows it: a label of its colour before its tabs
 // (with its title, or only a dot), a line of its colour under them; a
@@ -167,6 +175,11 @@ struct TabGroupLabel {
     std::string title;
     rgb_color color = {95, 99, 104, 255};
     bool collapsed = false;
+    bool operator==(const TabGroupLabel& other) const
+    {
+        return id == other.id && title == other.title && collapsed == other.collapsed && color.red == other.color.red
+            && color.green == other.color.green && color.blue == other.color.blue && color.alpha == other.color.alpha;
+    }
 };
 // Draws a site icon, or a neutral globe when there is none.
 void DrawSiteIcon(BView* view, const BBitmap* icon, BPoint leftTop);

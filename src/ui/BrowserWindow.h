@@ -351,6 +351,8 @@ private:
         // title, loading or Back and Forward change (backForwardKey).
         BMessage backForward;
         std::string backForwardKey;
+        // The address and title last written to history for this page (#217).
+        std::string historyTitleKey;
         // Responsive Design Mode (#155, BrowserWindowResponsive.cpp), and the
         // user agent it last gave the page (empty: the normal one).
         ResponsiveState responsive;
@@ -1060,6 +1062,11 @@ private:
     void BookmarksChanged();
     void RefreshBookmarks();
     void RebuildDynamicMenus();
+    // What the dynamic menus were last built from (#217): Haiku asks for the
+    // menus (MenusBeginning) before every Command-key shortcut too.
+    std::string DynamicMenusKey();
+    std::string fDynamicMenusKey;
+    uint64 fBackForwardReplies = 0;
 #if SUMMIT_MODERN_WEBKIT
     // File › New Container Tab, filled when the menus open.
     BMenu* fContainerMenu = nullptr;

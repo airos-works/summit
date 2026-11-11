@@ -1,5 +1,6 @@
 #pragma once
 #include <filesystem>
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <string>
@@ -30,8 +31,11 @@ public:
     // Decodes an icon file as Store() does, scaled to pixels x pixels
     // (B_RGBA32), or null. Any thread.
     static std::unique_ptr<BBitmap> DecodeIcon(const void* data, size_t size, int pixels);
+    // Counts icons stored or forgotten: what Icon() returns may have changed.
+    uint64_t Changes() const { return fChanges; }
 
 private:
+    uint64_t fChanges = 0;
     struct Entry {
         std::unique_ptr<BBitmap> bitmap;
         std::string png;

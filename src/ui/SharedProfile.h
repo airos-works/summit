@@ -156,6 +156,12 @@ public:
         std::lock_guard lock(fMutex);
         return fInstalledExtensions;
     }
+    // Counts changes of the profile (any part of it).
+    uint64 Revision() const
+    {
+        std::lock_guard lock(fMutex);
+        return fRevision;
+    }
     // Writes the profile if anything changed since the last save.
     // Saves now, on the caller's thread.
     bool Save(std::string& error);

@@ -80,6 +80,24 @@ picture keeps its queue so its requests stay in order. 400 decodes of
 800x600 JPEGs on the X399: 109-118 → 51 threads in the web process at the
 peak, 1.7 → 1.3-1.6 s; an animated GIF still animates.
 
+**The browser's work per page-state change and per shortcut (#217).** The
+engine sent a full state message (about 45 fields, the connection certificate
+parsed twice) for each page-state field that changed, several per commit; it
+now sends one per run loop turn and describes a certificate once (again after
+a minute). The window drew the whole tab strip and the progress line again for
+every message, and walked all of history under the profile lock for every
+message after a load: now only when what they show changed. Haiku calls
+`MenusBeginning()` before every Command-key shortcut, and the window built
+its history, bookmark, Back/Forward, reading list, container and window menus
+again each time (copies of all bookmarks and history, an icon copy per
+bookmark): now only when what they show may have changed
+(`SUMMIT_MENU_CACHE=0` for every time). Measured on the X399 with a profile of
+300 bookmarks with icons and 2,000 history pages: 60 Command+C presses
+479-567 → 67-72 ms of window-thread CPU (MCP keys had to be sent as focus
+messages for this, in a test build: MCP's `press_key` posts to the view and
+skips shortcuts); a Guardian load with 20 tabs open 32-48 → 22-24 ms on the
+window thread, 38-48 → 36-37 ms on the application thread.
+
 ## 6-7 November 2026: profile-guided optimization in CI, fallback fonts, tile painters, GPU tiles measured
 
 Measured on the X399 (Threadripper 1950X, GTX 1070 with NVK/Zink, 3840x2160

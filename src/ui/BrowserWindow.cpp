@@ -4323,10 +4323,39 @@ void BrowserWindow::SetBookmarksBarVisible(bool visible)
         return SharedProfile::kSettingsChanged;
     }, BMessenger(this));
 }
+std::string BrowserWindow::DynamicMenusKey()
+{
+    const auto* tab = ActiveTab();
+    std::string key = std::to_string(fShared->Revision()) + '|' + std::to_string(fFavicons->Changes()) + '|'
+        + std::to_string(fBackForwardReplies) + '|' + std::to_string(fTabs.size()) + '|';
+    if (tab) key += std::to_string(tab->id) + '|' + tab->url + '|' + tab->backForwardKey + '|';
+#if SUMMIT_MODERN_WEBKIT
+    for (const auto& container : summit::Containers::Shared().List())
+        key += std::to_string(container.id) + container.name + ';';
+#endif
+    std::lock_guard lock(sWindowListLock);
+    for (const auto& window : sWindowList) key += '|' + std::to_string(window.key) + window.title;
+    return key;
+}
+
 void BrowserWindow::MenusBeginning()
 {
     BrowserWindowBase::MenusBeginning();
-    RebuildDynamicMenus();
+    // Haiku calls this before every Command-key shortcut (Copy, Paste, New
+    // Tab…), not only when a menu opens; the history, bookmarks, Back and
+    // Forward, reading list, container and window menus are built again
+    // (with copies of the bookmarks, history and icons) only when what they
+    // show may have changed (#217).
+    // SUMMIT_MENU_CACHE=0 builds them every time, as before.
+    static const bool caching = [] {
+        const char* value = getenv("SUMMIT_MENU_CACHE");
+        return !value || strcmp(value, "0");
+    }();
+    auto key = caching ? DynamicMenusKey() : std::string();
+    if (!caching || key != fDynamicMenusKey) {
+        RebuildDynamicMenus();
+        fDynamicMenusKey = std::move(key);
+    }
 #if SUMMIT_MODERN_WEBKIT
     if (fSpellingItem) fSpellingItem->SetMarked(fShared->Read([](const Profile& profile) { return profile.spellChecking; }));
     if (fZoomTextOnlyItem) fZoomTextOnlyItem->SetMarked(fShared->Read([](const Profile& profile) { return profile.zoomTextOnly; }));
@@ -5074,8 +5103,10 @@ void BrowserWindow::MessageReceived(BMessage* message)
             break;
         }
         case B_WEBKIT_BACK_FORWARD_LIST:
-            if (auto* target = FindTabByID(static_cast<int64>(message->GetUInt64("identifier", 0))))
+            if (auto* target = FindTabByID(static_cast<int64>(message->GetUInt64("identifier", 0)))) {
                 target->backForward = *message;
+                ++fBackForwardReplies;
+            }
             break;
 #endif
 #if SUMMIT_MODERN_WEBKIT
@@ -7035,7 +7066,12 @@ void BrowserWindow::WebKitStateChanged(const BMessage& message)
     const char* successfulURL = nullptr;
     if (!fPrivate && !tab->readerActive && tab->loadOutcome == "succeeded"
         && message.FindString("loadSuccessURL", &successfulURL) == B_OK && successfulURL
-        && StoredURL(successfulURL) == tab->url) {
+        && StoredURL(successfulURL) == tab->url
+        // Every later state message of the page (progress, audio, a script's
+        // title) came here and walked the whole history under the profile
+        // lock: only a new address or title is looked up (#217).
+        && tab->historyTitleKey != tab->url + '\n' + tab->title) {
+        tab->historyTitleKey = tab->url + '\n' + tab->title;
         const std::string url = tab->url, title = tab->title;
         fShared->Change([&](Profile& profile) -> uint32 {
             uint32 changes = 0;
