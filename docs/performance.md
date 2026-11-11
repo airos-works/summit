@@ -47,6 +47,17 @@ from a LAN server on the build host.
 Found on the way, not changed: a server's `Set-Cookie: name=; Max-Age=0` does
 not delete the cookie in either build.
 
+**Uploads (#216).** Haiku's TCP keeps a socket's send queue at 64 KB (only the
+receive side grows), so an upload had at most 64 KB in flight per round trip.
+Connections now ask for a 256 KB send buffer (`SUMMIT_TCP_SEND_BUFFER`, 0 for
+the default). 10 MB `fetch` POSTs from the X399 to an Ookla server in Sydney
+(22 ms): 2.2-2.8 MB/s before, 6.9-9.6 MB/s after, on every run. A plain C
+client on the X399 managed 19-20 MB/s with 1 MiB, but the curl tool and Summit
+with 512 KB, 1 MiB or 4 MiB were as slow as 64 KB on some runs (the OS's TCP
+recovers badly from the losses a fuller queue causes), so 256 KB is the
+default until that is better (#119). libcurl passes the socket type with
+`SOCK_CLOEXEC` added: the check masks it.
+
 ## 6-7 November 2026: profile-guided optimization in CI, fallback fonts, tile painters, GPU tiles measured
 
 Measured on the X399 (Threadripper 1950X, GTX 1070 with NVK/Zink, 3840x2160

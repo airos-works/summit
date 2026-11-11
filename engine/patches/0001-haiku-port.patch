@@ -89861,7 +89861,7 @@ index 0000000000000000000000000000000000000000..6b5fc0f78f205ca35494521f2ebefe65
 +
 +} // namespace WebCore
 diff --git a/Source/WebCore/platform/network/curl/CurlContext.cpp b/Source/WebCore/platform/network/curl/CurlContext.cpp
-index 2e6a2537f3e283d7cb7f2081c8549f0256ee4e71..5aab4d56dc96925f3ce14306560d5e3f837329f0 100644
+index 2e6a2537f3e283d7cb7f2081c8549f0256ee4e71..b182548a610f0d9a5a1f5e993eef2214629ee958 100644
 --- a/Source/WebCore/platform/network/curl/CurlContext.cpp
 +++ b/Source/WebCore/platform/network/curl/CurlContext.cpp
 @@ -26,6 +26,18 @@
@@ -89883,7 +89883,7 @@ index 2e6a2537f3e283d7cb7f2081c8549f0256ee4e71..5aab4d56dc96925f3ce14306560d5e3f
  
  #if USE(CURL)
  #include "CertificateInfo.h"
-@@ -289,6 +301,108 @@ CURLMsg* CurlMultiHandle::readInfo(int& messagesInQueue)
+@@ -289,6 +301,123 @@ CURLMsg* CurlMultiHandle::readInfo(int& messagesInQueue)
      return curl_multi_info_read(m_multiHandle, &messagesInQueue);
  }
  
@@ -89906,6 +89906,21 @@ index 2e6a2537f3e283d7cb7f2081c8549f0256ee4e71..5aab4d56dc96925f3ce14306560d5e3f
 +    curl_socket_t socket = ::socket(address->family, address->socktype, address->protocol);
 +    if (socket != CURL_SOCKET_BAD)
 +        fcntl(socket, F_SETFD, FD_CLOEXEC);
++    // Haiku's TCP sizes only its receive buffer to the connection; the send
++    // queue stays at the 64 KB default, so no more than 64 KB is ever in
++    // flight and an upload moves at most 64 KB per round trip, whatever the
++    // link (#216). To Sydney (22 ms) from the X399: 2.7 MB/s; with 256 KB
++    // 5.6-9.5 MB/s every time. Larger queues were faster on some runs (up to
++    // 15-20 MB/s with 1 MiB) and as slow as before on others, as were 512 KB
++    // and 4 MiB (the OS's TCP recovers poorly from the losses a fuller
++    // queue causes). SUMMIT_TCP_SEND_BUFFER sets the size in bytes, 0 leaves
++    // the default. libcurl adds SOCK_CLOEXEC to the type it passes.
++    static const int sendBufferSize = [] {
++        const char* value = getenv("SUMMIT_TCP_SEND_BUFFER");
++        return value ? atoi(value) : 256 * 1024;
++    }();
++    if (socket != CURL_SOCKET_BAD && (address->socktype & ~(SOCK_CLOEXEC | SOCK_NONBLOCK)) == SOCK_STREAM && sendBufferSize > 0)
++        setsockopt(socket, SOL_SOCKET, SO_SNDBUF, &sendBufferSize, sizeof(sendBufferSize));
 +    if (socket != CURL_SOCKET_BAD && purpose == CURLSOCKTYPE_IPCXN && (address->family == AF_INET || address->family == AF_INET6)) {
 +        Locker locker { connectionSocketsLockHaiku };
 +        connectionSocketsHaiku().append(socket);
@@ -89992,7 +90007,7 @@ index 2e6a2537f3e283d7cb7f2081c8549f0256ee4e71..5aab4d56dc96925f3ce14306560d5e3f
  // CurlHandle -------------------------------------------------
  
  CurlHandle::CurlHandle()
-@@ -297,6 +411,10 @@ CurlHandle::CurlHandle()
+@@ -297,6 +426,10 @@ CurlHandle::CurlHandle()
      curl_easy_setopt(m_handle, CURLOPT_ERRORBUFFER, m_errorBuffer);
      curl_easy_setopt(m_handle, CURLOPT_NOSIGNAL, 1L);
      curl_easy_setopt(m_handle, CURLOPT_COOKIEFILE, nullptr);
@@ -90003,7 +90018,7 @@ index 2e6a2537f3e283d7cb7f2081c8549f0256ee4e71..5aab4d56dc96925f3ce14306560d5e3f
  
      enableShareHandle();
      enableAcceptEncoding();
-@@ -495,15 +613,102 @@ void CurlHandle::enableProxyRequestHeaders()
+@@ -495,15 +628,102 @@ void CurlHandle::enableProxyRequestHeaders()
      curl_easy_setopt(m_handle, CURLOPT_PROXYHEADER, headers);
  }
  
@@ -90106,7 +90121,7 @@ index 2e6a2537f3e283d7cb7f2081c8549f0256ee4e71..5aab4d56dc96925f3ce14306560d5e3f
  #if LIBCURL_VERSION_NUM <= 0x075500
          curl_easy_setopt(m_handle, CURLOPT_SSL_ENABLE_ALPN, 1L);
          curl_easy_setopt(m_handle, CURLOPT_SSL_ENABLE_NPN, 0L);
-@@ -563,6 +768,25 @@ void CurlHandle::enableAltSvc()
+@@ -563,6 +783,25 @@ void CurlHandle::enableAltSvc()
      if (CurlContext::singleton().alternativeServicesStorageFile().isEmpty())
          return;
  
