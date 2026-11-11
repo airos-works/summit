@@ -2,6 +2,7 @@
 #include "core/FormHistory.h"
 #include "core/Profile.h"
 #include <Messenger.h>
+#include <chrono>
 #include <condition_variable>
 #include <filesystem>
 #include <functional>
@@ -76,8 +77,10 @@ public:
     // Runs function(Profile&) under the lock. It returns the change bits (0
     // when nothing changed); a change is announced to every window and saved,
     // at once or (saveNow false, for visits) with the next session save.
+    // A deferrable change (a history title that follows a page's title) waits
+    // for the next other change, or a minute (#218).
     void Change(const std::function<uint32(Profile&)>& function, const BMessenger& sender = BMessenger(),
-        bool saveNow = true);
+        bool saveNow = true, bool deferrable = false);
     void IconChanged(const std::string& pageURL, const BMessenger& sender);
 
     // The zoom remembered for a site (ZoomKey()), 1 when there is none.
@@ -198,6 +201,10 @@ private:
     std::map<uint64, WindowSession> fSessions;
     std::vector<BMessenger> fListeners;
     uint64 fRevision = 1, fSavedRevision = 0;
+    // Whether anything but tabs' titles changed since the last save (#218),
+    // and when that was.
+    bool fUnsavedOtherChanges = false;
+    std::chrono::steady_clock::time_point fLastSave;
     std::thread fSaver;
     std::condition_variable fSaveWanted;
     bool fSaveRequested = false, fStopping = false;

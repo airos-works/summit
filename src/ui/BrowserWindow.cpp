@@ -7078,7 +7078,7 @@ void BrowserWindow::WebKitStateChanged(const BMessage& message)
             for (auto& page : profile.history)
                 if (page.url == url && page.title != title) { page.title = title; changes = SharedProfile::kHistoryChanged; }
             return changes;
-        }, BMessenger(this), false);
+        }, BMessenger(this), false, true);
     }
     // The Back and Forward menus' entries, when what they list may have changed.
     std::string backForwardKey = tab->url + '\n' + tab->title + (tab->back ? "\nb" : "\n") + (tab->forward ? "f" : "")

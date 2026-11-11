@@ -9,6 +9,17 @@
 #include <cstdio>
 
 namespace summit {
+// The same windows, tabs and addresses: at most the tabs' titles differ.
+static bool SameSessionButTitles(const WindowSession& a, const WindowSession& b)
+{
+    if (a.selected != b.selected || a.tabs.size() != b.tabs.size() || a.containers != b.containers
+        || a.pinned != b.pinned || a.groups != b.groups || a.tabGroups != b.tabGroups
+        || !std::equal(std::begin(a.frame), std::end(a.frame), std::begin(b.frame))) return false;
+    for (size_t i = 0; i < a.tabs.size(); ++i)
+        if (a.tabs[i].url != b.tabs[i].url) return false;
+    return true;
+}
+
 static bool SameSession(const WindowSession& a, const WindowSession& b)
 {
     if (a.selected != b.selected || a.tabs.size() != b.tabs.size() || a.containers != b.containers
@@ -31,7 +42,7 @@ SharedProfile::SharedProfile(std::filesystem::path path) : fPath(std::move(path)
     fDamagedCopy = std::move(load.damagedCopy);
     fWritable = load.writable;
     // What was restored is written back with the first save.
-    if (!fLoadError.empty() && fWritable) ++fRevision;
+    if (!fLoadError.empty() && fWritable) { ++fRevision; fUnsavedOtherChanges = true; }
     fSavedWindows = std::move(fProfile.windows);
     fProfile.windows.clear();
     fForms = std::make_unique<FormHistory>(fPath.parent_path() / "form-history.json", fWritable);
@@ -71,6 +82,12 @@ void SharedProfile::SaveLoop()
         // window's session with it: one write takes them all.
         fSaveWanted.wait_for(lock, std::chrono::milliseconds(250), [this] { return fStopping; });
         if (fStopping) return;
+        // Only tabs' titles changed since the last save: written a minute
+        // after it, or sooner with any other change (quitting saves all).
+        if (!fUnsavedOtherChanges) {
+            fSaveWanted.wait_until(lock, fLastSave + std::chrono::seconds(60), [this] { return fStopping || fUnsavedOtherChanges; });
+            if (fStopping) return;
+        }
         fSaveRequested = false;
         lock.unlock();
         std::string error;
@@ -98,13 +115,16 @@ void SharedProfile::RemoveListener(const BMessenger& listener)
     std::erase(fListeners, listener);
 }
 
-void SharedProfile::Change(const std::function<uint32(Profile&)>& function, const BMessenger& sender, bool saveNow)
+void SharedProfile::Change(const std::function<uint32(Profile&)>& function, const BMessenger& sender, bool saveNow, bool deferrable)
 {
     uint32 changes;
     {
         std::lock_guard lock(fMutex);
         changes = function(fProfile);
-        if (changes) ++fRevision;
+        if (changes) {
+            ++fRevision;
+            if (!deferrable) fUnsavedOtherChanges = true;
+        }
     }
     if (!changes) return;
     if (saveNow) SaveSoon();
@@ -138,6 +158,7 @@ void SharedProfile::SetSiteZoom(const std::string& key, double zoom, bool privat
             else if (zooms.size() < 5000 || zooms.contains(key)) zooms[key] = zoom;
             // Saved with the next session save: a wheel turns through many steps.
             ++fRevision;
+            fUnsavedOtherChanges = true;
         }
     }
     BMessage details;
@@ -164,6 +185,7 @@ void SharedProfile::ClearHistory(const BMessenger& sender)
             keep.insert(key.rfind("www.", 0) == 0 ? key.substr(4) : "www." + key);
         }
         ++fRevision;
+        fUnsavedOtherChanges = true;
     }
     std::string error;
     Save(error);
@@ -187,6 +209,7 @@ void SharedProfile::ForgetHistorySince(int64_t since, const BMessenger& sender)
         std::lock_guard lock(fMutex);
         fProfile.ForgetVisitsSince(since);
         ++fRevision;
+        fUnsavedOtherChanges = true;
     }
     std::string error;
     Save(error);
@@ -240,14 +263,19 @@ void SharedProfile::SetWindowSession(uint64 key, const WindowSession& session)
     std::lock_guard lock(fMutex);
     auto found = fSessions.find(key);
     if (found != fSessions.end() && SameSession(found->second, session)) return;
+    // A tab whose title keeps changing (unread counts, a clock, a ticker) had
+    // the whole profile, history and all, written every 5 s (#218). Only
+    // titles changing waits for the next other change, or a minute.
+    const bool titlesOnly = found != fSessions.end() && SameSessionButTitles(found->second, session);
     fSessions[key] = session;
     ++fRevision;
+    if (!titlesOnly) fUnsavedOtherChanges = true;
 }
 
 void SharedProfile::RemoveWindowSession(uint64 key)
 {
     std::lock_guard lock(fMutex);
-    if (fSessions.erase(key)) ++fRevision;
+    if (fSessions.erase(key)) { ++fRevision; fUnsavedOtherChanges = true; }
 }
 
 bool SharedProfile::Save(std::string& error)
@@ -268,6 +296,9 @@ bool SharedProfile::Save(std::string& error)
     if (!snapshot.Save(fPath, error)) return false;
     std::lock_guard lock(fMutex);
     fSavedRevision = std::max(fSavedRevision, revision);
+    fLastSave = std::chrono::steady_clock::now();
+    // Changes made while it was written are still to be written.
+    if (fRevision == fSavedRevision) fUnsavedOtherChanges = false;
     return true;
 }
 }

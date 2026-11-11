@@ -98,6 +98,19 @@ messages for this, in a test build: MCP's `press_key` posts to the view and
 skips shortcuts); a Guardian load with 20 tabs open 32-48 → 22-24 ms on the
 window thread, 38-48 → 36-37 ms on the application thread.
 
+**profile.json written less (#218).** The profile (settings, bookmarks,
+sessions and all history, 1.2 MB in a real one) is written whole, synced,
+for a save. It is now written without indentation (1,194,388 → 791,808 bytes
+for that profile; loading it 21.9 → 19.1 ms on the build host). A tab whose
+title kept changing caused a save every 5 s, through its session and through
+its history entry's title: those changes now wait for the next other change,
+or a minute after the last save, and are written at quit. With the 2,000-page
+test profile and a page that changes its title every second, on the X399:
+8 writes (6.8 MB) in 40 s before, 1 (586 KiB) after; a navigation is still
+written at once, and quitting writes the last title. Splitting history into a
+file of its own was left: the damaged-profile recovery and the daily copies
+(#93) work on the one file.
+
 ## 6-7 November 2026: profile-guided optimization in CI, fallback fonts, tile painters, GPU tiles measured
 
 Measured on the X399 (Threadripper 1950X, GTX 1070 with NVK/Zink, 3840x2160

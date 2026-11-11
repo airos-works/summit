@@ -672,7 +672,9 @@ bool Profile::Save(const std::filesystem::path& path, std::string& error, int64_
             {"trustedCertificates", trusted}, {"sitePermissions", sitePermissions},
             {"protocolHandlers", handlers}, {"declinedProtocolHandlers", declinedProtocolHandlers},
             {"mcp", {{"enabled", mcpEnabled}, {"port", mcpPort}, {"localOnly", mcpLocalOnly}, {"token", mcpToken}}},
-            {"updates", {{"check", checkForUpdates}, {"lastCheck", lastUpdateCheck}}}}.dump(2);
+            // Without indentation: a third smaller (history is most of it),
+            // written in full on every save (#218).
+            {"updates", {{"check", checkForUpdates}, {"lastCheck", lastUpdateCheck}}}}.dump();
         if (data.size() > 16 * 1024 * 1024) throw std::runtime_error("Profile is too large");
         // The file this one replaces stays as the newest copy (#93).
         WriteFileAtomically(path, data, [&] { rename(path.c_str(), PreviousCopy(path).c_str()); });
