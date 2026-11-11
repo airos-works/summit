@@ -42,10 +42,32 @@ debug_server's alert as before.
 
 Every frame reads `#N image+offset symbol`. Packages are stripped
 (`--strip-unneeded`), so the symbol is only the nearest exported one ("unexported
-code after …"). Use the image offset with `addr2line -f -C -e <unstripped
-image of that build>`. Return addresses are named by `address - 1`, so the
-frame of a call that never returns (`abort()`) names its caller, not the
-next function.
+code after …"). Return addresses are named by `address - 1`, so the frame
+of a call that never returns (`abort()`) names its caller, not the next
+function.
+
+The image list gives each image's GNU build ID where it has one (the engine,
+Summit and libWebKitLegacy are linked with `--build-id` since 11 November
+2026).
+
+## Naming the frames
+
+air/OS CI keeps the symbol tables of every build's binaries before stripping
+them (airos-ci `apps/store-symbols.py`, served at
+`http://192.168.1.200/symbols/`). They are stored by build ID, and by the
+package version for the engine's third-party libraries, which have none.
+
+    tools/symbolize-crash-report.py crash-20261111-101500-WebProcess-1234.txt
+
+This prints the report with each frame named by the function that contains
+it (`#3 libWebKit.so.1+0x1a2b3c WebCore::RenderBox::layout()+0x12`), local
+functions included. `--store DIR` reads a copy of the store instead, and
+`--sdk` picks the target when a version was built for more than one and
+the report has no build ID to tell them apart. Symbols are cached in
+`~/.cache/summit-symbols`. The engine is a Release build without debug
+information, so there are function names but no files or lines. Reports
+from builds before the store existed (before 11 November 2026) cannot be
+named this way.
 
 ## How it works
 
@@ -98,8 +120,8 @@ Summit side (`src/ui/CrashReporter.cpp`):
   crash.
 - A thread that overflows its stack, other than the main thread, has no
   alternate stack, and the kernel ends the team.
-- No unstripped libraries are archived per CI build yet, so offsets can only
-  be symbolized while a matching build tree exists.
+- Frames name functions, not files and lines (no debug information in the
+  engine's build).
 
 ## Tests (X399, 11 November 2026, CI engine tree 70a3f16 + this change)
 

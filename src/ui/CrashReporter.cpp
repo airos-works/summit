@@ -248,9 +248,11 @@ void HandleCrash(BWebKitCrashReport report)
         const auto threadFrames = thread.value("frames", json::array());
         for (size_t i = 0; i < threadFrames.size(); ++i) text += "  " + FrameLine(i, threadFrames[i]) + "\n";
     }
+    // Their build IDs find the build's symbol tables (tools/symbolize-crash-report.py).
     text += "\nImages (text segments):\n";
     for (const auto& image : stacks.value("images", json::array()))
-        text += "  " + image.value("text", "") + " " + image.value("path", "") + "\n";
+        text += "  " + image.value("text", "") + " " + image.value("path", "")
+            + (image.contains("buildId") ? " build-id " + image.value("buildId", "") : "") + "\n";
 
     const std::filesystem::path path = ReportFolder() / ("crash-" + std::string(stamp) + "-" + report.process + "-"
         + std::to_string(report.team) + ".txt");

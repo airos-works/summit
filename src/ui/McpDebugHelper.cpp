@@ -9,6 +9,7 @@
 #include "core/JitDump.h"
 #include <OS.h>
 #include <debugger.h>
+#include <elf.h>
 #include <image.h>
 #include <cxxabi.h>
 #include <dlfcn.h>
@@ -95,6 +96,50 @@ std::string Demangle(const char* name)
     std::string text = demangled;
     std::free(demangled);
     return text;
+}
+
+// The GNU build ID of an ELF file ("3f2a…", hex), empty without one: the
+// packages are stripped, and CI keeps every build's symbol tables under these
+// IDs (Summit's tools/symbolize-crash-report.py). Read from the file, whose
+// note segment the loader maps, since the image is the file on disk.
+std::string BuildId(const char* path)
+{
+    FILE* file = std::fopen(path, "rb");
+    if (!file) return { };
+    std::string id;
+    Elf64_Ehdr header { };
+    if (std::fread(&header, sizeof(header), 1, file) == 1 && std::memcmp(header.e_ident, ELFMAG, SELFMAG) == 0
+        && header.e_ident[EI_CLASS] == ELFCLASS64 && header.e_phentsize == sizeof(Elf64_Phdr)) {
+        for (int i = 0; i < header.e_phnum && id.empty(); ++i) {
+            Elf64_Phdr segment { };
+            if (std::fseek(file, long(header.e_phoff + uint64(i) * sizeof(segment)), SEEK_SET) != 0
+                || std::fread(&segment, sizeof(segment), 1, file) != 1)
+                break;
+            if (segment.p_type != PT_NOTE || segment.p_filesz > 4096) continue;
+            std::vector<uint8> notes(segment.p_filesz);
+            if (std::fseek(file, long(segment.p_offset), SEEK_SET) != 0
+                || std::fread(notes.data(), 1, notes.size(), file) != notes.size())
+                continue;
+            for (size_t at = 0; at + sizeof(Elf64_Nhdr) <= notes.size();) {
+                Elf64_Nhdr note;
+                std::memcpy(&note, notes.data() + at, sizeof(note));
+                const size_t name = at + sizeof(note), desc = name + ((note.n_namesz + 3) & ~3u);
+                if (desc + note.n_descsz > notes.size()) break;
+                if (note.n_type == NT_GNU_BUILD_ID && note.n_namesz == 4
+                    && std::memcmp(notes.data() + name, "GNU", 4) == 0) {
+                    static const char kHex[] = "0123456789abcdef";
+                    for (size_t byte = 0; byte < note.n_descsz; ++byte) {
+                        id += kHex[notes[desc + byte] >> 4];
+                        id += kHex[notes[desc + byte] & 15];
+                    }
+                    break;
+                }
+                at = desc + ((note.n_descsz + 3) & ~3u);
+            }
+        }
+    }
+    std::fclose(file);
+    return id;
 }
 
 // Names addresses: "function+0x12 (libWebKit.so.1)", remembered per address.
@@ -452,7 +497,9 @@ int Crash(team_id team, thread_id crashed, addr_t crashIP, addr_t crashFP, addr_
         char range[64];
         std::snprintf(range, sizeof(range), "0x%lx-0x%lx", static_cast<unsigned long>(addr_t(image.text)),
             static_cast<unsigned long>(addr_t(image.text) + addr_t(image.text_size)));
-        images.push_back({{"path", image.name}, {"text", range}});
+        json entry = {{"path", image.name}, {"text", range}};
+        if (std::string id = BuildId(image.name); !id.empty()) entry["buildId"] = id;
+        images.push_back(entry);
     }
     std::printf("%s\n", json{{"team", team}, {"threads", list}, {"images", images}}.dump(-1, ' ', false, json::error_handler_t::replace).c_str());
     return 0;
