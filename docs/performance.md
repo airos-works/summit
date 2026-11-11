@@ -1,5 +1,52 @@
 # Summit performance: Speedometer 3.1 baseline, where the time goes, stress test
 
+## 11 November 2026: Alt-Svc file, cookie lookups, document.cookie, JPEG colour transforms (#205, #206, #207, #211)
+
+From a code review of the network stack and image decoders (issues
+#205-#219). Measured on the X399 against CI 45c1b28: copies `xb5ci` (as built)
+and `xb5` (the same with the changed engine), a fresh profile per run, pages
+from a LAN server on the build host.
+
+- **libcurl's Alt-Svc file was back on every request (#205).** a43764e kept
+  `CURLOPT_ALTSVC` off "because this libcurl has no HTTP/3"; air/OS's libcurl
+  has had HTTP/3 since 28 October, so the guard stopped returning and every
+  transfer read `altsvc-cache.txt` and rewrote it when it ended. The network
+  process keeps its own HTTP/3 origins (2892da1), so the file is now used only
+  with `SUMMIT_HTTP3=0` (or `SUMMIT_CURL_ALTSVC=1`). Loading the Guardian's
+  front page: 60 or more rewrites of the file in 20 s, now none. Neither build
+  used HTTP/3 for a reload of cloudflare.com (all h2), so that is unchanged and
+  still to look at.
+- **Cookie lookups scanned the whole table (#206).** The search for a request's
+  cookies matched `domain GLOB '*.example.com'`, which cannot use the domain
+  index. It now asks for the domains a cookie for the host can be stored under
+  (the host, "." + the host and each parent down to the registrable domain:
+  what `CookieUtil::domainMatch` accepts) with a statement prepared once; the
+  next-expiry query reads a new `(session, expires)` index. On a host copy of
+  the schema the new query returns the same cookies as the old in 480
+  combinations of hosts, flags and partitions. With 5,000 stored cookies:
+  300 sequential fetches 1.12 s → 0.51 s, 300 at once 790 → 173 ms (with an
+  empty table: 555 → 500 ms and 250 → 180 ms).
+- **document.cookie went to the network process every time (#207).** The web
+  process's cookie cache (WebCookieCache) was off for curl ports. It now keeps
+  first-party frames' cookies in an in-memory jar, filled by `DomCookiesForHost`
+  (now implemented for curl) and kept current by the cookie change listeners
+  the Cookie Store API already used. `SUMMIT_COOKIE_CACHE=0` turns it off. A
+  cookie test page (script and server cookies, a parent domain's cookie,
+  HttpOnly, paths, expiry, deletion) gives the same results in both builds;
+  1,000 write-then-read pairs: 820 → 277 ms (IP host), 855 → 376 ms (a
+  subdomain).
+- **JPEG and JPEG XL decoders made a colour transform each (#211).** They now
+  share the PNG decoders' transforms (`ImageDecoderICCHaiku.h`), a profile
+  that is sRGB already (compared with skcms) gets none, and a JPEG's profile is
+  read when it is decoded rather than in the size probe on the main thread.
+  libjxl describes even plain sRGB pictures with a profile, so nearly every
+  JPEG XL picture made one. 400 decodes of 800x600 JPEGs with the common HP
+  sRGB profile or Adobe RGB: web process 0.41 → 0.07 of a core over the 6 s
+  sample, 2.7 → 2.1 s to finish; the pixels read back are the same.
+
+Found on the way, not changed: a server's `Set-Cookie: name=; Max-Age=0` does
+not delete the cookie in either build.
+
 ## 6-7 November 2026: profile-guided optimization in CI, fallback fonts, tile painters, GPU tiles measured
 
 Measured on the X399 (Threadripper 1950X, GTX 1070 with NVK/Zink, 3840x2160

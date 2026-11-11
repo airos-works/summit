@@ -78527,6 +78527,69 @@ index 0000000000000000000000000000000000000000..b93cdeb2c5928847691a7781bc6fcd08
 +	<body>
 +	</body>
 +</html>
+diff --git a/Source/WebCore/platform/image-decoders/ImageDecoderICCHaiku.h b/Source/WebCore/platform/image-decoders/ImageDecoderICCHaiku.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..af43bbce6bb1ef40047c24d7afb9dc042c0f2078
+--- /dev/null
++++ b/Source/WebCore/platform/image-decoders/ImageDecoderICCHaiku.h
+@@ -0,0 +1,57 @@
++/*
++ * Copyright (C) 2026 Summit contributors
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHORS ``AS IS'' AND ANY
++ * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHORS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
++ * PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY
++ * OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
++ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#pragma once
++
++#if USE(LCMS) && PLATFORM(HAIKU)
++
++#include "LCMSUniquePtr.h"
++#include <span>
++#include <wtf/RefPtr.h>
++#include <wtf/ThreadSafeRefCounted.h>
++
++namespace WebCore {
++
++// A color transform from an embedded ICC profile to sRGB, made with
++// cmsFLAGS_NOCACHE so that decoders on several threads can use it at once.
++class SharedLCMSTransformHaiku : public ThreadSafeRefCounted<SharedLCMSTransformHaiku> {
++public:
++    explicit SharedLCMSTransformHaiku(LCMSTransformPtr&& transform)
++        : m_transform(WTF::move(transform)) { }
++    void* get() const { return m_transform.get(); }
++private:
++    LCMSTransformPtr m_transform;
++};
++
++// The transform for an embedded profile, shared by every decoder (PNG, JPEG,
++// JPEG XL) that meets the same profile bytes. Null when no transform is
++// needed (the profile is sRGB) or none can be made (not an RGB profile, or a
++// broken one): the pixels are then used as they are. Defined in
++// PNGImageDecoder.cpp.
++RefPtr<SharedLCMSTransformHaiku> sharedICCTransformHaiku(std::span<const uint8_t> profileBytes);
++
++} // namespace WebCore
++
++#endif // USE(LCMS) && PLATFORM(HAIKU)
 diff --git a/Source/WebCore/platform/image-decoders/ScalableImageDecoder.cpp b/Source/WebCore/platform/image-decoders/ScalableImageDecoder.cpp
 index 3f46090c1c8905a7ab80a942c252395153170f6a..24502022d7b8cf3c641f62bb5556f21b3d9d8180 100644
 --- a/Source/WebCore/platform/image-decoders/ScalableImageDecoder.cpp
@@ -78844,6 +78907,242 @@ index 0000000000000000000000000000000000000000..c70340c58ebc48c1f1a424319de275e9
 +};
 +}
 +#endif
+diff --git a/Source/WebCore/platform/image-decoders/jpeg/JPEGImageDecoder.cpp b/Source/WebCore/platform/image-decoders/jpeg/JPEGImageDecoder.cpp
+index f422397606c92c19aca1f27aafc07d77d66590ff..12eacd6cbe50d62ff922ab6f522bd01d4e70d9a2 100644
+--- a/Source/WebCore/platform/image-decoders/jpeg/JPEGImageDecoder.cpp
++++ b/Source/WebCore/platform/image-decoders/jpeg/JPEGImageDecoder.cpp
+@@ -48,6 +48,16 @@
+ #include "LCMSUniquePtr.h"
+ #endif
+ 
++#if USE(LCMS)
++namespace WebCore {
++#if PLATFORM(HAIKU)
++static inline void* iccTransformHandle(const RefPtr<SharedLCMSTransformHaiku>& transform) { return transform->get(); }
++#else
++static inline cmsHTRANSFORM iccTransformHandle(const LCMSTransformPtr& transform) { return transform.get(); }
++#endif
++}
++#endif
++
+ extern "C" {
+ #include <setjmp.h>
+ }
+@@ -377,7 +387,7 @@ public:
+                 return false;
+ 
+             m_decoder->setOrientation(readImageOrientation(info()));
+-#if USE(LCMS)
++#if USE(LCMS) && !PLATFORM(HAIKU)
+             if (!m_decoder->ignoresGammaAndColorProfile() && m_info.out_color_space == rgbOutputColorSpace())
+                 m_decoder->setICCProfile(readICCProfile(&m_info));
+ #endif
+@@ -406,6 +416,16 @@ public:
+             [[fallthrough]];
+ 
+         case JPEG_START_DECOMPRESS:
++#if USE(LCMS) && PLATFORM(HAIKU)
++            // The colour transform is looked up only for a decode, not for
++            // the size probe that runs on the main thread as data arrives
++            // (#211). The saved markers are still there.
++            if (!m_iccProfileRead) {
++                m_iccProfileRead = true;
++                if (!m_decoder->ignoresGammaAndColorProfile() && m_info.out_color_space == rgbOutputColorSpace())
++                    m_decoder->setICCProfile(readICCProfile(&m_info));
++            }
++#endif
+             // Set parameters for decompression.
+             // FIXME -- Should reset dct_method and dither mode for final pass
+             // of progressive JPEG.
+@@ -514,6 +534,9 @@ private:
+     jpeg_decompress_struct m_info;
+     decoder_error_mgr m_err;
+     jstate m_state;
++#if USE(LCMS) && PLATFORM(HAIKU)
++    bool m_iccProfileRead { false };
++#endif
+ 
+     JSAMPARRAY m_samples;
+ };
+@@ -578,7 +601,9 @@ ScalableImageDecoderFrame* JPEGImageDecoder::frameBufferAtIndex(size_t index)
+ void JPEGImageDecoder::clear()
+ {
+     m_reader = nullptr;
+-#if USE(LCMS)
++#if USE(LCMS) && PLATFORM(HAIKU)
++    m_iccTransform = nullptr;
++#elif USE(LCMS)
+     m_iccTransform.reset();
+ #endif
+ }
+@@ -640,7 +665,7 @@ bool JPEGImageDecoder::outputScanlines(ScalableImageDecoderFrame& buffer)
+ 
+ #if USE(LCMS)
+         if (m_iccTransform)
+-            cmsDoTransform(m_iccTransform.get(), row.data(), row.data(), info->output_width);
++            cmsDoTransform(iccTransformHandle(m_iccTransform), row.data(), row.data(), info->output_width);
+ #endif
+     }
+     return true;
+@@ -674,7 +699,7 @@ bool JPEGImageDecoder::outputScanlines()
+ 
+ #if USE(LCMS)
+             if (m_iccTransform)
+-                cmsDoTransform(m_iccTransform.get(), row, row, info->output_width);
++                cmsDoTransform(iccTransformHandle(m_iccTransform), row, row, info->output_width);
+ #endif
+          }
+          return true;
+@@ -738,12 +763,16 @@ void JPEGImageDecoder::setICCProfile(RefPtr<SharedBuffer>&& buffer)
+         return;
+ 
+     auto span = buffer->span();
++#if PLATFORM(HAIKU)
++    m_iccTransform = sharedICCTransformHaiku(span);
++#else
+     auto iccProfile = LCMSProfilePtr(cmsOpenProfileFromMem(span.data(), span.size()));
+     if (!iccProfile || cmsGetColorSpace(iccProfile.get()) != cmsSigRgbData)
+         return;
+ 
+     auto srgbProfile = LCMSProfilePtr(cmsCreate_sRGBProfile());
+     m_iccTransform = LCMSTransformPtr(cmsCreateTransform(iccProfile.get(), TYPE_BGRA_8, srgbProfile.get(), TYPE_BGRA_8, INTENT_RELATIVE_COLORIMETRIC, 0));
++#endif
+ }
+ #endif
+ 
+diff --git a/Source/WebCore/platform/image-decoders/jpeg/JPEGImageDecoder.h b/Source/WebCore/platform/image-decoders/jpeg/JPEGImageDecoder.h
+index 8772ef3e08846c534911e2166cebfbbd56f96185..4394326c43cff20d8f13b798419d3fb3598f4fa6 100644
+--- a/Source/WebCore/platform/image-decoders/jpeg/JPEGImageDecoder.h
++++ b/Source/WebCore/platform/image-decoders/jpeg/JPEGImageDecoder.h
+@@ -35,6 +35,9 @@
+ 
+ #if USE(LCMS)
+ #include "LCMSUniquePtr.h"
++#if PLATFORM(HAIKU)
++#include "ImageDecoderICCHaiku.h"
++#endif
+ #endif
+ 
+ extern "C" {
+@@ -89,7 +92,9 @@ namespace WebCore {
+         void clear();
+ 
+         std::unique_ptr<JPEGImageReader> m_reader;
+-#if USE(LCMS)
++#if USE(LCMS) && PLATFORM(HAIKU)
++        RefPtr<SharedLCMSTransformHaiku> m_iccTransform;
++#elif USE(LCMS)
+         LCMSTransformPtr m_iccTransform;
+ #endif
+     };
+diff --git a/Source/WebCore/platform/image-decoders/jpegxl/JPEGXLImageDecoder.cpp b/Source/WebCore/platform/image-decoders/jpegxl/JPEGXLImageDecoder.cpp
+index 7d2cefe71667539eea554e7829ae17a6fea8def4..a92867be12a058ada4adac765777c055bdb3aedd 100644
+--- a/Source/WebCore/platform/image-decoders/jpegxl/JPEGXLImageDecoder.cpp
++++ b/Source/WebCore/platform/image-decoders/jpegxl/JPEGXLImageDecoder.cpp
+@@ -425,7 +425,11 @@ void JPEGXLImageDecoder::imageOut(size_t x, size_t y, size_t numPixelsInRow, con
+ 
+ void JPEGXLImageDecoder::clearColorTransform()
+ {
++#if PLATFORM(HAIKU)
++    m_iccTransform = nullptr;
++#else
+     m_iccTransform.reset();
++#endif
+ }
+ 
+ void JPEGXLImageDecoder::prepareColorTransform()
+@@ -433,6 +437,14 @@ void JPEGXLImageDecoder::prepareColorTransform()
+     if (m_iccTransform)
+         return;
+ 
++#if PLATFORM(HAIKU)
++    // libjxl describes even a plain sRGB image as an ICC profile; such a
++    // profile needs no transform, and others are shared between decoders
++    // (#211).
++    auto bytes = iccProfileBytesHaiku();
++    if (!bytes.isEmpty())
++        m_iccTransform = sharedICCTransformHaiku(bytes.span());
++#else
+     auto profile = tryDecodeICCColorProfile();
+     if (!profile || cmsGetColorSpace(profile.get()) != cmsSigRgbData)
+         return; // TODO(bugs.webkit.org/show_bug.cgi?id=234222): We should try to use encoded color profile if ICC profile is not available.
+@@ -441,7 +453,29 @@ void JPEGXLImageDecoder::prepareColorTransform()
+     // and libjxl has yet to support it.
+     auto srgbProfile = LCMSProfilePtr(cmsCreate_sRGBProfile());
+     m_iccTransform = LCMSTransformPtr(cmsCreateTransform(profile.get(), TYPE_BGRA_8, srgbProfile.get(), TYPE_BGRA_8, INTENT_RELATIVE_COLORIMETRIC, 0));
++#endif
++}
++
++#if PLATFORM(HAIKU)
++Vector<uint8_t> JPEGXLImageDecoder::iccProfileBytesHaiku()
++{
++    size_t profileSize = 0;
++#if JPEGXL_NUMERIC_VERSION < JPEGXL_COMPUTE_NUMERIC_VERSION(0, 9, 0)
++    if (JxlDecoderGetICCProfileSize(m_decoder.get(), &s_pixelFormat, JXL_COLOR_PROFILE_TARGET_DATA, &profileSize) != JXL_DEC_SUCCESS)
++        return { };
++    Vector<uint8_t> profileData(profileSize);
++    if (JxlDecoderGetColorAsICCProfile(m_decoder.get(), &s_pixelFormat, JXL_COLOR_PROFILE_TARGET_DATA, profileData.mutableSpan().data(), profileData.size()) != JXL_DEC_SUCCESS)
++        return { };
++#else
++    if (JxlDecoderGetICCProfileSize(m_decoder.get(), JXL_COLOR_PROFILE_TARGET_DATA, &profileSize) != JXL_DEC_SUCCESS)
++        return { };
++    Vector<uint8_t> profileData(profileSize);
++    if (JxlDecoderGetColorAsICCProfile(m_decoder.get(), JXL_COLOR_PROFILE_TARGET_DATA, profileData.mutableSpan().data(), profileData.size()) != JXL_DEC_SUCCESS)
++        return { };
++#endif
++    return profileData;
+ }
++#endif
+ 
+ LCMSProfilePtr JPEGXLImageDecoder::tryDecodeICCColorProfile()
+ {
+@@ -470,7 +504,11 @@ void JPEGXLImageDecoder::maybePerformColorSpaceConversion(std::span<uint8_t> inp
+     if (!m_iccTransform)
+         return;
+ 
++#if PLATFORM(HAIKU)
++    cmsDoTransform(m_iccTransform->get(), inputBuffer.data(), outputBuffer.data(), numberOfPixels);
++#else
+     cmsDoTransform(m_iccTransform.get(), inputBuffer.data(), outputBuffer.data(), numberOfPixels);
++#endif
+ }
+ 
+ #elif USE(CG)
+diff --git a/Source/WebCore/platform/image-decoders/jpegxl/JPEGXLImageDecoder.h b/Source/WebCore/platform/image-decoders/jpegxl/JPEGXLImageDecoder.h
+index 37a3d7bed4837be53c70c43dba509d7d79130cd5..9bde93fdf32e041b9389084a39822ac6f20d9818 100644
+--- a/Source/WebCore/platform/image-decoders/jpegxl/JPEGXLImageDecoder.h
++++ b/Source/WebCore/platform/image-decoders/jpegxl/JPEGXLImageDecoder.h
+@@ -34,6 +34,9 @@
+ 
+ #if USE(LCMS)
+ #include "LCMSUniquePtr.h"
++#if PLATFORM(HAIKU)
++#include "ImageDecoderICCHaiku.h"
++#endif
+ #elif USE(CG)
+ #include <CoreGraphics/CoreGraphics.h>
+ #include <wtf/RetainPtr.h>
+@@ -93,6 +96,9 @@ private:
+     void maybePerformColorSpaceConversion(std::span<uint8_t> inputBuffer, std::span<uint8_t> outputBuffer, unsigned numberOfPixels);
+ #if USE(LCMS)
+     LCMSProfilePtr tryDecodeICCColorProfile();
++#if PLATFORM(HAIKU)
++    Vector<uint8_t> iccProfileBytesHaiku();
++#endif
+ #elif USE(CG)
+     RetainPtr<CGColorSpaceRef> tryDecodeICCColorProfile();
+ #endif
+@@ -107,7 +113,9 @@ private:
+ 
+     bool m_isLastFrameHeaderReceived { false }; // If this is true, we know we don't need to update m_frameCount.
+ 
+-#if USE(LCMS)
++#if USE(LCMS) && PLATFORM(HAIKU)
++    RefPtr<SharedLCMSTransformHaiku> m_iccTransform;
++#elif USE(LCMS)
+     LCMSTransformPtr m_iccTransform;
+ #elif USE(CG)
+     RetainPtr<CGColorSpaceRef> m_profile;
 diff --git a/Source/WebCore/platform/image-decoders/jpegxr/JPEGXRCodec.cpp b/Source/WebCore/platform/image-decoders/jpegxr/JPEGXRCodec.cpp
 new file mode 100644
 index 0000000000000000000000000000000000000000..cafe20c89ef6b39e706c4ea72a6aeef61c9e53a2
@@ -79180,10 +79479,10 @@ index 0000000000000000000000000000000000000000..367942fc4fb15d1a124d3d4d39aa2cec
 +}
 +#endif
 diff --git a/Source/WebCore/platform/image-decoders/png/PNGImageDecoder.cpp b/Source/WebCore/platform/image-decoders/png/PNGImageDecoder.cpp
-index 7745d0cebc95468d32da32ac3f9653ebf1bd84b2..f12653e2c296f7541b638f73a9556c2a0db32e19 100644
+index 7745d0cebc95468d32da32ac3f9653ebf1bd84b2..a03b7522ce2be19ff10b79705ddb3eb5db46e048 100644
 --- a/Source/WebCore/platform/image-decoders/png/PNGImageDecoder.cpp
 +++ b/Source/WebCore/platform/image-decoders/png/PNGImageDecoder.cpp
-@@ -50,9 +50,67 @@
+@@ -50,9 +50,79 @@
  #if USE(LCMS)
  #include "LCMSUniquePtr.h"
  #endif
@@ -79193,6 +79492,9 @@ index 7745d0cebc95468d32da32ac3f9653ebf1bd84b2..f12653e2c296f7541b638f73a9556c2a
 +#include <wtf/Lock.h>
 +#include <wtf/NeverDestroyed.h>
 +#include <wtf/Vector.h>
++#if USE(SKIA)
++#include "modules/skcms/skcms.h"
++#endif
 +#endif
  
  namespace WebCore {
@@ -79203,9 +79505,12 @@ index 7745d0cebc95468d32da32ac3f9653ebf1bd84b2..f12653e2c296f7541b638f73a9556c2a
 +// every PNG with an iCCP chunk made its own: an extension's toolbar icons
 +// were decoded, with two new transforms, each time the toolbar asked for
 +// them. Most such images carry one of a few profiles (sRGB as exported by
-+// image editors), so transforms are kept by profile bytes and shared.
-+// SUMMIT_SHARED_ICC_TRANSFORMS=0 makes one per decoder again.
-+static RefPtr<SharedLCMSTransformHaiku> sharedICCTransformHaiku(std::span<const uint8_t> profileBytes)
++// image editors), so transforms are kept by profile bytes and shared, by the
++// JPEG and JPEG XL decoders too (#211). A profile that is sRGB already needs
++// no transform at all: skcms (Skia's) compares it with sRGB, as Skia's own
++// decoders do. SUMMIT_SHARED_ICC_TRANSFORMS=0 makes one per decoder again,
++// for every profile.
++RefPtr<SharedLCMSTransformHaiku> sharedICCTransformHaiku(std::span<const uint8_t> profileBytes)
 +{
 +    static const bool sharing = [] {
 +        const char* value = getenv("SUMMIT_SHARED_ICC_TRANSFORMS");
@@ -79236,6 +79541,12 @@ index 7745d0cebc95468d32da32ac3f9653ebf1bd84b2..f12653e2c296f7541b638f73a9556c2a
 +                return entries.get()[i].transform;
 +        }
 +    }
++#if USE(SKIA)
++    // Not kept in the list: parsing is cheap next to making a transform.
++    skcms_ICCProfile parsed;
++    if (skcms_Parse(profileBytes.data(), profileBytes.size(), &parsed) && skcms_ApproximatelyEqualProfiles(&parsed, skcms_sRGB_profile()))
++        return nullptr;
++#endif
 +    // Profiles that fail are not kept: a broken one is rare and cheap to reject.
 +    RefPtr transform = create(cmsFLAGS_NOCACHE);
 +    if (!transform || profileBytes.size() > 64 * 1024)
@@ -79251,7 +79562,7 @@ index 7745d0cebc95468d32da32ac3f9653ebf1bd84b2..f12653e2c296f7541b638f73a9556c2a
  // Gamma constants.
  const double cMaxGamma = 21474.83;
  const double cDefaultGamma = 2.2;
-@@ -283,8 +341,12 @@ void PNGImageDecoder::clear()
+@@ -283,8 +353,12 @@ void PNGImageDecoder::clear()
  {
      m_reader = nullptr;
  #if USE(LCMS)
@@ -79264,7 +79575,7 @@ index 7745d0cebc95468d32da32ac3f9653ebf1bd84b2..f12653e2c296f7541b638f73a9556c2a
  }
  
  bool PNGImageDecoder::setFailed()
-@@ -408,11 +470,15 @@ void PNGImageDecoder::headerAvailable()
+@@ -408,11 +482,15 @@ void PNGImageDecoder::headerAvailable()
          png_uint_32 iccProfileDataSize;
          int compressionType;
          if (png_get_iCCP(png, info, &iccProfileTitle, &compressionType, &iccProfileData, &iccProfileDataSize)) {
@@ -79280,7 +79591,7 @@ index 7745d0cebc95468d32da32ac3f9653ebf1bd84b2..f12653e2c296f7541b638f73a9556c2a
          }
      }
  #endif
-@@ -553,8 +619,13 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
+@@ -553,8 +631,13 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
  WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
  
  #if USE(LCMS)
@@ -79294,7 +79605,7 @@ index 7745d0cebc95468d32da32ac3f9653ebf1bd84b2..f12653e2c296f7541b638f73a9556c2a
  #endif
  
      if (nonTrivialAlphaMask && !buffer.hasAlpha())
-@@ -984,8 +1055,13 @@ void PNGImageDecoder::paintFrame()
+@@ -984,8 +1067,13 @@ void PNGImageDecoder::paintFrame()
              address = address.subspan(1);
          }
  #if USE(LCMS)
@@ -79309,36 +79620,20 @@ index 7745d0cebc95468d32da32ac3f9653ebf1bd84b2..f12653e2c296f7541b638f73a9556c2a
      }
  
 diff --git a/Source/WebCore/platform/image-decoders/png/PNGImageDecoder.h b/Source/WebCore/platform/image-decoders/png/PNGImageDecoder.h
-index 77ad6fdc527db22bd3db39cc6f69832c1540e004..2689e667f262d2cda923c11599bf04aabdc5ae6a 100644
+index 77ad6fdc527db22bd3db39cc6f69832c1540e004..5dab6a2b0ca31fc3c01bdbc957c73b2f92b9c558 100644
 --- a/Source/WebCore/platform/image-decoders/png/PNGImageDecoder.h
 +++ b/Source/WebCore/platform/image-decoders/png/PNGImageDecoder.h
-@@ -33,9 +33,25 @@
+@@ -33,6 +33,9 @@
  #if USE(LCMS)
  #include "LCMSUniquePtr.h"
  #endif
 +#if USE(LCMS) && PLATFORM(HAIKU)
-+#include <wtf/ThreadSafeRefCounted.h>
++#include "ImageDecoderICCHaiku.h"
 +#endif
  
  namespace WebCore {
  
-+#if USE(LCMS) && PLATFORM(HAIKU)
-+// A color transform from an embedded ICC profile to sRGB, made with
-+// cmsFLAGS_NOCACHE so that decoders on several threads can use it at once.
-+class SharedLCMSTransformHaiku : public ThreadSafeRefCounted<SharedLCMSTransformHaiku> {
-+public:
-+    explicit SharedLCMSTransformHaiku(LCMSTransformPtr&& transform)
-+        : m_transform(WTF::move(transform)) { }
-+    void* get() const { return m_transform.get(); }
-+private:
-+    LCMSTransformPtr m_transform;
-+};
-+#endif
-+
-     class PNGImageReader;
- 
-     // This class decodes the PNG image format.
-@@ -141,7 +157,10 @@ namespace WebCore {
+@@ -141,7 +144,10 @@ namespace WebCore {
          std::array<png_byte, 12 + 13> m_dataIHDR;
          std::array<png_byte, 12 + 256 * 3> m_dataPLTE;
          std::array<png_byte, 12 + 256> m_datatRNS;
@@ -87677,7 +87972,7 @@ index 1373e6e9b7b3e517f8570d11022f02a40ce42c27..97f95743448a1c0b9baa0c092916ac81
  }
  
 diff --git a/Source/WebCore/platform/network/curl/CookieJarDB.cpp b/Source/WebCore/platform/network/curl/CookieJarDB.cpp
-index 3c56c7dff8d09bee15b4c67831a44b23f65d5604..ec961622e805a774b59a65ab9de878355b7bdad6 100644
+index 3c56c7dff8d09bee15b4c67831a44b23f65d5604..d8c694d1c36c25fab34c4d816bc70b6b110b48bc 100644
 --- a/Source/WebCore/platform/network/curl/CookieJarDB.cpp
 +++ b/Source/WebCore/platform/network/curl/CookieJarDB.cpp
 @@ -31,10 +31,13 @@
@@ -87695,7 +87990,7 @@ index 3c56c7dff8d09bee15b4c67831a44b23f65d5604..ec961622e805a774b59a65ab9de87835
  #include <wtf/TZoneMallocInlines.h>
  #include <wtf/URL.h>
  #include <wtf/Vector.h>
-@@ -59,8 +62,11 @@ WTF_MAKE_TZONE_ALLOCATED_IMPL(CookieJarDB);
+@@ -59,25 +62,59 @@ WTF_MAKE_TZONE_ALLOCATED_IMPL(CookieJarDB);
      "  session INTEGER NOT NULL,"\
      "  httponly INTEGER NOT NULL DEFAULT 0,"\
      "  secure INTEGER NOT NULL DEFAULT 0,"\
@@ -87708,7 +88003,33 @@ index 3c56c7dff8d09bee15b4c67831a44b23f65d5604..ec961622e805a774b59a65ab9de87835
  #define CREATE_DOMAIN_INDEX_SQL \
      "CREATE INDEX IF NOT EXISTS domain_index ON Cookie(domain);"_s
  #define CREATE_PATH_INDEX_SQL \
-@@ -68,16 +74,21 @@ WTF_MAKE_TZONE_ALLOCATED_IMPL(CookieJarDB);
+     "CREATE INDEX IF NOT EXISTS path_index ON Cookie(path);"_s
++// The next expiry (scheduleCookieExpiration, after every change) and the
++// expired-cookie sweep read persistent cookies by expiry: with this index that
++// is one index probe, not a scan of the whole table (#206).
++#define CREATE_EXPIRES_INDEX_SQL \
++    "CREATE INDEX IF NOT EXISTS expires_index ON Cookie(session, expires);"_s
++// A request's cookies can only be stored under the request's host (host-only
++// cookies) or under "." + the host or one of its parent domains: all that
++// CookieUtil::domainMatch() accepts. Asking for those domains by name uses
++// domain_index; the GLOB '*.example.com' this replaced has a leading wildcard,
++// so every request scanned the whole table (1.2 ms at 3,000 cookies, 4.8 ms
++// at 10,000 on a Xeon; 0.04 ms this way). Unused slots are bound to NULL.
++#define SEARCH_COOKIE_DOMAIN_SLOTS 8
++#define SEARCH_COOKIES_BY_DOMAIN_SQL \
++    "SELECT name, value, domain, path, expires, httponly, secure, session, created, samesite, partitionkey FROM Cookie "\
++    "WHERE domain IN (?, ?, ?, ?, ?, ?, ?, ?) "\
++    "AND (NOT ((session = 0) AND (expires <= ?))) "\
++    "AND (httponly = COALESCE(NULLIF(?, -1), httponly)) "\
++    "AND (secure = COALESCE(NULLIF(?, -1), secure)) "\
++    "AND (session = COALESCE(NULLIF(?, -1), session)) "\
++    "AND (partitionkey = '' OR partitionkey = ?) "\
++    "ORDER BY length(path) DESC, created, rowid"_s
++#define DOM_COOKIES_BY_DOMAIN_SQL \
++    "SELECT name, value, domain, path, expires, httponly, secure, session, created, samesite, partitionkey FROM Cookie "\
++    "WHERE domain IN (?, ?, ?, ?, ?, ?, ?, ?) AND httponly = 0 "\
++    "AND (NOT ((session = 0) AND (expires <= ?))) "\
++    "ORDER BY length(path) DESC, created, rowid"_s
  #define SELECT_ALL_DOMAINS_SQL \
      "SELECT DISTINCT domain FROM Cookie;"_s
  #define CHECK_EXISTS_COOKIE_SQL \
@@ -87736,7 +88057,7 @@ index 3c56c7dff8d09bee15b4c67831a44b23f65d5604..ec961622e805a774b59a65ab9de87835
  #define DELETE_ALL_SESSION_COOKIE_SQL \
      "DELETE FROM Cookie WHERE session = 1;"_s
  #define DELETE_COOKIES_BY_DOMAIN_SQL \
-@@ -91,7 +102,7 @@ WTF_MAKE_TZONE_ALLOCATED_IMPL(CookieJarDB);
+@@ -91,7 +128,7 @@ WTF_MAKE_TZONE_ALLOCATED_IMPL(CookieJarDB);
  // If the database schema is updated:
  // - Increment schemaVersion
  // - Add upgrade logic in verifySchemaVersion to migrate databases from the previous schema version
@@ -87745,7 +88066,7 @@ index 3c56c7dff8d09bee15b4c67831a44b23f65d5604..ec961622e805a774b59a65ab9de87835
  
  
  CookieJarDB::CookieJarDB(const String& databasePath)
-@@ -101,6 +112,7 @@ CookieJarDB::CookieJarDB(const String& databasePath)
+@@ -101,6 +138,7 @@ CookieJarDB::CookieJarDB(const String& databasePath)
  
  CookieJarDB::~CookieJarDB()
  {
@@ -87753,7 +88074,7 @@ index 3c56c7dff8d09bee15b4c67831a44b23f65d5604..ec961622e805a774b59a65ab9de87835
      closeDatabase();
      m_database.setDidBeginCheckedPtrDeletion();
  }
-@@ -124,9 +136,7 @@ bool CookieJarDB::openDatabase()
+@@ -124,9 +162,7 @@ bool CookieJarDB::openDatabase()
  
      if (existsDatabaseFile) {
          if (m_database.open(m_databasePath)) {
@@ -87764,7 +88085,7 @@ index 3c56c7dff8d09bee15b4c67831a44b23f65d5604..ec961622e805a774b59a65ab9de87835
                  // delete database and try to re-create again
                  LOG_ERROR("Cookie database validity check failed, attempting to recreate the database");
                  m_database.close();
-@@ -153,7 +163,10 @@ bool CookieJarDB::openDatabase()
+@@ -153,7 +189,10 @@ bool CookieJarDB::openDatabase()
      if (!isOnMemory() && !m_database.turnOnIncrementalAutoVacuum())
          LOG_ERROR("Unable to turn on incremental auto-vacuum (%d %s)", m_database.lastError(), m_database.lastErrorMsg());
  
@@ -87776,9 +88097,14 @@ index 3c56c7dff8d09bee15b4c67831a44b23f65d5604..ec961622e805a774b59a65ab9de87835
  
      if (!existsDatabaseFile || !m_database.tableExists("Cookie"_s)) {
          bool ok = executeSQLStatement(m_database.prepareStatement(CREATE_COOKIE_TABLE_SQL))
-@@ -171,14 +184,23 @@ bool CookieJarDB::openDatabase()
+@@ -170,15 +209,30 @@ bool CookieJarDB::openDatabase()
+ 
      m_database.setSynchronous(SQLiteDatabase::SyncNormal);
  
++    // Also for databases made before the index existed.
++    if (!executeSQLStatement(m_database.prepareStatement(CREATE_EXPIRES_INDEX_SQL)))
++        LOG_ERROR("Unable to create the cookie expiry index (%d %s)", m_database.lastError(), m_database.lastErrorMsg());
++
      // create prepared statements
 -    createPrepareStatement(SET_COOKIE_SQL);
 -    createPrepareStatement(CHECK_EXISTS_COOKIE_SQL);
@@ -87788,6 +88114,8 @@ index 3c56c7dff8d09bee15b4c67831a44b23f65d5604..ec961622e805a774b59a65ab9de87835
 -    createPrepareStatement(DELETE_COOKIES_BY_DOMAIN_SQL);
 -    createPrepareStatement(DELETE_COOKIES_BY_DOMAIN_EXCEPT_HTTP_ONLY_SQL);
 +    if (!createPrepareStatement(SET_COOKIE_SQL)
++        || !createPrepareStatement(SEARCH_COOKIES_BY_DOMAIN_SQL)
++        || !createPrepareStatement(DOM_COOKIES_BY_DOMAIN_SQL)
 +        || !createPrepareStatement(CHECK_EXISTS_COOKIE_SQL)
 +        || !createPrepareStatement(CHECK_EXISTS_HTTPONLY_COOKIE_SQL)
 +        || !createPrepareStatement(DELETE_COOKIE_BY_NAME_DOMAIN_PATH_SQL)
@@ -87807,7 +88135,7 @@ index 3c56c7dff8d09bee15b4c67831a44b23f65d5604..ec961622e805a774b59a65ab9de87835
      return true;
  }
  
-@@ -190,32 +212,47 @@ void CookieJarDB::closeDatabase()
+@@ -190,32 +244,47 @@ void CookieJarDB::closeDatabase()
      }
  }
  
@@ -87876,12 +88204,113 @@ index 3c56c7dff8d09bee15b4c67831a44b23f65d5604..ec961622e805a774b59a65ab9de87835
  }
  
  void CookieJarDB::deleteAllTables()
-@@ -385,13 +422,14 @@ std::optional<Vector<Cookie>> CookieJarDB::searchCookies(const URL& firstParty,
+@@ -367,6 +436,85 @@ bool CookieJarDB::hasCookies(const URL& url)
+     return statement.step() == SQLITE_ROW;
+ }
+ 
++// The domains a cookie matching the host can be stored under (see
++// SEARCH_COOKIES_BY_DOMAIN_SQL): the host, and "." + the host or each of its
++// parents down to the registrable domain, the range '*.' + registrable domain
++// covers. An IP address or a host without a registrable domain only matches
++// itself.
++static Vector<String, SEARCH_COOKIE_DOMAIN_SLOTS> cookieDomainsForHost(const String& host, const RegistrableDomain& registrableDomain)
++{
++    Vector<String, SEARCH_COOKIE_DOMAIN_SLOTS> domains { host };
++    if (CookieUtil::isIPAddress(host) || !host.contains('.') || registrableDomain.isEmpty())
++        return domains;
++    const auto& registrable = registrableDomain.string();
++    domains.append(makeString('.', host));
++    size_t position = 0;
++    while (host.length() - position > registrable.length()) {
++        position = host.find('.', position);
++        if (position == notFound || host.length() - position - 1 < registrable.length())
++            break;
++        ++position;
++        domains.append(makeString('.', StringView(host).substring(position)));
++    }
++    return domains;
++}
++
++// Binds the domain slots (1 to SEARCH_COOKIE_DOMAIN_SLOTS); returns the next
++// parameter index.
++static int bindCookieDomains(SQLiteStatement& statement, std::span<const String> domains)
++{
++    int index = 1;
++    for (; index <= SEARCH_COOKIE_DOMAIN_SLOTS; ++index) {
++        if (static_cast<size_t>(index) <= domains.size())
++            statement.bindText(index, domains[index - 1]);
++        else
++            statement.bindNull(index);
++    }
++    return index;
++}
++
++static std::optional<Cookie> cookieFromRow(SQLiteStatement&);
++
++// The cookies a page on the host can read from script, whatever their path
++// or partition, for the web process's cookie cache (WebCookieCache), which
++// then answers document.cookie itself (#207).
++Vector<Cookie> CookieJarDB::domCookiesForHost(const URL& url)
++{
++    Vector<Cookie> cookies;
++    if (!isEnabled() || !m_database.isOpen())
++        return cookies;
++    String host = url.host().convertToASCIILowercase();
++    if (host.isEmpty())
++        return cookies;
++    RegistrableDomain registrableDomain { url };
++    auto domains = cookieDomainsForHost(host, registrableDomain);
++    std::unique_ptr<SQLiteStatement> fallback;
++    SQLiteStatement* statement;
++    int index;
++    if (domains.size() <= SEARCH_COOKIE_DOMAIN_SLOTS) {
++        statement = &preparedStatement(DOM_COOKIES_BY_DOMAIN_SQL);
++        index = bindCookieDomains(*statement, domains);
++    } else {
++        fallback = m_database.prepareStatement(SELECT_COOKIE_COLUMNS_SQL "WHERE ((domain = ?) OR (domain GLOB ?)) AND httponly = 0 "
++            "AND (NOT ((session = 0) AND (expires <= ?))) ORDER BY length(path) DESC, created, rowid"_s);
++        if (!fallback)
++            return cookies;
++        statement = fallback.get();
++        statement->bindText(1, host);
++        statement->bindText(2, makeString("*."_s, registrableDomain.string()));
++        index = 3;
++    }
++    statement->bindInt64(index, WallTime::now().secondsSinceEpoch().milliseconds());
++    while (statement->step() == SQLITE_ROW) {
++        if (!CookieUtil::domainMatch(statement->columnText(2).convertToASCIILowercase(), host))
++            continue;
++        if (auto cookie = cookieFromRow(*statement))
++            cookies.append(WTF::move(*cookie));
++    }
++    statement->reset();
++    return cookies;
++}
++
+ std::optional<Vector<Cookie>> CookieJarDB::searchCookies(const URL& firstParty, const URL& requestUrl, const std::optional<bool>& httpOnly, const std::optional<bool>& secure, const std::optional<bool>& session)
+ {
+     if (!isEnabled() || !m_database.isOpen())
+@@ -385,13 +533,29 @@ std::optional<Vector<Cookie>> CookieJarDB::searchCookies(const URL& firstParty,
  
      RegistrableDomain registrableDomain { requestUrl };
  
 -    auto pstmt = m_database.prepareStatement("SELECT name, value, domain, path, expires, httponly, secure, session FROM Cookie WHERE "\
 -        "(NOT ((session = 0) AND (expires < ?)))"
++    auto candidateDomains = cookieDomainsForHost(requestHost, registrableDomain);
++    if (candidateDomains.size() <= SEARCH_COOKIE_DOMAIN_SLOTS) {
++        auto& statement = preparedStatement(SEARCH_COOKIES_BY_DOMAIN_SQL);
++        int index = bindCookieDomains(statement, candidateDomains);
++        statement.bindInt64(index++, WallTime::now().secondsSinceEpoch().milliseconds());
++        statement.bindInt(index++, httpOnly ? *httpOnly : -1);
++        statement.bindInt(index++, secure ? *secure : -1);
++        statement.bindInt(index++, session ? *session : -1);
++        statement.bindText(index, firstParty.isValid() && firstParty.protocolIsInHTTPFamily() ? Site { firstParty }.toString() : emptyString());
++        auto results = cookiesMatchingRequest(statement, requestHost, requestPath);
++        statement.reset();
++        return results;
++    }
++
++    // A host with more labels than slots: search the whole registrable domain.
 +    auto pstmt = m_database.prepareStatement(SELECT_COOKIE_COLUMNS_SQL "WHERE "\
 +        "(NOT ((session = 0) AND (expires <= ?)))"
          "AND (httponly = COALESCE(NULLIF(?, -1), httponly)) "\
@@ -87894,12 +88323,18 @@ index 3c56c7dff8d09bee15b4c67831a44b23f65d5604..ec961622e805a774b59a65ab9de87835
      if (!pstmt)
          return std::nullopt;
  
-@@ -405,14 +443,12 @@ std::optional<Vector<Cookie>> CookieJarDB::searchCookies(const URL& firstParty,
+@@ -405,14 +569,18 @@ std::optional<Vector<Cookie>> CookieJarDB::searchCookies(const URL& firstParty,
          pstmt->bindNull(6);
      else
          pstmt->bindText(6, makeString("*."_s, registrableDomain.string()));
 +    pstmt->bindText(7, firstParty.isValid() && firstParty.protocolIsInHTTPFamily() ? Site { firstParty }.toString() : emptyString());
  
++    return cookiesMatchingRequest(*pstmt, requestHost, requestPath);
++}
++
++Vector<Cookie> CookieJarDB::cookiesMatchingRequest(SQLiteStatement& statement, const String& requestHost, const String& requestPath)
++{
++    auto* pstmt = &statement;
      Vector<Cookie> results;
  
      while (pstmt->step() == SQLITE_ROW) {
@@ -87910,7 +88345,7 @@ index 3c56c7dff8d09bee15b4c67831a44b23f65d5604..ec961622e805a774b59a65ab9de87835
          String cookieName = pstmt->columnText(0);
          String cookieValue = pstmt->columnText(1);
          String cookieDomain = pstmt->columnText(2).convertToASCIILowercase();
-@@ -443,6 +479,11 @@ std::optional<Vector<Cookie>> CookieJarDB::searchCookies(const URL& firstParty,
+@@ -443,6 +611,11 @@ std::optional<Vector<Cookie>> CookieJarDB::searchCookies(const URL& firstParty,
          cookie.httpOnly = cookieHttpOnly;
          cookie.secure = cookieSecure;
          cookie.session = cookieSession;
@@ -87922,7 +88357,7 @@ index 3c56c7dff8d09bee15b4c67831a44b23f65d5604..ec961622e805a774b59a65ab9de87835
          results.append(WTF::move(cookie));
      }
  
-@@ -455,10 +496,11 @@ Vector<Cookie> CookieJarDB::getAllCookies()
+@@ -455,10 +628,11 @@ Vector<Cookie> CookieJarDB::getAllCookies()
      if (!isEnabled() || !m_database.isOpen())
          return result;
  
@@ -87935,7 +88370,7 @@ index 3c56c7dff8d09bee15b4c67831a44b23f65d5604..ec961622e805a774b59a65ab9de87835
      while (pstmt->step() == SQLITE_ROW) {
          Cookie cookie;
          cookie.name = pstmt->columnText(0);
-@@ -471,18 +513,24 @@ Vector<Cookie> CookieJarDB::getAllCookies()
+@@ -471,18 +645,24 @@ Vector<Cookie> CookieJarDB::getAllCookies()
          cookie.httpOnly = (pstmt->columnInt(5) == 1);
          cookie.secure = (pstmt->columnInt(6) == 1);
          cookie.session = (pstmt->columnInt(7) == 1);
@@ -87964,7 +88399,7 @@ index 3c56c7dff8d09bee15b4c67831a44b23f65d5604..ec961622e805a774b59a65ab9de87835
  
      return statement.step() == SQLITE_ROW;
  }
-@@ -505,7 +553,7 @@ bool CookieJarDB::canAcceptCookie(const Cookie& cookie, const URL& firstParty, c
+@@ -505,7 +685,7 @@ bool CookieJarDB::canAcceptCookie(const Cookie& cookie, const URL& firstParty, c
          return false;
  
      bool fromJavaScript = source == CookieJarDB::Source::Script;
@@ -87973,7 +88408,7 @@ index 3c56c7dff8d09bee15b4c67831a44b23f65d5604..ec961622e805a774b59a65ab9de87835
          return false;
  
      if (!CookieUtil::domainMatch(cookie.domain, url.host().convertToASCIILowercase()))
-@@ -517,25 +565,186 @@ bool CookieJarDB::canAcceptCookie(const Cookie& cookie, const URL& firstParty, c
+@@ -517,25 +697,188 @@ bool CookieJarDB::canAcceptCookie(const Cookie& cookie, const URL& firstParty, c
      return true;
  }
  
@@ -88049,12 +88484,14 @@ index 3c56c7dff8d09bee15b4c67831a44b23f65d5604..ec961622e805a774b59a65ab9de87835
 +        m_cookieExpirationTimer->stop();
 +        return;
 +    }
-+    auto statement = m_database.prepareStatement("SELECT MIN(expires), COUNT(*) FROM Cookie WHERE session = 0"_s);
++    // MIN alone is answered from expires_index; it is NULL when there are no
++    // persistent cookies (COUNT(*) here walked them all).
++    auto statement = m_database.prepareStatement("SELECT MIN(expires) FROM Cookie WHERE session = 0"_s);
 +    if (!statement || statement->step() != SQLITE_ROW) {
 +        m_cookieExpirationTimer->startOneShot(1_s);
 +        return;
 +    }
-+    if (!statement->columnInt64(1)) {
++    if (std::holds_alternative<std::nullptr_t>(statement->columnValue(0))) {
 +        m_cookieExpirationTimer->stop();
 +        return;
 +    }
@@ -88142,9 +88579,9 @@ index 3c56c7dff8d09bee15b4c67831a44b23f65d5604..ec961622e805a774b59a65ab9de87835
 +                return false;
 +        }
 +        if (!expiredReplacement) {
-+            auto statement = m_database.prepareStatement(SET_COOKIE_SQL);
++            auto* statement = &preparedStatement(SET_COOKIE_SQL);
 +            // FIXME: Add an eviction policy before reporting eviction events.
-+            if (!statement || statement->bindText(1, cookie.name) != SQLITE_OK
++            if (statement->bindText(1, cookie.name) != SQLITE_OK
 +                || statement->bindText(2, cookie.value) != SQLITE_OK || statement->bindText(3, cookie.domain) != SQLITE_OK
 +                || statement->bindText(4, cookie.path) != SQLITE_OK
 +                || statement->bindInt64(5, cookie.session ? 0 : static_cast<int64_t>(expires)) != SQLITE_OK
@@ -88175,7 +88612,7 @@ index 3c56c7dff8d09bee15b4c67831a44b23f65d5604..ec961622e805a774b59a65ab9de87835
  }
  
  bool CookieJarDB::setCookie(const URL& firstParty, const URL& url, const String& body, CookieJarDB::Source source, std::optional<Seconds> cappedLifetime)
-@@ -546,13 +755,23 @@ bool CookieJarDB::setCookie(const URL& firstParty, const URL& url, const String&
+@@ -546,13 +889,23 @@ bool CookieJarDB::setCookie(const URL& firstParty, const URL& url, const String&
      if (url.isEmpty() || body.isEmpty())
          return false;
  
@@ -88200,7 +88637,7 @@ index 3c56c7dff8d09bee15b4c67831a44b23f65d5604..ec961622e805a774b59a65ab9de87835
      if (cookie->domain.isEmpty())
          cookie->domain = url.host().convertToASCIILowercase();
  
-@@ -586,6 +805,16 @@ HashSet<String> CookieJarDB::allDomains()
+@@ -586,6 +939,16 @@ HashSet<String> CookieJarDB::allDomains()
      return domains;
  }
  
@@ -88217,7 +88654,7 @@ index 3c56c7dff8d09bee15b4c67831a44b23f65d5604..ec961622e805a774b59a65ab9de87835
  bool CookieJarDB::deleteCookie(const String& url, const String& name)
  {
      if (!isEnabled() || !m_database.isOpen())
-@@ -607,12 +836,55 @@ bool CookieJarDB::deleteCookie(const String& url, const String& name)
+@@ -607,12 +970,55 @@ bool CookieJarDB::deleteCookie(const String& url, const String& name)
  
  bool CookieJarDB::deleteCookieInternal(const String& name, const String& domain, const String& path)
  {
@@ -88279,7 +88716,7 @@ index 3c56c7dff8d09bee15b4c67831a44b23f65d5604..ec961622e805a774b59a65ab9de87835
  }
  
  bool CookieJarDB::deleteCookies(const String&)
-@@ -624,24 +896,49 @@ bool CookieJarDB::deleteCookies(const String&)
+@@ -624,24 +1030,49 @@ bool CookieJarDB::deleteCookies(const String&)
  
  bool CookieJarDB::deleteCookiesForHostname(const String& hostname, IncludeHttpOnlyCookies includeHttpOnlyCookies)
  {
@@ -88300,7 +88737,8 @@ index 3c56c7dff8d09bee15b4c67831a44b23f65d5604..ec961622e805a774b59a65ab9de87835
 +    return deleteCookiesMatching(SELECT_COOKIE_COLUMNS_SQL "ORDER BY rowid"_s, DELETE_ALL_COOKIE_SQL,
 +        [](SQLiteStatement&) { return true; }, CookieChangeCause::Explicit);
 +}
-+
+ 
+-    return executeSQLStatement(m_database.prepareStatement(DELETE_ALL_COOKIE_SQL));
 +bool CookieJarDB::deleteCookiesModifiedSince(WallTime since)
 +{
 +    // Clearing "all time" arrives as the epoch.
@@ -88315,8 +88753,7 @@ index 3c56c7dff8d09bee15b4c67831a44b23f65d5604..ec961622e805a774b59a65ab9de87835
 +            return statement.bindDouble(1, milliseconds) == SQLITE_OK && statement.bindInt64(2, seconds) == SQLITE_OK;
 +        }, CookieChangeCause::Explicit);
 +}
- 
--    return executeSQLStatement(m_database.prepareStatement(DELETE_ALL_COOKIE_SQL));
++
 +bool CookieJarDB::deleteExpiredCookies()
 +{
 +    auto now = static_cast<int64_t>(WallTime::now().secondsSinceEpoch().milliseconds());
@@ -88337,7 +88774,7 @@ index 3c56c7dff8d09bee15b4c67831a44b23f65d5604..ec961622e805a774b59a65ab9de87835
  }
  
  SQLiteStatement& CookieJarDB::preparedStatement(const String& sql)
-@@ -654,7 +951,8 @@ SQLiteStatement& CookieJarDB::preparedStatement(const String& sql)
+@@ -654,7 +1085,8 @@ SQLiteStatement& CookieJarDB::preparedStatement(const String& sql)
  
  bool CookieJarDB::executeSQLStatement(std::unique_ptr<SQLiteStatement>&& statement)
  {
@@ -88348,7 +88785,7 @@ index 3c56c7dff8d09bee15b4c67831a44b23f65d5604..ec961622e805a774b59a65ab9de87835
          return false;
      }
 diff --git a/Source/WebCore/platform/network/curl/CookieJarDB.h b/Source/WebCore/platform/network/curl/CookieJarDB.h
-index 81dd17092439fa65a2bbcefb55cc98f77eccf2f0..8d110ab267fb84c5b7688ab36293db97b731a0b1 100644
+index 81dd17092439fa65a2bbcefb55cc98f77eccf2f0..208b5156b8ba39c1ca2298b19342422f3c061b14 100644
 --- a/Source/WebCore/platform/network/curl/CookieJarDB.h
 +++ b/Source/WebCore/platform/network/curl/CookieJarDB.h
 @@ -24,13 +24,17 @@
@@ -88370,7 +88807,7 @@ index 81dd17092439fa65a2bbcefb55cc98f77eccf2f0..8d110ab267fb84c5b7688ab36293db97
  #include <wtf/text/StringHash.h>
  
  namespace WebCore {
-@@ -55,7 +59,7 @@ public:
+@@ -55,19 +59,30 @@ public:
      WEBCORE_EXPORT void open();
      bool isEnabled() const;
  
@@ -88379,7 +88816,8 @@ index 81dd17092439fa65a2bbcefb55cc98f77eccf2f0..8d110ab267fb84c5b7688ab36293db97
      CookieAcceptPolicy acceptPolicy() const { return m_acceptPolicy; }
  
      WEBCORE_EXPORT HashSet<String> allDomains();
-@@ -63,11 +67,21 @@ public:
++    WEBCORE_EXPORT Vector<Cookie> domCookiesForHost(const URL&);
+     WEBCORE_EXPORT std::optional<Vector<Cookie>> searchCookies(const URL& firstParty, const URL& requestUrl, const std::optional<bool>& httpOnly, const std::optional<bool>& secure, const std::optional<bool>& session);
      WEBCORE_EXPORT Vector<Cookie> getAllCookies();
      WEBCORE_EXPORT bool setCookie(const URL& firstParty, const URL&, const String& cookie, Source, std::optional<Seconds> cappedLifetime = std::nullopt);
      WEBCORE_EXPORT bool setCookie(const Cookie&);
@@ -88401,7 +88839,7 @@ index 81dd17092439fa65a2bbcefb55cc98f77eccf2f0..8d110ab267fb84c5b7688ab36293db97
  
      WEBCORE_EXPORT CookieJarDB(const String& databasePath);
      WEBCORE_EXPORT ~CookieJarDB();
-@@ -91,15 +105,23 @@ private:
+@@ -91,15 +106,24 @@ private:
      bool checkDatabaseValidity();
      void deleteAllDatabaseFiles();
  
@@ -88417,6 +88855,7 @@ index 81dd17092439fa65a2bbcefb55cc98f77eccf2f0..8d110ab267fb84c5b7688ab36293db97
      bool deleteCookieInternal(const String& name, const String& domain, const String& path);
 -    bool hasHttpOnlyCookie(const String& name, const String& domain, const String& path);
 +    bool readCookie(const Cookie&, std::optional<Cookie>&);
++    Vector<Cookie> cookiesMatchingRequest(SQLiteStatement&, const String& requestHost, const String& requestPath);
 +    bool deleteCookiesMatching(ASCIILiteral selectSQL, ASCIILiteral deleteSQL, Function<bool(SQLiteStatement&)>&&, CookieChangeCause);
 +    void notifyCookieChanges(Vector<CookieChange>&&);
 +    void scheduleCookieExpiration();
@@ -89422,7 +89861,7 @@ index 0000000000000000000000000000000000000000..6b5fc0f78f205ca35494521f2ebefe65
 +
 +} // namespace WebCore
 diff --git a/Source/WebCore/platform/network/curl/CurlContext.cpp b/Source/WebCore/platform/network/curl/CurlContext.cpp
-index 2e6a2537f3e283d7cb7f2081c8549f0256ee4e71..d05a96b1750588b0a1d4225f8333245021b3e2ec 100644
+index 2e6a2537f3e283d7cb7f2081c8549f0256ee4e71..5aab4d56dc96925f3ce14306560d5e3f837329f0 100644
 --- a/Source/WebCore/platform/network/curl/CurlContext.cpp
 +++ b/Source/WebCore/platform/network/curl/CurlContext.cpp
 @@ -26,6 +26,18 @@
@@ -89667,7 +90106,7 @@ index 2e6a2537f3e283d7cb7f2081c8549f0256ee4e71..d05a96b1750588b0a1d4225f83332450
  #if LIBCURL_VERSION_NUM <= 0x075500
          curl_easy_setopt(m_handle, CURLOPT_SSL_ENABLE_ALPN, 1L);
          curl_easy_setopt(m_handle, CURLOPT_SSL_ENABLE_NPN, 0L);
-@@ -563,6 +768,21 @@ void CurlHandle::enableAltSvc()
+@@ -563,6 +768,25 @@ void CurlHandle::enableAltSvc()
      if (CurlContext::singleton().alternativeServicesStorageFile().isEmpty())
          return;
  
@@ -89676,13 +90115,17 @@ index 2e6a2537f3e283d7cb7f2081c8549f0256ee4e71..d05a96b1750588b0a1d4225f83332450
 +    // and write it back when the handle is cleaned up: two file operations on
 +    // BFS for every request, on the transfer thread, which is what kept new
 +    // requests waiting behind a queue of set-up tasks (10-15 ms each). The
-+    // cache only pays off for HTTP/3 discovery (h2 comes from ALPN), and this
-+    // libcurl has no HTTP/3, so it is left off unless SUMMIT_CURL_ALTSVC=1.
++    // cache only pays off for HTTP/3 discovery (h2 comes from ALPN), and the
++    // network process keeps its own HTTP/3 origins (usesHttp3OriginsHaiku()),
++    // so the file is used only when HTTP/3 is left to libcurl
++    // (SUMMIT_HTTP3=0) or SUMMIT_CURL_ALTSVC=1 asks for it. (It came back on
++    // every request when the air/OS libcurl gained HTTP/3, #205.)
 +    static const bool wanted = [] {
 +        const char* value = getenv("SUMMIT_CURL_ALTSVC");
 +        return value && !strcmp(value, "1");
 +    }();
-+    if (!CurlContext::singleton().isHttp3Enabled() && !wanted)
++    bool libcurlDiscoversHttp3 = CurlContext::singleton().isHttp3Enabled() && !usesHttp3OriginsHaiku();
++    if (!libcurlDiscoversHttp3 && !wanted)
 +        return;
 +#endif
 +
@@ -104054,7 +104497,7 @@ index 7c9075474552a6beaffbeffe6838dd4e5b24b0d0..74fe55e1e669a9abf183be97b68e71ef
  
  } // namespace WebKit
 diff --git a/Source/WebKit/NetworkProcess/curl/NetworkStorageSessionCurl.cpp b/Source/WebKit/NetworkProcess/curl/NetworkStorageSessionCurl.cpp
-index 20aff066ab01aa0fa12c7bf47741b0109d927eea..2d2302f5fdbdc9695bfb7730eba100bdc871a743 100644
+index 20aff066ab01aa0fa12c7bf47741b0109d927eea..943960aca630435dc8fedce75166baa4a8b3f09e 100644
 --- a/Source/WebKit/NetworkProcess/curl/NetworkStorageSessionCurl.cpp
 +++ b/Source/WebKit/NetworkProcess/curl/NetworkStorageSessionCurl.cpp
 @@ -31,12 +31,16 @@
@@ -104142,7 +104585,7 @@ index 20aff066ab01aa0fa12c7bf47741b0109d927eea..2d2302f5fdbdc9695bfb7730eba100bd
              if (!cookies.isEmpty())
                  cookies.append("; "_s);
              if (!cookie.name.isEmpty())
-@@ -100,30 +156,196 @@ NetworkStorageSession::NetworkStorageSession(PAL::SessionID sessionID, const Str
+@@ -100,13 +156,132 @@ NetworkStorageSession::NetworkStorageSession(PAL::SessionID sessionID, const Str
  
  NetworkStorageSession::~NetworkStorageSession()
  {
@@ -104156,8 +104599,8 @@ index 20aff066ab01aa0fa12c7bf47741b0109d927eea..2d2302f5fdbdc9695bfb7730eba100bd
      m_cookieDatabase = WTF::move(cookieDatabase);
 +    if (m_cookieDatabaseChangeHandler)
 +        this->cookieDatabase().setCookieChangeHandler(m_cookieDatabaseChangeHandler.copyRef());
- }
- 
++}
++
 +void NetworkStorageSession::setCookieChangeHandler(RefPtr<CookieJarDB::ChangeHandler>&& handler)
 +{
 +    m_cookieChangeHandler = WTF::move(handler);
@@ -104270,12 +104713,12 @@ index 20aff066ab01aa0fa12c7bf47741b0109d927eea..2d2302f5fdbdc9695bfb7730eba100bd
 +            m_cookieChangeObservers.remove(it);
 +    }
 +    updateCookieDatabaseChangeHandler();
-+}
+ }
 +#endif
-+
+ 
  CookieJarDB& NetworkStorageSession::cookieDatabase() const
  {
-     m_cookieDatabase->open();
+@@ -114,16 +289,63 @@ CookieJarDB& NetworkStorageSession::cookieDatabase() const
      return m_cookieDatabase;
  }
  
@@ -104414,7 +104857,19 @@ index 20aff066ab01aa0fa12c7bf47741b0109d927eea..2d2302f5fdbdc9695bfb7730eba100bd
      completionHandler();
  }
  
-@@ -222,31 +473,59 @@ void NetworkStorageSession::getHostnamesWithCookies(HashSet<String>& hostnames)
+@@ -212,6 +463,11 @@ void NetworkStorageSession::deleteCookiesForHostnames(std::span<const String> co
+     completionHandler();
+ }
+ 
++Vector<Cookie> NetworkStorageSession::domCookiesForHost(const URL& url)
++{
++    return cookieDatabase().domCookiesForHost(url);
++}
++
+ Vector<Cookie> NetworkStorageSession::getAllCookies()
+ {
+     return cookieDatabase().getAllCookies();
+@@ -222,31 +478,59 @@ void NetworkStorageSession::getHostnamesWithCookies(HashSet<String>& hostnames)
      hostnames = cookieDatabase().allDomains();
  }
  
@@ -115262,10 +115717,10 @@ index 6dd22f73b283ae494612fc5c2d6a1cbe65e352d8..767947d096ab130663bbb201765cb84d
      NativeWebWheelEvent(WebWheelEventInit&&, const MSG&);
  
 diff --git a/Source/WebKit/Shared/NetworkStorageSession.cpp b/Source/WebKit/Shared/NetworkStorageSession.cpp
-index 93795a9a7c59feb8b5fcccdbb0f79c4f722057fc..f19c98f29bb5248399327be62e660987b5f4844c 100644
+index 93795a9a7c59feb8b5fcccdbb0f79c4f722057fc..de6d22bf219eba873e69c2c524e9e5f054403a78 100644
 --- a/Source/WebKit/Shared/NetworkStorageSession.cpp
 +++ b/Source/WebKit/Shared/NetworkStorageSession.cpp
-@@ -40,11 +40,56 @@
+@@ -40,18 +40,63 @@
  #include <wtf/RuntimeApplicationChecks.h>
  #include <wtf/TZoneMallocInlines.h>
  
@@ -115279,6 +115734,7 @@ index 93795a9a7c59feb8b5fcccdbb0f79c4f722057fc..f19c98f29bb5248399327be62e660987
  
  WTF_MAKE_TZONE_ALLOCATED_IMPL(NetworkStorageSession);
  
+-#if !PLATFORM(COCOA) && !USE(SOUP)
 +#if PLATFORM(HAIKU)
 +// Sites where the user allows cross-site cookies (Summit #141): third parties
 +// embedded in their pages keep their cookies, as if tracking prevention were
@@ -115319,9 +115775,17 @@ index 93795a9a7c59feb8b5fcccdbb0f79c4f722057fc..f19c98f29bb5248399327be62e660987
 +}
 +#endif
 +
- #if !PLATFORM(COCOA) && !USE(SOUP)
++#if !PLATFORM(COCOA) && !USE(SOUP) && !USE(CURL)
  Vector<Cookie> NetworkStorageSession::domCookiesForHost(const URL&)
  {
+     ASSERT_NOT_IMPLEMENTED_YET();
+     return { };
+ }
+-#endif // !PLATFORM(COCOA) && !USE(SOUP)
++#endif // !PLATFORM(COCOA) && !USE(SOUP) && !USE(CURL)
+ 
+ #if !USE(SOUP)
+ void NetworkStorageSession::setTrackingPreventionEnabled(bool enabled)
 @@ -156,6 +201,11 @@ ThirdPartyCookieBlockingDecision NetworkStorageSession::thirdPartyCookieBlocking
      if (hasStorageAccess(resourceDomain, firstPartyDomain, grantFrameID, webPageProxyID) && !isInitiatedByDedicatedWorker)
          return ThirdPartyCookieBlockingDecision::None;
@@ -206411,18 +206875,81 @@ index ef7265c051a15504903ee0421ca40f29d7b47b9c..a8aeff45e3fcdd7b4142cf5751ed95f0
      const std::unique_ptr<WebCore::WheelEventDeltaFilter> m_recentWheelEventDeltaFilter;
  #if ENABLE(IOS_TOUCH_EVENTS)
 diff --git a/Source/WebKit/WebProcess/WebPage/WebCookieCache.cpp b/Source/WebKit/WebProcess/WebPage/WebCookieCache.cpp
-index f324721687b09bd595afac6a2125075b3d5f0d5d..93434044baaaf0ef869153f5b8b737521c82ee25 100644
+index f324721687b09bd595afac6a2125075b3d5f0d5d..8348d7dc2b99e6f07ac8892bff8436f2c34a54c3 100644
 --- a/Source/WebKit/WebProcess/WebPage/WebCookieCache.cpp
 +++ b/Source/WebKit/WebProcess/WebPage/WebCookieCache.cpp
-@@ -41,7 +41,7 @@ WebCookieCache::~WebCookieCache() = default;
+@@ -31,6 +31,11 @@
+ #include "WebCookieJar.h"
+ #include "WebProcess.h"
+ #include <WebCore/Cookie.h>
++#if USE(CURL)
++#include "NetworkStorageSession.h"
++#include <WebCore/CookieJarDB.h>
++#include <WebCore/HTTPCookieAcceptPolicy.h>
++#endif
+ #include <wtf/text/StringBuilder.h>
+ 
+ namespace WebKit {
+@@ -41,7 +46,16 @@ WebCookieCache::~WebCookieCache() = default;
  
  bool WebCookieCache::isSupported()
  {
 -#if HAVE(COOKIE_CHANGE_LISTENER_API)
-+#if HAVE(COOKIE_CHANGE_LISTENER_API) && !USE(CURL)
++#if HAVE(COOKIE_CHANGE_LISTENER_API) && USE(CURL)
++    // First-party document.cookie reads are answered here instead of with a
++    // synchronous message to the network process and an SQL query there
++    // (#207). SUMMIT_COOKIE_CACHE=0 sends every read to the network process.
++    static const bool enabled = [] {
++        const char* value = getenv("SUMMIT_COOKIE_CACHE");
++        return !value || strcmp(value, "0");
++    }();
++    return enabled;
++#elif HAVE(COOKIE_CHANGE_LISTENER_API)
      return true;
  #else
      return false;
+@@ -167,7 +181,40 @@ void WebCookieCache::pruneCacheIfNecessary()
+         clearForHost(*m_hostsWithInMemoryStorage.random());
+ }
+ 
+-#if !PLATFORM(COCOA) && !USE(SOUP)
++#if USE(CURL)
++NetworkStorageSession& WebCookieCache::inMemoryStorageSession()
++{
++    if (!m_inMemoryStorageSession) {
++        // No Alt-Svc directory: this session never makes requests. The jar it
++        // starts with names the profile's cookie file but is replaced before
++        // anything opens it.
++        m_inMemoryStorageSession = makeUnique<NetworkStorageSession>(WebProcess::singleton().sessionID());
++        m_inMemoryStorageSession->setCookieDatabase(makeUniqueRef<CookieJarDB>(":memory:"_s));
++
++        auto policy = CookieAcceptPolicy::OnlyFromMainDocumentDomain;
++        switch (WebProcess::singleton().ensureNetworkProcessConnection().cookieAcceptPolicy()) {
++        case HTTPCookieAcceptPolicy::AlwaysAccept:
++            policy = CookieAcceptPolicy::Always;
++            break;
++        case HTTPCookieAcceptPolicy::Never:
++            policy = CookieAcceptPolicy::Never;
++            break;
++        case HTTPCookieAcceptPolicy::OnlyFromMainDocumentDomain:
++            policy = CookieAcceptPolicy::OnlyFromMainDocumentDomain;
++            break;
++        case HTTPCookieAcceptPolicy::ExclusivelyFromMainDocumentDomain:
++            policy = CookieAcceptPolicy::ExclusivelyFromMainDocumentDomain;
++            break;
++        }
++        m_inMemoryStorageSession->setCookieAcceptPolicy(policy);
++    }
++    return *m_inMemoryStorageSession;
++}
++
++void WebCookieCache::setOptInCookiePartitioningEnabled(bool)
++{
++}
++#elif !PLATFORM(COCOA) && !USE(SOUP)
+ NetworkStorageSession& WebCookieCache::inMemoryStorageSession()
+ {
+     ASSERT_NOT_IMPLEMENTED_YET();
 diff --git a/Source/WebKit/WebProcess/WebPage/WebCookieJar.cpp b/Source/WebKit/WebProcess/WebPage/WebCookieJar.cpp
 index 79d0d01bad64d238a36b8159489bb510891fc025..14ee124a340455b53b33b67501df01a880a15f48 100644
 --- a/Source/WebKit/WebProcess/WebPage/WebCookieJar.cpp
