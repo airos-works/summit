@@ -37,6 +37,7 @@
 #include "core/Zoom.h"
 #include "core/PageLanguage.h"
 #include <Alert.h>
+#include <Input.h>
 #include <Bitmap.h>
 #include <Clipboard.h>
 #include <ControlLook.h>
@@ -1337,6 +1338,36 @@ status_t BrowserWindow::RunScrollBurst(void* data)
     const bigtime_t started = system_time();
     int32 sent = 0;
     status_t result = B_OK;
+    if (!burst->gesture.empty()) {
+        // As air/OS's input server sends a touchpad's scroll gesture: a
+        // began message without movement, a changed one for each report that
+        // moved, an ended one; each with its own time, which kinetic
+        // scrolling measures the speed with. Paced on absolute times.
+        bigtime_t due = started;
+        const size_t messages = burst->gesture.size();
+        for (size_t index = 0; index < messages && result == B_OK; ++index) {
+            const auto& step = burst->gesture[index];
+            due += step.delay;
+            snooze_until(due, B_SYSTEM_TIMEBASE);
+            // B_WHEEL_PHASE_BEGAN, _CHANGED and _ENDED of air/OS's <Input.h>
+            // (stock Haiku's has no phases).
+            const int32 phase = index == 0 ? 1 : index + 1 == messages ? 3 : 2;
+            const bool moves = phase == 2;
+            burst->event.ReplaceInt64("when", system_time());
+            burst->event.ReplaceFloat("be:wheel_precise_delta_x", moves ? step.dx : 0);
+            burst->event.ReplaceFloat("be:wheel_precise_delta_y", moves ? step.dy : 0);
+            burst->event.ReplaceInt32("be:wheel_phase", phase);
+            result = burst->view.SendMessage(&burst->event, static_cast<BHandler*>(nullptr), 2000000);
+            if (result == B_OK)
+                ++sent;
+        }
+        BMessage completed(kScrollBurstCompleted);
+        completed.AddInt32("sent", sent);
+        completed.AddInt32("status", result);
+        completed.AddInt64("duration_us", system_time() - started);
+        burst->window.SendMessage(&completed);
+        return result;
+    }
     for (int32 index = 0; index < burst->count; ++index) {
         // A full view port throttles the burst instead of dropping events.
         result = burst->view.SendMessage(&burst->event, static_cast<BHandler*>(nullptr), 2000000);
@@ -1390,8 +1421,32 @@ void BrowserWindow::SimulateScroll(const BMessage& message, BMessage& reply)
     burst->count = count;
     burst->interval = bigtime_t(interval) * 1000;
     burst->event.what = B_MOUSE_WHEEL_CHANGED;
-    burst->event.AddFloat("be:wheel_delta_x", deltaX);
-    burst->event.AddFloat("be:wheel_delta_y", delta);
+    // gesture_delay_ms, gesture_dx, gesture_dy: a touchpad gesture's steps.
+    for (int32 index = 0; ; ++index) {
+        float stepDelay, stepX, stepY;
+        if (message.FindFloat("gesture_delay_ms", index, &stepDelay) != B_OK
+            || message.FindFloat("gesture_dx", index, &stepX) != B_OK
+            || message.FindFloat("gesture_dy", index, &stepY) != B_OK)
+            break;
+        if (!std::isfinite(stepDelay) || stepDelay < 0 || stepDelay > 10000 || !std::isfinite(stepX)
+            || !std::isfinite(stepY) || std::fabs(stepX) > 1000 || std::fabs(stepY) > 1000 || index >= 100000) {
+            reply.AddString("error", "unusable gesture step");
+            return;
+        }
+        burst->gesture.push_back({ bigtime_t(stepDelay * 1000), stepX, stepY });
+    }
+    if (!burst->gesture.empty()) {
+        burst->event.AddInt64("when", system_time());
+        burst->event.AddFloat("be:wheel_delta_x", 0);
+        burst->event.AddFloat("be:wheel_delta_y", 0);
+        burst->event.AddInt32("be:device_subtype", B_TOUCHPAD_POINTING_DEVICE);
+        burst->event.AddFloat("be:wheel_precise_delta_x", 0);
+        burst->event.AddFloat("be:wheel_precise_delta_y", 0);
+        burst->event.AddInt32("be:wheel_phase", 1);
+    } else {
+        burst->event.AddFloat("be:wheel_delta_x", deltaX);
+        burst->event.AddFloat("be:wheel_delta_y", delta);
+    }
     // A wheel notch applies where the pointer is. Name the middle of the page
     // instead of moving the pointer, so a burst does not take the mouse away
     // from whoever is using the machine.

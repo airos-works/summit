@@ -61,6 +61,8 @@ public:
     // Free-form JSON (an object of protocol parameters).
     Schema& Object(const char* name, const char* description, bool required = false);
     Schema& StringArray(const char* name, const char* description, bool required = false);
+    // A list of rows of numbers ([[1, 2.5, 3], ...]).
+    Schema& NumberRows(const char* name, const char* description, bool required = false);
     operator Json() const;
 
 private:

@@ -104,6 +104,12 @@ Schema& Schema::StringArray(const char* name, const char* description, bool requ
     return Add(name, {{"type", "array"}, {"items", {{"type", "string"}}}, {"description", description}}, required);
 }
 
+Schema& Schema::NumberRows(const char* name, const char* description, bool required)
+{
+    return Add(name, {{"type", "array"}, {"items", {{"type", "array"}, {"items", {{"type", "number"}}}}},
+        {"description", description}}, required);
+}
+
 Schema::operator Json() const
 {
     Json schema = {{"type", "object"}, {"properties", fProperties}};

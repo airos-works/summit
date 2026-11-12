@@ -373,6 +373,13 @@ std::string BrowserWindow::McpRequest(const std::string& text)
         burst.AddInt32("interval_ms", std::clamp(request.value("interval_ms", 16), 0, 1000));
         burst.AddFloat("delta", float(request.value("delta", 3.0)));
         burst.AddFloat("delta_x", float(request.value("delta_x", 0.0)));
+        if (request.contains("gesture")) {
+            for (const auto& step : request["gesture"]) {
+                burst.AddFloat("gesture_delay_ms", step.at(0).get<float>());
+                burst.AddFloat("gesture_dx", step.at(1).get<float>());
+                burst.AddFloat("gesture_dy", step.at(2).get<float>());
+            }
+        }
         if (request.contains("x") || request.contains("y")) {
             const BRect bounds = tab->view->Bounds();
             burst.AddPoint("at", BPoint(request.value("x", bounds.Width() / 2), request.value("y", bounds.Height() / 2)));

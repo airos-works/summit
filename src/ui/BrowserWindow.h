@@ -540,6 +540,14 @@ private:
         BMessage event;
         int32 count = 0;
         bigtime_t interval = 16666;
+        // A touchpad gesture instead of wheel notches: each step's time after
+        // the one before and its precise deltas (began, changed..., ended).
+        struct GestureStep {
+            bigtime_t delay;
+            float dx;
+            float dy;
+        };
+        std::vector<GestureStep> gesture;
     };
     bool fScrollBurstActive = false;
     int32 fScrollBurstRequested = 0;

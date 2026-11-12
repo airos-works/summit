@@ -33533,7 +33533,7 @@ index c814f8594668d14423d1bba0bc1df0e17ff98088..66a0f22d9c3fe8e6284d801e6f1c4b12
  };
  
 diff --git a/Source/WebCore/platform/ScrollAnimationKinetic.cpp b/Source/WebCore/platform/ScrollAnimationKinetic.cpp
-index dd2f0588852684a249ac7b175a1e775ad35bbd2b..7ac12fca8477b0b5b62cb7e6f26d543bc42f8e44 100644
+index dd2f0588852684a249ac7b175a1e775ad35bbd2b..b6f2bce882e51d26a9aa82dd0d3f791c023db1e0 100644
 --- a/Source/WebCore/platform/ScrollAnimationKinetic.cpp
 +++ b/Source/WebCore/platform/ScrollAnimationKinetic.cpp
 @@ -87,6 +87,15 @@ ScrollAnimationKinetic::PerAxisData::PerAxisData(double lower, double upper, dou
@@ -33552,6 +33552,30 @@ index dd2f0588852684a249ac7b175a1e775ad35bbd2b..7ac12fca8477b0b5b62cb7e6f26d543b
      auto lastOffset = m_offset;
      auto lastTime = m_elapsedTime;
      m_elapsedTime = elapsedTime;
+@@ -148,9 +157,23 @@ FloatSize ScrollAnimationKinetic::computeVelocity()
+         accumDelta += FloatPoint(scrollEvent.deltaX(), scrollEvent.deltaY());
+ 
+     // FIXME: It's odd that computeVelocity() has the side effect of clearing history.
++#if PLATFORM(HAIKU)
++    // The movement of the last 150 ms over the time it took. A gesture that
++    // began before then moved all that time, also where no event came: a
++    // slow touchpad scroll sends one every few hundred milliseconds, and its
++    // last step and the gesture's end, 30 ms apart, made a speed ten times
++    // the finger's (a 10 pixel step glided on 70 pixels). A gesture that
++    // began within it (a flick) is measured from its start.
++    const bool beganInHistory = m_scrollHistory[0].phase() == PlatformWheelEventPhase::Began;
++    const Seconds span = beganInHistory ? last - first : std::max(last - first, scrollCaptureThreshold);
++    m_scrollHistory.clear();
++
++    return FloatSize(accumDelta.x() * -1 / span.value(), accumDelta.y() * -1 / span.value());
++#else
+     m_scrollHistory.clear();
+ 
+     return FloatSize(accumDelta.x() * -1 / (last - first).value(), accumDelta.y() * -1 / (last - first).value());
++#endif
+ }
+ 
+ bool ScrollAnimationKinetic::startAnimatedScrollWithInitialVelocity(const FloatPoint& initialOffset, const FloatSize& velocity, const FloatSize& previousVelocity, bool mayHScroll, bool mayVScroll)
 diff --git a/Source/WebCore/platform/ScrollAnimationSmooth.cpp b/Source/WebCore/platform/ScrollAnimationSmooth.cpp
 index 9f27c732ae47f8edc572d51a1a90f19157fffd6a..547e04a793b6f117be0c27b43df493bf08448063 100644
 --- a/Source/WebCore/platform/ScrollAnimationSmooth.cpp

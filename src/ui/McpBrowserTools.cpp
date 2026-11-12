@@ -385,12 +385,28 @@ void RegisterMcpBrowserTools(mcp::Server& server, const std::shared_ptr<McpConte
         "Scrolls a tab's page with mouse wheel messages at a point (default the middle): one event of dy notches "
         "(positive scrolls down), or with count a burst paced at interval_ms (default 16 ms, as a fast wheel), "
         "which frame_stats can then measure. With phase, one touchpad message instead: dx/dy in fractions of a "
-        "step (air/OS's precise deltas) at that point of a gesture.",
+        "step (air/OS's precise deltas) at that point of a gesture. With gesture, a whole touchpad gesture paced "
+        "in time: [[ms after the step before, dx, dy], ...] in fractions of a step, the first step sent as began "
+        "(no movement), the last as ended, the others as changed.",
         Schema().String("tab", kTabArgument).Number("dy", "Vertical notches per event (default 3)").Number("dx", "Horizontal notches")
             .Number("x", "X in the page view").Number("y", "Y in the page view").Integer("count", "Events in a burst")
             .Integer("interval_ms", "Time between burst events").Boolean("activate", "Select the tab and raise the window first")
-            .String("phase", "A touchpad gesture's message: began, changed or ended (ended sends no movement)"),
+            .String("phase", "A touchpad gesture's message: began, changed or ended (ended sends no movement)")
+            .NumberRows("gesture", "A touchpad gesture: [[delay_ms, dx, dy], ...] (began, changed..., ended)"),
         [input](const Json& arguments) {
+            if (arguments.contains("gesture")) {
+                const Json& steps = arguments["gesture"];
+                if (!steps.is_array() || steps.size() < 2 || steps.size() > 100000)
+                    return ToolResult::Error("gesture is a list of at least two [delay_ms, dx, dy] steps");
+                for (const auto& step : steps) {
+                    if (!step.is_array() || step.size() != 3 || !step[0].is_number() || !step[1].is_number() || !step[2].is_number())
+                        return ToolResult::Error("each gesture step is [delay_ms, dx, dy]");
+                }
+                Json request = {{"action", "burst"}, {"count", 1}, {"interval_ms", 0}, {"gesture", steps}};
+                if (mcp::HasArgument(arguments, "x")) request["x"] = mcp::NumberArgument(arguments, "x", 0);
+                if (mcp::HasArgument(arguments, "y")) request["y"] = mcp::NumberArgument(arguments, "y", 0);
+                return input(arguments, request);
+            }
             if (mcp::HasArgument(arguments, "count")) {
                 Json request = {{"action", "burst"}, {"count", mcp::IntegerArgument(arguments, "count", 30, 1, 10000)},
                     {"interval_ms", mcp::IntegerArgument(arguments, "interval_ms", 16, 0, 1000)},
