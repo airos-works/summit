@@ -326,6 +326,16 @@ make small reads and copies cheap.
 `haiku_mesa_shared_target_*`) instead of being copied by the CPU; small
 damage is copied by the CPU so the buffer stays the CPU's.
 
+**Since 31 October** (haiku#49): the V3D driver imports a team's pages
+(`V3D_HAIKU_IMPORT_BO`, ranged `CPU_PREPARE`), and mesa-rpi4 has
+`summit_haiku_present_*`, so the Pi presents directly. Until mesa-rpi4
+eae51af (13 November, airos-ci 46684b9; upstream Mesa 70fec0194d4a) the
+V3D driver clamped UBO loads in robust contexts, as WebKit's are, with
+constant buffer 0's size: the present's copy shader read each copy's place
+in the page as its offset and row length in the screen, and wrote sheared
+stripes into the screen's top rows (summit#225). On an image older than
+that, `SUMMIT_DIRECT_PRESENT=0` avoids it.
+
 ### Writes to the SD card hold up other processes for seconds
 
 The card is run at 25 MHz default speed and writes at ~1.4 MB/s. While
