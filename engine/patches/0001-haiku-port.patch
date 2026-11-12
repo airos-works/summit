@@ -22384,6 +22384,20 @@ index 7dba487e979fa82a190a72ba7961e05dfefa20ce..d8cabc232cf47ae318fe2a1de0cb5a16
  JSPhotoCapabilities.cpp
  JSPhotoSettings.cpp
  JSPictureInPictureEvent.cpp
+diff --git a/Source/WebCore/accessibility/AXObjectCache.cpp b/Source/WebCore/accessibility/AXObjectCache.cpp
+index 43dc4f03966450fd070bab03a5ee20a2878330d2..a54912a31482f1658826bfc1475b58595710f39d 100644
+--- a/Source/WebCore/accessibility/AXObjectCache.cpp
++++ b/Source/WebCore/accessibility/AXObjectCache.cpp
+@@ -2010,6 +2010,9 @@ void AXObjectCache::handleLiveRegionCreated(Element& element)
+ #if PLATFORM(COCOA)
+         if (!m_liveRegionManager)
+             postNotification(axObject.get(), protect(document()).get(), AXNotification::LiveRegionCreated);
++#elif PLATFORM(HAIKU)
++        // air/OS's screen reader says a new alert (summit#226).
++        postNotification(axObject.get(), protect(document()).get(), AXNotification::LiveRegionCreated);
+ #endif
+     }
+ }
 diff --git a/Source/WebCore/accessibility/AccessibilityObject.cpp b/Source/WebCore/accessibility/AccessibilityObject.cpp
 index eaf3aee12b98b01a9d97a71cecdee1af09b66458..403ac738b6839c419959fe55310cc6f2b951eaf8 100644
 --- a/Source/WebCore/accessibility/AccessibilityObject.cpp
@@ -22398,7 +22412,7 @@ index eaf3aee12b98b01a9d97a71cecdee1af09b66458..403ac738b6839c419959fe55310cc6f2
              ranges = { { treeID(), objectID(), static_cast<unsigned>(location), static_cast<unsigned>(length) } };
      }
 diff --git a/Source/WebCore/accessibility/playstation/AXObjectCachePlayStation.cpp b/Source/WebCore/accessibility/playstation/AXObjectCachePlayStation.cpp
-index 27ff2f14f28c9e87747ac02ddde34549545c9aa1..5c7fadd1505554bff6e340a0f8c66b7af54b16f0 100644
+index 27ff2f14f28c9e87747ac02ddde34549545c9aa1..98ee99135626c748c450d31254f5ba9abe95c204 100644
 --- a/Source/WebCore/accessibility/playstation/AXObjectCachePlayStation.cpp
 +++ b/Source/WebCore/accessibility/playstation/AXObjectCachePlayStation.cpp
 @@ -86,7 +86,7 @@ static AXNotification checkInteractableObjects(AXCoreObject* object)
@@ -22410,6 +22424,22 @@ index 27ff2f14f28c9e87747ac02ddde34549545c9aa1..5c7fadd1505554bff6e340a0f8c66b7a
          || !object.document()->view()
          || object.document()->view()->layoutContext().layoutState()
          || object.document()->childNeedsStyleRecalc())
+@@ -149,8 +149,15 @@ void AXObjectCache::platformHandleFocusedUIElementChanged(AccessibilityObject*,
+         return;
+ 
+     Page* page = newFocus->page();
++#if PLATFORM(HAIKU)
++    // WebKit's pages have no platform page client; the WebChromeClient
++    // passes the focus on to air/OS's screen reader (summit#226).
++    if (!page)
++        return;
++#else
+     if (!page || !page->chrome().platformPageClient())
+         return;
++#endif
+ 
+     if (RefPtr focusedObject = focusedObjectForPage(page))
+         postPlatformNotification(*focusedObject, AXNotification::FocusedUIElementChanged);
 diff --git a/Source/WebCore/animation/KeyframeEffect.cpp b/Source/WebCore/animation/KeyframeEffect.cpp
 index 341ea6e69eeb97a36a3894476b45c5c27a089b43..c0041576128e6a86673dfef61ee6936cdb78266b 100644
 --- a/Source/WebCore/animation/KeyframeEffect.cpp
@@ -112415,10 +112445,10 @@ index 0000000000000000000000000000000000000000..abdba4dff009ff314eecd9f825a128aa
 +} // namespace WebKit
 diff --git a/Source/WebKit/PlatformHaiku.cmake b/Source/WebKit/PlatformHaiku.cmake
 new file mode 100644
-index 0000000000000000000000000000000000000000..c42c267ae8300d695b4b796d3169f6f957d3ea47
+index 0000000000000000000000000000000000000000..bc0cb34000503fd32da0cbf4b71686f50248fca6
 --- /dev/null
 +++ b/Source/WebKit/PlatformHaiku.cmake
-@@ -0,0 +1,618 @@
+@@ -0,0 +1,620 @@
 +include(Headers.cmake)
 +include(Platform/Curl.cmake)
 +
@@ -112550,6 +112580,7 @@ index 0000000000000000000000000000000000000000..c42c267ae8300d695b4b796d3169f6f9
 +    UIProcess/haiku/MemoryPressureMonitorHaiku.cpp
 +    UIProcess/haiku/TextCheckerHaiku.cpp
 +    UIProcess/haiku/WebPageProxyHaiku.cpp
++    UIProcess/haiku/AccessibilityMirrorHaiku.cpp
 +    UIProcess/haiku/WebColorPickerHaiku.cpp
 +    UIProcess/haiku/WebDateTimePickerHaiku.cpp
 +    UIProcess/haiku/WebDataListSuggestionsDropdownHaiku.cpp
@@ -112572,6 +112603,7 @@ index 0000000000000000000000000000000000000000..c42c267ae8300d695b4b796d3169f6f9
 +    WebProcess/Extensions/Bindings/JSWebExtensionWrapper.cpp
 +    WebProcess/InjectedBundle/haiku/InjectedBundleHaiku.cpp
 +    WebProcess/WebPage/haiku/WebPageHaiku.cpp
++    WebProcess/WebPage/haiku/WebPageAccessibilityHaiku.cpp
 +    WebProcess/WebPage/haiku/PDFPrintingHaiku.cpp
 +    WebProcess/haiku/WebProcessDiagnosticsHaiku.cpp
 +    WebProcess/haiku/WebProcessHaiku.cpp
@@ -124030,10 +124062,10 @@ index 0000000000000000000000000000000000000000..d28a6cad6339adf79b155cf974e85bfd
 +
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp b/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..aa0155a5c0c287bf80126c896553222515d058e8
+index 0000000000000000000000000000000000000000..7f8691614975c22bbcaf3d7c8aaad37cc2ced8e7
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp
-@@ -0,0 +1,1573 @@
+@@ -0,0 +1,1588 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -124060,6 +124092,7 @@ index 0000000000000000000000000000000000000000..aa0155a5c0c287bf80126c8965532225
 +#include "DirectPresentTargetHaiku.h"
 +#include "PresentStatsHaiku.h"
 +#include "WebExtensionTimingHaiku.h"
++#include "AccessibilityMirrorHaiku.h"
 +#include <Application.h>
 +#include <Cursor.h>
 +#include <WebCore/Cursor.h>
@@ -124840,6 +124873,10 @@ index 0000000000000000000000000000000000000000..aa0155a5c0c287bf80126c8965532225
 +        Window()->AddCommonFilter(m_state->windowFilter);
 +    }
 +    m_state->onCurrentWorkspace = windowOnCurrentWorkspaceHaiku(*Window());
++    // The page for air/OS's screen reader (summit#226): only an object
++    // attached to the view until a screen reader looks at it.
++    if (!m_state->accessibility)
++        m_state->accessibility = WebKit::AccessibilityMirrorHaiku::create(*this, m_state);
 +    UpdateGeometry();
 +}
 +
@@ -124847,6 +124884,8 @@ index 0000000000000000000000000000000000000000..aa0155a5c0c287bf80126c8965532225
 +
 +void BWebKitView::DetachedFromWindow()
 +{
++    // Its nodes are deleted with the window locked, as the interface wants.
++    m_state->accessibility = nullptr;
 +    ++m_state->nativeDropRequest;
 +    if (m_state->pointerLocked) {
 +        // The page can't have the pointer without the view: show it again.
@@ -125556,6 +125595,14 @@ index 0000000000000000000000000000000000000000..aa0155a5c0c287bf80126c8965532225
 +        return;
 +    case WebKit::viewPointerLockHaiku:
 +        setPointerLockedHaiku(*this, *m_state, message->GetBool("locked", false));
++        return;
++    case WebKit::viewAccessibilityTreeHaiku:
++        if (m_state->accessibility)
++            m_state->accessibility->treeArrived(*message);
++        return;
++    case WebKit::viewAccessibilityChangedHaiku:
++        if (m_state->accessibility)
++            m_state->accessibility->changed(*message);
 +        return;
 +    case viewCursorHaiku: {
 +        auto type = static_cast<WebCore::Cursor::Type>(message->GetUInt32("cursor_type", 0));
@@ -155696,7 +155743,7 @@ index 3f32fc7518d0318997e6bfc56b4440e834e0a31e..41305411f66be6bb786ba9a7555c1254
      DeleteWebsiteDataInWebProcessesForOrigin(OptionSet<WebKit::WebsiteDataType> websiteDataTypes, struct WebCore::ClientOrigin origin, PAL::SessionID sessionID, WebKit::WebPageProxyIdentifier webPageProxyID) -> ()
      ReloadExecutionContextsForOrigin(struct WebCore::ClientOrigin origin, PAL::SessionID sessionID, std::optional<WebCore::FrameIdentifier> triggeringFrame) -> ()
 diff --git a/Source/WebKit/UIProcess/PageClient.h b/Source/WebKit/UIProcess/PageClient.h
-index 69bcb99cf5da330d75b81fe8f53dec86a972175e..161bba099b54f1c115eb73e82678a6dfe20a97d9 100644
+index 69bcb99cf5da330d75b81fe8f53dec86a972175e..cc78d6df89bc455e16533047e36c85a59be7e574 100644
 --- a/Source/WebKit/UIProcess/PageClient.h
 +++ b/Source/WebKit/UIProcess/PageClient.h
 @@ -153,6 +153,7 @@ template <typename> class RectEdges;
@@ -155707,12 +155754,13 @@ index 69bcb99cf5da330d75b81fe8f53dec86a972175e..161bba099b54f1c115eb73e82678a6df
  #endif
  
  #if ENABLE(ATTACHMENT_ELEMENT)
-@@ -263,6 +264,12 @@ public:
+@@ -263,6 +264,13 @@ public:
      // Tell the view to invalidate the given region. The region is in view coordinates.
      virtual void setViewNeedsDisplay(const WebCore::Region&) = 0;
  
 +#if PLATFORM(HAIKU)
 +    virtual void didFallBackToSoftwareRenderingHaiku() { }
++    virtual void accessibilityChangedHaiku(uint64_t /* focusedNode */, const String& /* announcement */, bool /* assertive */, const String& /* nodes */, bool /* treeChanged */) { }
 +    // Complete on the WebKit main thread after presentation or view teardown.
 +    virtual void presentBitmapHaiku(Ref<WebCore::ShareableBitmap>&&, const WebCore::IntSize&, float, CompletionHandler<void()>&& completionHandler) { completionHandler(); }
 +#endif
@@ -155720,7 +155768,7 @@ index 69bcb99cf5da330d75b81fe8f53dec86a972175e..161bba099b54f1c115eb73e82678a6df
      // Tell the view to scroll to the given position, and whether this was a programmatic scroll.
      virtual void requestScroll(const WebCore::FloatPoint& scrollPosition, const WebCore::IntPoint& scrollOrigin, WebCore::ScrollIsAnimated, WebCore::InterruptScrollAnimation) = 0;
  
-@@ -373,6 +380,9 @@ public:
+@@ -373,6 +381,9 @@ public:
      virtual void startDrag(WebCore::SelectionData&&, OptionSet<WebCore::DragOperation>, RefPtr<WebCore::ShareableBitmap>&& dragImage, WebCore::IntPoint&& dragImageHotspot) = 0;
  #else
      virtual void startDrag(const WebCore::DragItem&, WebCore::ShareableBitmap::Handle&&, const std::optional<WebCore::NodeIdentifier>&, const std::optional<WebCore::FrameIdentifier>&) { }
@@ -155730,7 +155778,7 @@ index 69bcb99cf5da330d75b81fe8f53dec86a972175e..161bba099b54f1c115eb73e82678a6df
  #endif
      virtual void didPerformDragOperation(bool) { }
      virtual void didPerformDragControllerAction() { }
-@@ -672,6 +682,18 @@ public:
+@@ -672,6 +683,18 @@ public:
      virtual void cancelTextRecognitionForVideoInElementFullscreen() { }
  #endif
  
@@ -160337,7 +160385,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..789fc5547a6c30bb0c0df27056aafdb2
  #endif
  
 diff --git a/Source/WebKit/UIProcess/WebPageProxy.h b/Source/WebKit/UIProcess/WebPageProxy.h
-index 30bfad6de4894bb5b8aeaf5d1d31cf4df4091e3a..c4ade4dd294f9ed4dade0dda26bfab25904dad02 100644
+index 30bfad6de4894bb5b8aeaf5d1d31cf4df4091e3a..c15403b4c886ff7cb8199010904e0e7e7bd604b2 100644
 --- a/Source/WebKit/UIProcess/WebPageProxy.h
 +++ b/Source/WebKit/UIProcess/WebPageProxy.h
 @@ -152,6 +152,7 @@ class Cursor;
@@ -160348,12 +160396,13 @@ index 30bfad6de4894bb5b8aeaf5d1d31cf4df4091e3a..c4ade4dd294f9ed4dade0dda26bfab25
  class Exception;
  class FloatPoint;
  class FloatQuad;
-@@ -1138,6 +1139,18 @@ public:
+@@ -1138,6 +1139,19 @@ public:
      void clearSelection(std::optional<WebCore::FrameIdentifier> = std::nullopt);
      void restoreSelectionInFocusedEditableElement();
  
 +#if PLATFORM(HAIKU)
 +    void didFallBackToSoftwareRenderingHaiku();
++    void accessibilityChangedHaiku(uint64_t focusedNode, String&& announcement, bool assertive, String&& nodes, bool treeChanged);
 +#endif
 +#if ENABLE(CUSTOM_PROTOCOL_HANDLERS)
 +    void protocolHandlerRequested(IPC::Connection&, WebCore::FrameIdentifier, const String&, IPC::Untrusted<URL>&&, bool);
@@ -160367,7 +160416,7 @@ index 30bfad6de4894bb5b8aeaf5d1d31cf4df4091e3a..c4ade4dd294f9ed4dade0dda26bfab25
      PageClient* NODELETE pageClient() const;
  
      void setViewNeedsDisplay(const WebCore::Region&);
-@@ -1878,6 +1891,9 @@ public:
+@@ -1878,6 +1892,9 @@ public:
  #if PLATFORM(GTK) || PLATFORM(WPE)
      void startDrag(WebCore::SelectionData&&, OptionSet<WebCore::DragOperation>, std::optional<WebCore::ShareableBitmapHandle>&& dragImage, WebCore::IntPoint&& dragImageHotspot);
  #endif
@@ -160377,7 +160426,7 @@ index 30bfad6de4894bb5b8aeaf5d1d31cf4df4091e3a..c4ade4dd294f9ed4dade0dda26bfab25
  #if ENABLE(MODEL_PROCESS)
      void modelDragEnded(const WebCore::NodeIdentifier);
  #endif
-@@ -1985,6 +2001,9 @@ public:
+@@ -1985,6 +2002,9 @@ public:
  #endif
  
      void preferencesDidChange();
@@ -160387,7 +160436,7 @@ index 30bfad6de4894bb5b8aeaf5d1d31cf4df4091e3a..c4ade4dd294f9ed4dade0dda26bfab25
  
  #if ENABLE(CONTEXT_MENUS)
      // Called by the WebContextMenuProxy.
-@@ -3499,6 +3518,10 @@ private:
+@@ -3499,6 +3519,10 @@ private:
  
      // Spelling and grammar.
      void checkSpellingOfString(const String& text, CompletionHandler<void(int32_t misspellingLocation, int32_t misspellingLength)>&&);
@@ -160398,7 +160447,7 @@ index 30bfad6de4894bb5b8aeaf5d1d31cf4df4091e3a..c4ade4dd294f9ed4dade0dda26bfab25
      void checkGrammarOfString(const String& text, CompletionHandler<void(Vector<WebCore::GrammarDetail>&&, int32_t badGrammarLocation, int32_t badGrammarLength)>&&);
      void spellingUIIsShowing(CompletionHandler<void(bool)>&&);
      void updateSpellingUIWithMisspelledWord(const String& misspelledWord);
-@@ -3948,6 +3971,13 @@ private:
+@@ -3948,6 +3972,13 @@ private:
      Ref<WebProcessProxy> m_legacyMainFrameProcess;
      const Ref<WebPageGroup> m_pageGroup;
      Ref<WebPreferences> m_preferences;
@@ -160413,15 +160462,16 @@ index 30bfad6de4894bb5b8aeaf5d1d31cf4df4091e3a..c4ade4dd294f9ed4dade0dda26bfab25
      const Ref<WebUserContentControllerProxy> m_userContentController;
  
 diff --git a/Source/WebKit/UIProcess/WebPageProxy.messages.in b/Source/WebKit/UIProcess/WebPageProxy.messages.in
-index e546b9c0d5424549b7c9ba06641850c46571f772..fc172b98f4d03b32409bffbefb5056127f5fbcea 100644
+index e546b9c0d5424549b7c9ba06641850c46571f772..8a22191955f253e73bc2d005bff383854f70aef7 100644
 --- a/Source/WebKit/UIProcess/WebPageProxy.messages.in
 +++ b/Source/WebKit/UIProcess/WebPageProxy.messages.in
-@@ -27,8 +27,20 @@ Copyright (C) 2010-2024 Apple Inc. All rights reserved.
+@@ -27,8 +27,21 @@ Copyright (C) 2010-2024 Apple Inc. All rights reserved.
      SharedPreferencesNeedsConnection
  ]
  messages -> WebPageProxy {
 +#if PLATFORM(HAIKU)
 +    DidFallBackToSoftwareRenderingHaiku()
++    AccessibilityChangedHaiku(uint64_t focusedNode, String announcement, bool assertive, String nodes, bool treeChanged)
 +#endif
 +#if ENABLE(WEBUSB)
 +    UsbRequest(WebCore::FrameIdentifier frameID, String arguments, Vector<uint8_t> bytes) -> (String response, Vector<uint8_t> data)
@@ -160437,7 +160487,7 @@ index e546b9c0d5424549b7c9ba06641850c46571f772..fc172b98f4d03b32409bffbefb505612
      ShowPage()
      ClosePage()
      RunJavaScriptAlert(WebCore::FrameIdentifier frameID, struct WebKit::FrameInfoData frameInfo, String message) -> () Synchronous
-@@ -339,6 +351,10 @@ messages -> WebPageProxy {
+@@ -339,6 +352,10 @@ messages -> WebPageProxy {
      CheckTextOfParagraph(String text, OptionSet<WebCore::TextCheckingType> checkingTypes, int32_t insertionPoint) -> (Vector<WebCore::TextCheckingResult> results) Synchronous
  #endif
      CheckSpellingOfString(String text) -> (int32_t misspellingLocation, int32_t misspellingLength) Synchronous
@@ -160448,7 +160498,7 @@ index e546b9c0d5424549b7c9ba06641850c46571f772..fc172b98f4d03b32409bffbefb505612
      CheckGrammarOfString(String text) -> (Vector<WebCore::GrammarDetail> results, int32_t badGrammarLocation, int32_t badGrammarLength) Synchronous
      SpellingUIIsShowing() -> (bool isShowing) Synchronous
      UpdateSpellingUIWithMisspelledWord(String misspelledWord)
-@@ -359,6 +375,10 @@ messages -> WebPageProxy {
+@@ -359,6 +376,10 @@ messages -> WebPageProxy {
      StartDrag(WebCore::SelectionData selectionData, OptionSet<WebCore::DragOperation> dragOperationMask, std::optional<WebCore::ShareableBitmapHandle> dragImage, WebCore::IntPoint dragImageHotspot)
  #endif
  
@@ -161569,6 +161619,872 @@ index 0000000000000000000000000000000000000000..8cfbb2ef9ab1590473ee5af50c1bd2eb
 +} // namespace WebKit
 +
 +#endif // USE(COORDINATED_GRAPHICS)
+diff --git a/Source/WebKit/UIProcess/haiku/AccessibilityMirrorHaiku.cpp b/Source/WebKit/UIProcess/haiku/AccessibilityMirrorHaiku.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..b9ac29d0bbc323bdc10d0156266727ae46935fbc
+--- /dev/null
++++ b/Source/WebKit/UIProcess/haiku/AccessibilityMirrorHaiku.cpp
+@@ -0,0 +1,803 @@
++/*
++ * Copyright (C) 2026 air/OS contributors.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHORS ``AS IS'' AND ANY EXPRESS OR
++ * IMPLIED WARRANTIES ARE DISCLAIMED. IN NO EVENT SHALL THE AUTHORS BE LIABLE
++ * FOR ANY DAMAGES ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE.
++ */
++
++#include "config.h"
++#include "AccessibilityMirrorHaiku.h"
++
++#include "WebViewStateHaiku.h"
++#include <Message.h>
++#include <View.h>
++#include <cstdio>
++#include <cstdlib>
++#include <wtf/JSONValues.h>
++#include <wtf/text/WTFString.h>
++
++#if __has_include(<private/interface/Accessible.h>)
++#include <private/interface/Accessible.h>
++#include <private/interface/AccessibilityProtocol.h>
++#include <Window.h>
++#include <algorithm>
++#include <cstring>
++#include <map>
++#include <set>
++#include <vector>
++#define HAVE_ACCESSIBLE_HAIKU 1
++#endif
++
++namespace WebKit {
++
++#if HAVE_ACCESSIBLE_HAIKU
++
++namespace {
++
++// WebCore's role names (roleToString()) as air/OS's roles. Landmarks keep
++// their kind as the "landmark" property.
++accessible_role roleFromName(const BString& name)
++{
++    struct Entry {
++        const char* name;
++        accessible_role role;
++    };
++    static constexpr Entry entries[] = {
++        { "Button", B_ACCESSIBLE_ROLE_BUTTON }, { "ToggleButton", B_ACCESSIBLE_ROLE_TOGGLE_BUTTON },
++        { "Checkbox", B_ACCESSIBLE_ROLE_CHECK_BOX }, { "Switch", B_ACCESSIBLE_ROLE_CHECK_BOX },
++        { "RadioButton", B_ACCESSIBLE_ROLE_RADIO_BUTTON }, { "TextField", B_ACCESSIBLE_ROLE_TEXT_FIELD },
++        { "SearchField", B_ACCESSIBLE_ROLE_TEXT_FIELD }, { "TextArea", B_ACCESSIBLE_ROLE_TEXT_AREA },
++        { "Slider", B_ACCESSIBLE_ROLE_SLIDER }, { "SpinButton", B_ACCESSIBLE_ROLE_SPIN_BUTTON },
++        { "PopUpButton", B_ACCESSIBLE_ROLE_POP_UP_BUTTON }, { "ComboBox", B_ACCESSIBLE_ROLE_COMBO_BOX },
++        { "Link", B_ACCESSIBLE_ROLE_LINK }, { "Heading", B_ACCESSIBLE_ROLE_HEADING },
++        { "StaticText", B_ACCESSIBLE_ROLE_LABEL }, { "Label", B_ACCESSIBLE_ROLE_LABEL },
++        { "Paragraph", B_ACCESSIBLE_ROLE_PARAGRAPH }, { "Image", B_ACCESSIBLE_ROLE_IMAGE },
++        { "Figure", B_ACCESSIBLE_ROLE_IMAGE }, { "Canvas", B_ACCESSIBLE_ROLE_CANVAS },
++        { "List", B_ACCESSIBLE_ROLE_LIST }, { "ListBox", B_ACCESSIBLE_ROLE_LIST },
++        { "DescriptionList", B_ACCESSIBLE_ROLE_LIST }, { "Directory", B_ACCESSIBLE_ROLE_LIST },
++        { "ListItem", B_ACCESSIBLE_ROLE_LIST_ITEM }, { "ListBoxOption", B_ACCESSIBLE_ROLE_LIST_ITEM },
++        { "MenuListOption", B_ACCESSIBLE_ROLE_LIST_ITEM }, { "Table", B_ACCESSIBLE_ROLE_TABLE },
++        { "Grid", B_ACCESSIBLE_ROLE_TABLE }, { "TreeGrid", B_ACCESSIBLE_ROLE_TABLE },
++        { "Row", B_ACCESSIBLE_ROLE_ROW }, { "Cell", B_ACCESSIBLE_ROLE_CELL }, { "GridCell", B_ACCESSIBLE_ROLE_CELL },
++        { "ColumnHeader", B_ACCESSIBLE_ROLE_COLUMN_HEADER }, { "RowHeader", B_ACCESSIBLE_ROLE_COLUMN_HEADER },
++        { "Tree", B_ACCESSIBLE_ROLE_TREE }, { "TreeItem", B_ACCESSIBLE_ROLE_TREE_ITEM },
++        { "TabList", B_ACCESSIBLE_ROLE_TAB_LIST }, { "Tab", B_ACCESSIBLE_ROLE_TAB },
++        { "TabPanel", B_ACCESSIBLE_ROLE_TAB_PANEL }, { "Menu", B_ACCESSIBLE_ROLE_MENU },
++        { "MenuListPopup", B_ACCESSIBLE_ROLE_MENU }, { "MenuBar", B_ACCESSIBLE_ROLE_MENU_BAR },
++        { "MenuItem", B_ACCESSIBLE_ROLE_MENU_ITEM }, { "MenuItemCheckbox", B_ACCESSIBLE_ROLE_MENU_ITEM },
++        { "MenuItemRadio", B_ACCESSIBLE_ROLE_MENU_ITEM }, { "ApplicationDialog", B_ACCESSIBLE_ROLE_DIALOG },
++        { "ApplicationAlertDialog", B_ACCESSIBLE_ROLE_ALERT }, { "ApplicationAlert", B_ACCESSIBLE_ROLE_ALERT },
++        { "Form", B_ACCESSIBLE_ROLE_FORM }, { "MathElement", B_ACCESSIBLE_ROLE_MATH },
++        { "DocumentMath", B_ACCESSIBLE_ROLE_MATH }, { "ProgressIndicator", B_ACCESSIBLE_ROLE_PROGRESS_BAR },
++        { "Meter", B_ACCESSIBLE_ROLE_PROGRESS_BAR }, { "WebArea", B_ACCESSIBLE_ROLE_DOCUMENT },
++        { "Document", B_ACCESSIBLE_ROLE_DOCUMENT }, { "DocumentArticle", B_ACCESSIBLE_ROLE_ARTICLE },
++        { "Toolbar", B_ACCESSIBLE_ROLE_TOOL_BAR }, { "ScrollBar", B_ACCESSIBLE_ROLE_SCROLL_BAR },
++        { "HorizontalRule", B_ACCESSIBLE_ROLE_SEPARATOR }, { "Splitter", B_ACCESSIBLE_ROLE_SEPARATOR },
++        { "ColorWell", B_ACCESSIBLE_ROLE_COLOR_PICKER }, { "ApplicationStatus", B_ACCESSIBLE_ROLE_STATUS_BAR },
++        { "UserInterfaceTooltip", B_ACCESSIBLE_ROLE_TOOL_TIP },
++    };
++    for (auto& entry : entries) {
++        if (name == entry.name)
++            return entry.role;
++    }
++    if (name.StartsWith("Landmark"))
++        return B_ACCESSIBLE_ROLE_LANDMARK;
++    return B_ACCESSIBLE_ROLE_GROUP;
++}
++
++uint64 identifierOf(const JSON::Object& object, const char* key)
++{
++    auto value = object.getDouble(String::fromLatin1(key));
++    return value && *value >= 0 ? static_cast<uint64>(*value) : 0;
++}
++
++BString stringOf(const JSON::Object& object, const char* key)
++{
++    return BString(object.getString(String::fromLatin1(key)).utf8().legacyCStringPointer());
++}
++
++class Mirror;
++
++// What a node said in the previous tree: changes become events.
++struct NodeSnapshot {
++    BString name;
++    BString value;
++    uint64 states { 0 };
++    bool hasRange { false };
++    double range[3] { 0, 0, 0 };
++    int32 selection[2] { -1, -1 };
++    int32 length { 0 };
++};
++
++struct PendingEvent {
++    uint64 node;
++    accessible_event event;
++    BMessage details;
++};
++
++// Text events carry at most this much of the text (as air/OS's own views).
++constexpr int32 maximumEventText = 1024;
++
++bool isContinuationByte(char byte)
++{
++    return (static_cast<uint8>(byte) & 0xc0) == 0x80;
++}
++
++// Bytes [start, end) of text, not splitting a character, and at most
++// maximumEventText long.
++BString utf8Part(const BString& text, int32 start, int32 end)
++{
++    start = std::clamp<int32>(start, 0, text.Length());
++    end = std::clamp<int32>(end, start, text.Length());
++    if (end - start > maximumEventText) {
++        end = start + maximumEventText;
++        while (end > start && isContinuationByte(text.String()[end]))
++            end--;
++    }
++    BString part;
++    text.CopyInto(part, start, end - start);
++    return part;
++}
++
++// One node of the page's tree, as the system's interface asks about it.
++class MirrorNode final : public BAccessible {
++public:
++    MirrorNode(Mirror& mirror, uint64 identifier)
++        : fMirror(mirror)
++        , fIdentifier(identifier)
++    {
++    }
++
++    // From the page's tree (Mirror::treeArrived); whether its children
++    // changed. UpdateFields: from a changed node alone, which keeps its
++    // place in the tree.
++    bool Update(const JSON::Object&);
++    void UpdateFields(const JSON::Object&);
++    uint64 Identifier() const { return fIdentifier; }
++    uint64 ParentIdentifier() const { return fParent; }
++    std::vector<uint64>& Children() { return fChildren; }
++
++    accessible_role Role() const override;
++    BString Name() const override { return fName; }
++    BString Description() const override { return fDescription; }
++    BString Value() const override { return fValue; }
++    bool GetRange(double& value, double& minimum, double& maximum) const override;
++    uint64 States() const override { return fStates; }
++    BRect Frame() const override;
++    BAccessible* Parent() const override;
++    int32 CountChildren() const override;
++    BAccessible* ChildAt(int32 index) const override;
++    uint32 Actions() const override { return fActions; }
++    status_t PerformAction(accessible_action) override;
++    bool GetTextSelection(int32& start, int32& end) const override;
++    BString Text(int32 start, int32 end) const override;
++    void AddProperties(BMessage&) const override;
++
++    NodeSnapshot Snapshot() const
++    {
++        NodeSnapshot snapshot { fName, fValue, fStates, fHasRange, { fRange[0], fRange[1], fRange[2] }, { fSelection[0], fSelection[1] }, fLength };
++        return snapshot;
++    }
++
++private:
++    friend class Mirror;
++    Mirror& fMirror;
++    const uint64 fIdentifier;
++    uint64 fParent { 0 };
++    BString fRole;
++    BString fName;
++    BString fDescription;
++    BString fValue;
++    BString fURL;
++    uint64 fStates { 0 };
++    uint32 fActions { 0 };
++    int32 fLevel { 0 };
++    bool fHasRange { false };
++    double fRange[3] { 0, 0, 0 };
++    BRect fFrame;
++    // The focused text field's selection (UTF-8 bytes), and a password
++    // field's length in characters.
++    int32 fSelection[2] { -1, -1 };
++    int32 fLength { 0 };
++    std::vector<uint64> fChildren;
++};
++
++class Mirror final : public AccessibilityMirrorHaiku {
++public:
++    Mirror(BView& view, std::shared_ptr<WebViewStateHaiku> state)
++        : fView(view)
++        , fState(std::move(state))
++        , fRoot(*this, 0)
++    {
++        BAccessible::Attach(&fView, &fRoot);
++    }
++
++    ~Mirror() override
++    {
++        BAccessible::Detach(&fView);
++        Clear();
++        if (fRequested)
++            Send(true);
++    }
++
++    void treeArrived(const BMessage&) override;
++    void changed(const BMessage&) override;
++
++    MirrorNode* Node(uint64 identifier) const
++    {
++        if (identifier == fRootIdentifier)
++            return const_cast<MirrorNode*>(&fRoot);
++        auto found = fNodes.find(identifier);
++        return found == fNodes.end() ? nullptr : found->second.get();
++    }
++    bool IsRoot(const MirrorNode& node) const { return &node == &fRoot; }
++    BAccessible* Root() const { return const_cast<MirrorNode*>(&fRoot); }
++    BView& View() const { return fView; }
++
++    // The screen reader looked at the page before its tree came: ask for it.
++    void Wanted() const
++    {
++        if (!fRequested)
++            const_cast<Mirror*>(this)->Request();
++    }
++
++    void Perform(uint64 identifier, accessible_action action)
++    {
++        BMessage message(viewAccessibilityActionHaiku);
++        // The root's own object stands for the page's root node.
++        message.AddUInt64("node", identifier ? identifier : fRootIdentifier);
++        message.AddUInt32("action", action);
++        if (auto state = fState.lock())
++            dispatchViewMessageHaiku(std::move(state), std::move(message));
++    }
++
++private:
++    void Request()
++    {
++        if (fInFlight) {
++            fStale = true;
++            return;
++        }
++        fRequested = true;
++        fInFlight = true;
++        Send(false);
++    }
++
++    void Send(bool off)
++    {
++        BMessage message(viewAccessibilityRequestHaiku);
++        if (off)
++            message.AddBool("off", true);
++        else
++            message.AddUInt32("generation", ++fGeneration);
++        if (auto state = fState.lock())
++            dispatchViewMessageHaiku(std::move(state), std::move(message));
++    }
++
++    bool NodesChanged(const char* json);
++    void Compare(MirrorNode&, const NodeSnapshot&, std::vector<PendingEvent>&);
++    void CompareText(MirrorNode&, const NodeSnapshot&, std::vector<PendingEvent>&);
++
++    void Clear()
++    {
++        fNodes.clear();
++        fRoot.fChildren.clear();
++        fRootIdentifier = 0;
++        fFocus = 0;
++    }
++
++    BView& fView;
++    // Weak: the state holds this.
++    std::weak_ptr<WebViewStateHaiku> fState;
++    MirrorNode fRoot;
++    uint64 fRootIdentifier { 0 };
++    std::map<uint64, std::unique_ptr<MirrorNode>> fNodes;
++    bool fRequested { false };
++    bool fInFlight { false };
++    bool fStale { false };
++    // Requests are counted; answers to those before the last reset (of
++    // the document before) are dropped.
++    uint32 fGeneration { 0 };
++    uint32 fFirstCurrentGeneration { 0 };
++    // The page's tree was too large to send whole.
++    bool fTruncated { false };
++    uint64 fFocus { 0 };
++    uint64 fPendingFocus { 0 };
++};
++
++void MirrorNode::UpdateFields(const JSON::Object& node)
++{
++    fRole = stringOf(node, "role");
++    fName = stringOf(node, "name");
++    fDescription = stringOf(node, "description");
++    fValue = stringOf(node, "value");
++    fURL = stringOf(node, "url");
++    fStates = identifierOf(node, "states");
++    fActions = static_cast<uint32>(node.getInteger("actions"_s).value_or(0));
++    fLevel = node.getInteger("level"_s).value_or(0);
++    fHasRange = false;
++    if (auto range = node.getArray("range"_s); range && range->length() == 3) {
++        for (unsigned i = 0; i < 3; ++i)
++            fRange[i] = range->get(i)->asDouble().value_or(0);
++        fHasRange = true;
++    }
++    fSelection[0] = fSelection[1] = -1;
++    if (auto selection = node.getArray("selection"_s); selection && selection->length() == 2) {
++        for (unsigned i = 0; i < 2; ++i)
++            fSelection[i] = selection->get(i)->asInteger().value_or(-1);
++    }
++    fLength = node.getInteger("length"_s).value_or(0);
++    fFrame = BRect();
++    if (auto frame = node.getArray("frame"_s); frame && frame->length() == 4) {
++        int values[4];
++        for (unsigned i = 0; i < 4; ++i)
++            values[i] = frame->get(i)->asInteger().value_or(0);
++        if (values[2] > 0 && values[3] > 0)
++            fFrame = BRect(values[0], values[1], values[0] + values[2] - 1, values[1] + values[3] - 1);
++    }
++}
++
++bool MirrorNode::Update(const JSON::Object& node)
++{
++    fParent = identifierOf(node, "parent");
++    UpdateFields(node);
++    std::vector<uint64> children;
++    if (auto list = node.getArray("children"_s)) {
++        for (unsigned i = 0; i < list->length(); ++i) {
++            auto child = list->get(i)->asDouble();
++            if (child && *child > 0)
++                children.push_back(static_cast<uint64>(*child));
++        }
++    }
++    if (children == fChildren)
++        return false;
++    fChildren = std::move(children);
++    return true;
++}
++
++accessible_role MirrorNode::Role() const
++{
++    if (fMirror.IsRoot(*this))
++        return B_ACCESSIBLE_ROLE_DOCUMENT;
++    return roleFromName(fRole);
++}
++
++bool MirrorNode::GetRange(double& value, double& minimum, double& maximum) const
++{
++    if (!fHasRange)
++        return false;
++    value = fRange[0];
++    minimum = fRange[1];
++    maximum = fRange[2];
++    return true;
++}
++
++BRect MirrorNode::Frame() const
++{
++    BView& view = fMirror.View();
++    if (fMirror.IsRoot(*this) || !fFrame.IsValid())
++        return fMirror.IsRoot(*this) ? view.ConvertToScreen(view.Bounds()) : BRect();
++    return view.ConvertToScreen(fFrame);
++}
++
++BAccessible* MirrorNode::Parent() const
++{
++    if (fMirror.IsRoot(*this))
++        return nullptr;
++    MirrorNode* parent = fMirror.Node(fParent);
++    return parent ? static_cast<BAccessible*>(parent) : fMirror.Root();
++}
++
++int32 MirrorNode::CountChildren() const
++{
++    if (fMirror.IsRoot(*this))
++        fMirror.Wanted();
++    return static_cast<int32>(fChildren.size());
++}
++
++BAccessible* MirrorNode::ChildAt(int32 index) const
++{
++    if (index < 0 || static_cast<size_t>(index) >= fChildren.size())
++        return nullptr;
++    return fMirror.Node(fChildren[index]);
++}
++
++status_t MirrorNode::PerformAction(accessible_action action)
++{
++    if (!(fActions & action) && !fMirror.IsRoot(*this))
++        return B_NOT_SUPPORTED;
++    fMirror.Perform(fIdentifier, action);
++    return B_OK;
++}
++
++bool MirrorNode::GetTextSelection(int32& start, int32& end) const
++{
++    if (fSelection[0] < 0)
++        return false;
++    start = fSelection[0];
++    end = fSelection[1];
++    return true;
++}
++
++BString MirrorNode::Text(int32 start, int32 end) const
++{
++    if (fStates & B_ACCESSIBLE_STATE_PROTECTED)
++        return BString();
++    return utf8Part(fValue, start, end);
++}
++
++void MirrorNode::AddProperties(BMessage& message) const
++{
++    if (fLevel > 0)
++        message.AddInt32("level", fLevel);
++    if (fURL.Length())
++        message.AddString("url", fURL);
++    if (fRole.StartsWith("Landmark"))
++        message.AddString("landmark", fRole.String() + strlen("Landmark"));
++}
++
++void Mirror::treeArrived(const BMessage& message)
++{
++    bigtime_t start = system_time();
++    fInFlight = false;
++    const char* json = nullptr;
++    if (message.FindString("json", &json) != B_OK)
++        return;
++    if (message.GetUInt32("generation", 0) < fFirstCurrentGeneration) {
++        if (fStale) {
++            fStale = false;
++            Request();
++        }
++        return;
++    }
++    auto parsed = JSON::Value::parseJSON(String::fromUTF8(json));
++    auto tree = parsed ? parsed->asObject() : nullptr;
++    auto nodes = tree ? tree->getArray("nodes"_s) : nullptr;
++    if (!nodes || !nodes->length()) {
++        if (getenv("SUMMIT_AX_TRACE"))
++            fprintf(stderr, "Summit accessibility: no tree (%zu bytes)\n", strlen(json));
++        if (fStale) {
++            fStale = false;
++            Request();
++        }
++        return;
++    }
++
++    // Nodes keep their objects (and so their IDs for the screen reader)
++    // from one tree to the next; those gone are deleted.
++    std::set<uint64> present;
++    bool first = !fRootIdentifier;
++    fTruncated = tree->getBoolean("truncated"_s).value_or(false);
++    std::vector<PendingEvent> events;
++    // Only a change of the tree's shape is said as one.
++    bool structureChanged = first;
++    for (unsigned i = 0; i < nodes->length(); ++i) {
++        auto node = nodes->get(i)->asObject();
++        if (!node)
++            continue;
++        uint64 identifier = identifierOf(*node, "id");
++        if (!identifier)
++            continue;
++        if (!identifierOf(*node, "parent")) {
++            structureChanged |= fRootIdentifier != identifier;
++            fRootIdentifier = identifier;
++            structureChanged |= fRoot.Update(*node);
++            if (auto title = tree->getString("title"_s); !title.isEmpty() && fRoot.fName.IsEmpty())
++                fRoot.fName = title.utf8().legacyCStringPointer();
++            continue;
++        }
++        auto& entry = fNodes[identifier];
++        if (!entry) {
++            entry = std::make_unique<MirrorNode>(*this, identifier);
++            entry->Update(*node);
++            structureChanged = true;
++        } else {
++            auto before = entry->Snapshot();
++            structureChanged |= entry->Update(*node);
++            if (!first)
++                Compare(*entry, before, events);
++        }
++        present.insert(identifier);
++    }
++    for (auto it = fNodes.begin(); it != fNodes.end();) {
++        if (present.count(it->first))
++            ++it;
++        else {
++            it = fNodes.erase(it);
++            structureChanged = true;
++        }
++    }
++    // A cut-off tree names children it does not hold.
++    auto keepPresent = [&](std::vector<uint64>& children) {
++        children.erase(std::remove_if(children.begin(), children.end(), [&](uint64 child) {
++            return !present.count(child);
++        }), children.end());
++    };
++    keepPresent(fRoot.fChildren);
++    for (auto& [identifier, node] : fNodes)
++        keepPresent(node->fChildren);
++
++    if (getenv("SUMMIT_AX_TRACE"))
++        fprintf(stderr, "Summit accessibility: mirror has %zu nodes, %zu events, focus %llu, %.1f ms\n", fNodes.size() + 1, events.size(), (unsigned long long)(fPendingFocus ? fPendingFocus : identifierOf(*tree, "focus")), (system_time() - start) / 1000.0);
++    if (structureChanged)
++        fRoot.NotifyEvent(first ? B_ACCESSIBLE_EVENT_DOCUMENT_LOADED : B_ACCESSIBLE_EVENT_CHILDREN_CHANGED);
++    for (auto& event : events) {
++        if (MirrorNode* node = Node(event.node))
++            node->NotifyEvent(event.event, event.details.IsEmpty() ? nullptr : &event.details);
++    }
++    uint64 focus = fPendingFocus ? fPendingFocus : identifierOf(*tree, "focus");
++    fPendingFocus = 0;
++    if (focus && focus != fFocus) {
++        if (MirrorNode* node = Node(focus)) {
++            fFocus = focus;
++            node->NotifyEvent(B_ACCESSIBLE_EVENT_FOCUS_CHANGED);
++        }
++    }
++    if (fStale) {
++        fStale = false;
++        Request();
++    }
++}
++
++// The events air/OS's own views send for the same changes: the screen reader
++// speaks those about the focused control (and a selected item of it).
++void Mirror::Compare(MirrorNode& node, const NodeSnapshot& before, std::vector<PendingEvent>& events)
++{
++    uint64 changedStates = node.fStates ^ before.states;
++    // The focus, unless it is just leaving (the next focus is said instead).
++    bool focused = node.fIdentifier == fFocus
++        && !((changedStates & B_ACCESSIBLE_STATE_FOCUSED) && !(node.fStates & B_ACCESSIBLE_STATE_FOCUSED));
++    if (!focused) {
++        // Only an item of the focused list matters besides the focus.
++        if (fFocus && node.fParent == fFocus && (changedStates & B_ACCESSIBLE_STATE_SELECTED) && (node.fStates & B_ACCESSIBLE_STATE_SELECTED)) {
++            PendingEvent event { node.fIdentifier, B_ACCESSIBLE_EVENT_SELECTION_CHANGED, BMessage() };
++            if (MirrorNode* parent = Node(node.fParent)) {
++                BMessage container;
++                container.AddInt64(B_ACCESSIBLE_FIELD_ID, parent->ID());
++                event.details.AddMessage("container", &container);
++            }
++            events.push_back(std::move(event));
++        }
++        return;
++    }
++    if (node.fName != before.name || (changedStates & B_ACCESSIBLE_STATE_EXPANDED)) {
++        // The screen reader says the control again: its name, or whether it
++        // is expanded now.
++        events.push_back({ node.fIdentifier, B_ACCESSIBLE_EVENT_NAME_CHANGED, BMessage() });
++    }
++    bool rangeChanged = node.fHasRange != before.hasRange
++        || (node.fHasRange && node.fRange[0] != before.range[0]);
++    // Text events while the field keeps the focus (its caret and a
++    // password's length are only known then).
++    bool typing = focused && (node.fStates & before.states & B_ACCESSIBLE_STATE_FOCUSED);
++    if (typing && (node.fStates & B_ACCESSIBLE_STATE_EDITABLE))
++        CompareText(node, before, events);
++    else if (node.fValue != before.value || rangeChanged
++        || (changedStates & (B_ACCESSIBLE_STATE_CHECKED | B_ACCESSIBLE_STATE_MIXED | B_ACCESSIBLE_STATE_PRESSED)))
++        events.push_back({ node.fIdentifier, B_ACCESSIBLE_EVENT_VALUE_CHANGED, BMessage() });
++    if (changedStates & B_ACCESSIBLE_STATE_DISABLED)
++        events.push_back({ node.fIdentifier, B_ACCESSIBLE_EVENT_STATE_CHANGED, BMessage() });
++}
++
++// Typing and the caret in the focused text field, as a BTextView says them.
++void Mirror::CompareText(MirrorNode& node, const NodeSnapshot& before, std::vector<PendingEvent>& events)
++{
++    bool hidden = node.fStates & B_ACCESSIBLE_STATE_PROTECTED;
++    bool textChanged = false;
++    if (hidden) {
++        // Only the length is known: what was typed is what it grew by,
++        // besides a selection it replaced (unless that was as long).
++        int32 selected = before.selection[0] >= 0 ? std::abs(before.selection[1] - before.selection[0]) : 0;
++        int32 inserted = node.fLength - (before.length - selected);
++        int32 deleted = inserted > 0 ? 0 : before.length - node.fLength;
++        if (node.fLength != before.length) {
++            BMessage details;
++            details.AddInt32("offset", std::max<int32>(0, std::min(before.selection[0], before.selection[1])));
++            details.AddInt32("length", inserted > 0 ? inserted : deleted);
++            details.AddBool("hidden", true);
++            events.push_back({ node.fIdentifier, inserted > 0 ? B_ACCESSIBLE_EVENT_TEXT_INSERTED : B_ACCESSIBLE_EVENT_TEXT_DELETED, std::move(details) });
++            textChanged = true;
++        }
++    } else if (node.fValue != before.value) {
++        const char* oldText = before.value.String();
++        const char* newText = node.fValue.String();
++        int32 oldLength = before.value.Length();
++        int32 newLength = node.fValue.Length();
++        // Typed or deleted at the caret: "aa" -> "aba" is "b" inserted
++        // where the caret is now, which the common start and end can not
++        // tell from "ab" + "a".
++        int32 caret = node.fSelection[0] == node.fSelection[1] ? node.fSelection[1] : -1;
++        int32 delta = newLength - oldLength;
++        if (caret >= 0 && delta > 0 && caret - delta >= 0 && caret <= newLength
++            && !memcmp(oldText, newText, caret - delta) && !memcmp(oldText + caret - delta, newText + caret, oldLength - (caret - delta))) {
++            BMessage details;
++            details.AddInt32("offset", caret - delta);
++            details.AddInt32("length", delta);
++            details.AddString("text", utf8Part(node.fValue, caret - delta, caret));
++            events.push_back({ node.fIdentifier, B_ACCESSIBLE_EVENT_TEXT_INSERTED, std::move(details) });
++        } else if (caret >= 0 && delta < 0 && caret - delta <= oldLength
++            && !memcmp(oldText, newText, caret) && !memcmp(oldText + caret - delta, newText + caret, newLength - caret)) {
++            BMessage details;
++            details.AddInt32("offset", caret);
++            details.AddInt32("length", -delta);
++            details.AddString("text", utf8Part(before.value, caret, caret - delta));
++            events.push_back({ node.fIdentifier, B_ACCESSIBLE_EVENT_TEXT_DELETED, std::move(details) });
++        } else {
++            // Otherwise what changed between the parts both texts begin
++            // and end with.
++            int32 prefix = 0;
++            while (prefix < oldLength && prefix < newLength && oldText[prefix] == newText[prefix])
++                prefix++;
++            while (prefix > 0 && ((prefix < oldLength && isContinuationByte(oldText[prefix])) || (prefix < newLength && isContinuationByte(newText[prefix]))))
++                prefix--;
++            int32 suffix = 0;
++            while (suffix < oldLength - prefix && suffix < newLength - prefix && oldText[oldLength - 1 - suffix] == newText[newLength - 1 - suffix])
++                suffix++;
++            while (suffix > 0 && isContinuationByte(oldText[oldLength - suffix]))
++                suffix--;
++            auto add = [&](accessible_event event, const BString& text, int32 start, int32 end) {
++                if (end <= start)
++                    return;
++                BMessage details;
++                details.AddInt32("offset", start);
++                details.AddInt32("length", end - start);
++                details.AddString("text", utf8Part(text, start, end));
++                events.push_back({ node.fIdentifier, event, std::move(details) });
++            };
++            add(B_ACCESSIBLE_EVENT_TEXT_DELETED, before.value, prefix, oldLength - suffix);
++            add(B_ACCESSIBLE_EVENT_TEXT_INSERTED, node.fValue, prefix, newLength - suffix);
++        }
++        textChanged = true;
++    }
++
++    int32 start = node.fSelection[0];
++    int32 end = node.fSelection[1];
++    if (start < 0 || (!textChanged && start == before.selection[0] && end == before.selection[1]))
++        return;
++    BMessage details;
++    details.AddInt32("caret", end);
++    details.AddInt32(B_ACCESSIBLE_FIELD_SEL_START, start);
++    details.AddInt32(B_ACCESSIBLE_FIELD_SEL_END, end);
++    if (!hidden) {
++        const BString& text = node.fValue;
++        if (start != end)
++            details.AddString("text", utf8Part(text, std::min(start, end), std::max(start, end)));
++        else {
++            // The character after the caret and the caret's line.
++            int32 length = 0;
++            if (end < text.Length()) {
++                length = 1;
++                while (end + length < text.Length() && isContinuationByte(text.String()[end + length]))
++                    length++;
++            }
++            details.AddString("char", utf8Part(text, end, end + length));
++            int32 line = 0;
++            int32 lineStart = 0;
++            for (int32 i = 0; i < end && i < text.Length(); i++) {
++                if (text.String()[i] == '\n') {
++                    line++;
++                    lineStart = i + 1;
++                }
++            }
++            int32 lineEnd = text.FindFirst('\n', end);
++            if (lineEnd < 0)
++                lineEnd = text.Length();
++            details.AddInt32("line", line);
++            details.AddString("line_text", utf8Part(text, lineStart, lineEnd));
++        }
++    }
++    events.push_back({ node.fIdentifier, B_ACCESSIBLE_EVENT_CARET_MOVED, std::move(details) });
++}
++
++void Mirror::changed(const BMessage& message)
++{
++    if (!BAccessible::IsEnabled()) {
++        // The screen reader quit: the page stops sending.
++        if (fRequested) {
++            fRequested = false;
++            fInFlight = false;
++            fStale = false;
++            Send(true);
++            Clear();
++        }
++        return;
++    }
++    if (message.GetBool("reset", false)) {
++        if (!fRequested)
++            return;
++        Clear();
++        fPendingFocus = 0;
++        fFirstCurrentGeneration = fGeneration + 1;
++        Request();
++        return;
++    }
++    // What the page's live regions say, when the page is the one in front.
++    const char* announcement = nullptr;
++    if (message.FindString("announce", &announcement) == B_OK && fRequested) {
++        bool front = fView.Window() && fView.Window()->IsActive() && !fView.IsHidden();
++        if (getenv("SUMMIT_AX_TRACE"))
++            fprintf(stderr, "Summit accessibility: live region says \"%s\"%s%s\n", announcement, message.GetBool("interrupt", false) ? " (interrupting)" : "", front ? "" : " - not said, the page is not in front");
++        if (front)
++            BAccessible::Announce(announcement, message.GetBool("interrupt", false));
++    }
++    if (!fRequested)
++        return;
++    bool wantTree = message.GetBool("tree", false);
++    const char* nodes = nullptr;
++    if (message.FindString("nodes", &nodes) == B_OK && !NodesChanged(nodes))
++        wantTree = true;
++    if (uint64 focus = message.GetUInt64("focus", 0); focus && focus != fFocus) {
++        if (MirrorNode* node = fRootIdentifier ? Node(focus) : nullptr) {
++            fFocus = focus;
++            node->NotifyEvent(B_ACCESSIBLE_EVENT_FOCUS_CHANGED);
++        } else {
++            // A node the copy does not have yet.
++            fPendingFocus = focus;
++            wantTree = true;
++        }
++    }
++    if (wantTree)
++        Request();
++}
++
++// Nodes that changed by themselves; false when the copy lacks one of them
++// (so the tree changed too).
++bool Mirror::NodesChanged(const char* json)
++{
++    if (!fRootIdentifier)
++        return false;
++    auto parsed = JSON::Value::parseJSON(String::fromUTF8(json));
++    auto changes = parsed ? parsed->asObject() : nullptr;
++    auto nodes = changes ? changes->getArray("nodes"_s) : nullptr;
++    if (!nodes)
++        return true;
++    bool complete = true;
++    std::vector<PendingEvent> events;
++    for (unsigned i = 0; i < nodes->length(); ++i) {
++        auto object = nodes->get(i)->asObject();
++        MirrorNode* node = object ? Node(identifierOf(*object, "id")) : nullptr;
++        if (!node) {
++            // Not news where the page's tree is cut off.
++            if (!fTruncated)
++                complete = false;
++            continue;
++        }
++        auto before = node->Snapshot();
++        node->UpdateFields(*object);
++        if (!IsRoot(*node))
++            Compare(*node, before, events);
++    }
++    for (auto& event : events) {
++        if (MirrorNode* node = Node(event.node))
++            node->NotifyEvent(event.event, event.details.IsEmpty() ? nullptr : &event.details);
++    }
++    return complete;
++}
++
++} // namespace
++
++std::shared_ptr<AccessibilityMirrorHaiku> AccessibilityMirrorHaiku::create(BView& view, std::shared_ptr<WebViewStateHaiku> state)
++{
++    return std::make_shared<Mirror>(view, std::move(state));
++}
++
++#else
++
++std::shared_ptr<AccessibilityMirrorHaiku> AccessibilityMirrorHaiku::create(BView&, std::shared_ptr<WebViewStateHaiku>)
++{
++    return nullptr;
++}
++
++#endif
++
++} // namespace WebKit
+diff --git a/Source/WebKit/UIProcess/haiku/AccessibilityMirrorHaiku.h b/Source/WebKit/UIProcess/haiku/AccessibilityMirrorHaiku.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..57754186606c56cb0d1a43eff3f304e0da8f44fc
+--- /dev/null
++++ b/Source/WebKit/UIProcess/haiku/AccessibilityMirrorHaiku.h
+@@ -0,0 +1,51 @@
++/*
++ * Copyright (C) 2026 air/OS contributors.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHORS ``AS IS'' AND ANY EXPRESS OR
++ * IMPLIED WARRANTIES ARE DISCLAIMED. IN NO EVENT SHALL THE AUTHORS BE LIABLE
++ * FOR ANY DAMAGES ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE.
++ */
++
++#pragma once
++
++#include <memory>
++
++class BMessage;
++class BView;
++
++namespace WebKit {
++
++struct WebViewStateHaiku;
++
++// What air/OS's screen reader sees of the page in a BWebKitView (summit#226):
++// the page's accessibility tree, published through the system's BAccessible
++// interface (docs/airos/ACCESSIBILITY.md) as the view's own tree. The tree
++// lives in the web process (WebPageAccessibilityHaiku.cpp); this keeps a copy
++// of it, asked for when a screen reader first looks at the view and again
++// whenever the page says it changed, so that the screen reader's questions,
++// which come with the view's window locked, never wait for the web process.
++// All of it is used on the view's window thread, with the window locked.
++class AccessibilityMirrorHaiku {
++public:
++    // Null where the system has no accessibility interface (stock Haiku).
++    static std::shared_ptr<AccessibilityMirrorHaiku> create(BView&, std::shared_ptr<WebViewStateHaiku>);
++    virtual ~AccessibilityMirrorHaiku() = default;
++
++    // The page's tree arrived ("json"), or the page says what changed: the
++    // node that took the "focus", "nodes" that changed alone (JSON), that
++    // the "tree" changed, what a live region says ("announce"), or that
++    // another document or web process came ("reset").
++    virtual void treeArrived(const BMessage&) = 0;
++    virtual void changed(const BMessage&) = 0;
++};
++
++} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/AutomationClientHaiku.cpp b/Source/WebKit/UIProcess/haiku/AutomationClientHaiku.cpp
 new file mode 100644
 index 0000000000000000000000000000000000000000..9160a8717135ec9a603f12cf8d5c2e5adda40f19
@@ -169920,10 +170836,10 @@ index 0000000000000000000000000000000000000000..b12e656b2046acc0f1325d1b28ee8be2
 +#endif
 diff --git a/Source/WebKit/UIProcess/haiku/WebPageProxyHaiku.cpp b/Source/WebKit/UIProcess/haiku/WebPageProxyHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..4d8851009b0f6f9403abfdec830c3b519c7b3ea2
+index 0000000000000000000000000000000000000000..e6bb2eade34866c6ba1b9e162b8101947eaa0ff2
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebPageProxyHaiku.cpp
-@@ -0,0 +1,186 @@
+@@ -0,0 +1,196 @@
 +/*
 + * Copyright (C) 2014-2021 Haiku, inc.
 + *
@@ -169986,6 +170902,16 @@ index 0000000000000000000000000000000000000000..4d8851009b0f6f9403abfdec830c3b51
 +{
 +    if (RefPtr client = pageClient())
 +        client->didFallBackToSoftwareRenderingHaiku();
++}
++
++// The page's accessibility tree changed while air/OS's screen reader
++// listens (summit#226): the node that took the focus (or 0), what the page's
++// live regions say, the nodes that changed by themselves (JSON) and whether
++// the tree changed otherwise.
++void WebPageProxy::accessibilityChangedHaiku(uint64_t focusedNode, String&& announcement, bool assertive, String&& nodes, bool treeChanged)
++{
++    if (RefPtr client = pageClient())
++        client->accessibilityChangedHaiku(focusedNode, announcement, assertive, nodes, treeChanged);
 +}
 +
 +#if ENABLE(CUSTOM_PROTOCOL_HANDLERS)
@@ -170352,10 +171278,10 @@ index 0000000000000000000000000000000000000000..c9a119d02f85b7c5ad8fe9153bfc9604
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebView.cpp b/Source/WebKit/UIProcess/haiku/WebView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..ae5469db272076da27f55d785f920d7eb1a12e80
+index 0000000000000000000000000000000000000000..cbdeebea5fdc2e194722c3bd3bcd84ebf237098e
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebView.cpp
-@@ -0,0 +1,3847 @@
+@@ -0,0 +1,3902 @@
 +/*
 + * Copyright (C) 2013 Intel Corporation. All rights reserved.
 + *
@@ -172906,6 +173832,31 @@ index 0000000000000000000000000000000000000000..ae5469db272076da27f55d785f920d7e
 +    notifyState();
 +}
 +
++// air/OS's screen reader (summit#226): the view keeps the page's
++// accessibility tree (AccessibilityMirrorHaiku) and asks for it again.
++void WebView::accessibilityChangedHaiku(uint64_t focusedNode, const String& announcement, bool assertive, const String& nodes, bool treeChanged)
++{
++    BMessage message(viewAccessibilityChangedHaiku);
++    message.AddUInt64("focus", focusedNode);
++    message.AddBool("tree", treeChanged);
++    if (!nodes.isEmpty())
++        message.AddString("nodes", nodes.utf8().legacyCStringPointer());
++    if (!announcement.isEmpty()) {
++        message.AddString("announce", announcement.utf8().legacyCStringPointer());
++        message.AddBool("interrupt", assertive);
++    }
++    sendToView(message);
++}
++
++// Another document, or another web process (which knows nothing of the
++// screen reader yet): the view's copy of the tree starts again.
++void WebView::resetAccessibilityHaiku()
++{
++    BMessage message(viewAccessibilityChangedHaiku);
++    message.AddBool("reset", true);
++    sendToView(message);
++}
++
 +void WebView::scheduleNotifyStateHaiku() const
 +{
 +    if (m_stateNotificationPendingHaiku)
@@ -173184,6 +174135,34 @@ index 0000000000000000000000000000000000000000..ae5469db272076da27f55d785f920d7e
 +    case viewStopHaiku:
 +        stopLoadHaiku(m_state);
 +        m_page->stopLoading();
++        break;
++    case viewAccessibilityRequestHaiku: {
++        // The view's screen reader tree (AccessibilityMirrorHaiku) wants the
++        // page's accessibility tree, or ("off") no more of it.
++        const bool enabled = !message.GetBool("off", false);
++        Ref process = m_page->legacyMainFrameProcess();
++        process->sendWithAsyncReply(Messages::WebPage::AccessibilityTreeHaiku(enabled),
++            [state = m_state, enabled, generation = message.GetUInt32("generation", 0)](String&& json) {
++                if (!enabled)
++                    return;
++                // Also when there is no tree (or no web process): the
++                // mirror waits for an answer before it asks again.
++                BMessage tree(viewAccessibilityTreeHaiku);
++                tree.AddString("json", json.isNull() ? "" : json.utf8().legacyCStringPointer());
++                tree.AddUInt32("generation", generation);
++                BMessenger view;
++                {
++                    std::lock_guard guard(state->mutex);
++                    view = state->view;
++                }
++                if (view.IsValid())
++                    view.SendMessage(&tree, static_cast<BHandler*>(nullptr), 0);
++            }, m_page->webPageIDInMainFrameProcess());
++        break;
++    }
++    case viewAccessibilityActionHaiku:
++        m_page->legacyMainFrameProcess().send(Messages::WebPage::AccessibilityActionHaiku(message.GetUInt64("node", 0),
++            message.GetUInt32("action", 0)), m_page->webPageIDInMainFrameProcess());
 +        break;
 +    case viewEditHaiku: {
 +        uint32 command;
@@ -173632,12 +174611,14 @@ index 0000000000000000000000000000000000000000..ae5469db272076da27f55d785f920d7e
 +    notifyState(B_WEBKIT_PROCESS_EXITED);
 +    if (m_state->closeRequestPending)
 +        notifyCloseDecisionHaiku(m_state, true);
++    resetAccessibilityHaiku();
 +}
 +
 +void WebView::didRelaunchProcess()
 +{
 +    updateGeometry();
 +    notifyState();
++    resetAccessibilityHaiku();
 +}
 +
 +void WebView::pageClosed()
@@ -175006,10 +175987,10 @@ index 0000000000000000000000000000000000000000..f712608b72b963631ade0ec62755598a
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebViewPrivate.h b/Source/WebKit/UIProcess/haiku/WebViewPrivate.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..6e64d2716be872762af65ea69f673bc23d204f18
+index 0000000000000000000000000000000000000000..6c02bf29a0e5ffad09a9201552ee9e987b0aa205
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebViewPrivate.h
-@@ -0,0 +1,260 @@
+@@ -0,0 +1,266 @@
 +/*
 +   Copyright (C) 2014 Haiku, inc.
 +
@@ -175109,6 +176090,8 @@ index 0000000000000000000000000000000000000000..6e64d2716be872762af65ea69f673bc2
 +    mutable MonotonicTime m_describedCertificateTimeHaiku;
 +    mutable std::optional<WebViewStateHaiku::LoadState::Certificate> m_describedCertificateHaiku;
 +    void didFallBackToSoftwareRenderingHaiku() override;
++    void accessibilityChangedHaiku(uint64_t focusedNode, const String& announcement, bool assertive, const String& nodes, bool treeChanged) override;
++    void resetAccessibilityHaiku();
 +#if ENABLE(DRAG_SUPPORT)
 +    void startDragHaiku(WebCore::PasteboardCustomData&&, OptionSet<WebCore::DragOperation>, RefPtr<WebCore::ShareableBitmap>&&, const WebCore::IntPoint&, const String&) override;
 +    void didPerformDragOperation(bool) override;
@@ -175182,7 +176165,11 @@ index 0000000000000000000000000000000000000000..6e64d2716be872762af65ea69f673bc2
 +    void updateAcceleratedCompositingMode(const LayerTreeContext&) override { }
 +#endif
 +    void didChangeContentSize(const WebCore::IntSize&) override;
-+    void didCommitLoadForMainFrame(const String&, bool) override { notifyState(); }
++    void didCommitLoadForMainFrame(const String&, bool) override
++    {
++        notifyState();
++        resetAccessibilityHaiku();
++    }
 +    void didFinishLoadingDataForCustomContentProvider(const String&, std::span<const uint8_t>) override { }
 +    void navigationGestureDidBegin() override { }
 +    void navigationGestureWillEnd(bool, WebBackForwardListItem&) override { }
@@ -175272,10 +176259,10 @@ index 0000000000000000000000000000000000000000..6e64d2716be872762af65ea69f673bc2
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h b/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..8b087d1bbd5595517788e23c09fdf78088a1a703
+index 0000000000000000000000000000000000000000..745bc526a8088d8be24c2eeac3cda2737ee0d296
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebViewStateHaiku.h
-@@ -0,0 +1,279 @@
+@@ -0,0 +1,290 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -175305,6 +176292,7 @@ index 0000000000000000000000000000000000000000..8b087d1bbd5595517788e23c09fdf780
 +
 +namespace WebKit {
 +
++class AccessibilityMirrorHaiku;
 +class DirectPresentTargetHaiku;
 +class WebPageProxy;
 +class WebView;
@@ -175346,7 +176334,14 @@ index 0000000000000000000000000000000000000000..8b087d1bbd5595517788e23c09fdf780
 +    viewPointerLockHaiku = 'wvpl', viewPointerUnlockHaiku = 'wvpu',
 +    // The system's colors changed (B_COLORS_UPDATED), perhaps between the
 +    // light and the dark appearance: pages are told what to use now.
-+    viewAppearanceHaiku = 'wvap'
++    viewAppearanceHaiku = 'wvap',
++    // air/OS's screen reader (AccessibilityMirrorHaiku, summit#226): to the
++    // page, send the accessibility tree ("off": stop) or perform "action" on
++    // "node"; to the view, the tree ("json") and what changed ("focus",
++    // "nodes" alone, the "tree", what a live region says ("announce"), or
++    // the whole document: "reset").
++    viewAccessibilityRequestHaiku = 'wvax', viewAccessibilityActionHaiku = 'wvaa',
++    viewAccessibilityTreeHaiku = 'wvat', viewAccessibilityChangedHaiku = 'wvac'
 +};
 +
 +struct WebViewGeometryHaiku {
@@ -175369,6 +176364,9 @@ index 0000000000000000000000000000000000000000..8b087d1bbd5595517788e23c09fdf780
 +    std::mutex mutex;
 +    WebViewGeometryHaiku geometry;
 +    BMessenger view;
++    // The page's tree for air/OS's screen reader, while the view is in a
++    // window; used only on its window thread (AccessibilityMirrorHaiku).
++    std::shared_ptr<AccessibilityMirrorHaiku> accessibility;
 +    // Where notifications go. Changed only on the WebKit main thread
 +    // (BWebKitView::SetNotificationTarget), which is where it is read.
 +    BMessenger target;
@@ -202836,10 +203834,21 @@ index 8677b9d9f5c1e61cbe8b0a184b669022d8db3eed..3ef5c5295f89885202331129b3eb86ac
  #include "MessageSenderInlines.h"
  #include "WebAuthenticatorCoordinatorProxyMessages.h"
 diff --git a/Source/WebKit/WebProcess/WebCoreSupport/WebChromeClient.cpp b/Source/WebKit/WebProcess/WebCoreSupport/WebChromeClient.cpp
-index 5d337c36f13b7536068905f99d062affc54900c0..04c9069558d3fa3150c2a7e14517c15f7f67a419 100644
+index 5d337c36f13b7536068905f99d062affc54900c0..b0507aab37d0ee79535dab9d3973aa47b8b99b1e 100644
 --- a/Source/WebKit/WebProcess/WebCoreSupport/WebChromeClient.cpp
 +++ b/Source/WebKit/WebProcess/WebCoreSupport/WebChromeClient.cpp
-@@ -122,6 +122,9 @@
+@@ -80,6 +80,10 @@
+ #include "WebSearchPopupMenu.h"
+ #include "WebWorkerClient.h"
+ #include <WebCore/AXObjectCache.h>
++#if PLATFORM(HAIKU)
++#include <WebCore/AXNotifications.h>
++#include <WebCore/AccessibilityObject.h>
++#endif
+ #include <WebCore/AXSearchManager.h>
+ #include <WebCore/AppHighlight.h>
+ #include <WebCore/BarcodeDetectorInterface.h>
+@@ -122,6 +126,9 @@
  #include <WebCore/LocalFrameView.h>
  #include <WebCore/NotImplemented.h>
  #include <WebCore/PointerLockController.h>
@@ -202849,7 +203858,7 @@ index 5d337c36f13b7536068905f99d062affc54900c0..04c9069558d3fa3150c2a7e14517c15f
  #include <WebCore/PopupMenuClient.h>
  #include <WebCore/RegistrableDomain.h>
  #include <WebCore/RemoteFrame.h>
-@@ -220,6 +223,11 @@
+@@ -220,6 +227,11 @@
  #endif
  
  namespace WebKit {
@@ -202861,7 +203870,7 @@ index 5d337c36f13b7536068905f99d062affc54900c0..04c9069558d3fa3150c2a7e14517c15f
  using namespace WebCore;
  using namespace HTMLNames;
  
-@@ -271,6 +279,8 @@ FloatRect WebChromeClient::windowRect() const
+@@ -271,6 +283,8 @@ FloatRect WebChromeClient::windowRect() const
  #if PLATFORM(MAC)
      if (page->hasCachedWindowFrame())
          return page->windowFrameInUnflippedScreenCoordinates();
@@ -202870,7 +203879,7 @@ index 5d337c36f13b7536068905f99d062affc54900c0..04c9069558d3fa3150c2a7e14517c15f
  #endif
  
      auto sendResult = protect(WebProcess::singleton().parentProcessConnection())->sendSync(Messages::WebPageProxy::GetWindowFrame(), page->identifier());
-@@ -1063,7 +1073,7 @@ RefPtr<DataListSuggestionPicker> WebChromeClient::createDataListSuggestionPicker
+@@ -1063,7 +1077,7 @@ RefPtr<DataListSuggestionPicker> WebChromeClient::createDataListSuggestionPicker
  
  bool WebChromeClient::canShowDataListSuggestionLabels() const
  {
@@ -202879,7 +203888,7 @@ index 5d337c36f13b7536068905f99d062affc54900c0..04c9069558d3fa3150c2a7e14517c15f
      return true;
  #else
      return false;
-@@ -1103,6 +1113,43 @@ void WebChromeClient::transcodeChosenFiles(Vector<String>&& transcodingPaths, St
+@@ -1103,6 +1117,43 @@ void WebChromeClient::transcodeChosenFiles(Vector<String>&& transcodingPaths, St
      page->sendWithAsyncReply(Messages::WebPageProxy::TranscodeChosenFiles(transcodingPaths, destinationUTI, destinationExtension), WTF::move(completion));
  }
      
@@ -202923,7 +203932,7 @@ index 5d337c36f13b7536068905f99d062affc54900c0..04c9069558d3fa3150c2a7e14517c15f
  void WebChromeClient::showShareSheet(ShareDataWithParsedURL&& shareData, CompletionHandler<void(bool)>&& callback)
  {
      if (RefPtr page = m_page.get())
-@@ -1275,6 +1322,13 @@ RefPtr<GraphicsContextGL> WebChromeClient::createGraphicsContextGL(const Graphic
+@@ -1275,6 +1326,13 @@ RefPtr<GraphicsContextGL> WebChromeClient::createGraphicsContextGL(const Graphic
      WebProcess::singleton().initializePlatformDisplayIfNeeded();
      WebProcess::singleton().initializeVulkanIfNeeded();
  #endif
@@ -202937,7 +203946,7 @@ index 5d337c36f13b7536068905f99d062affc54900c0..04c9069558d3fa3150c2a7e14517c15f
  #if ENABLE(GPU_PROCESS)
      if (WebProcess::singleton().shouldUseRemoteRenderingForWebGL()) {
          RefPtr page = m_page.get();
-@@ -1433,6 +1487,18 @@ void WebChromeClient::renderingUpdateFramesPerSecondChanged()
+@@ -1433,6 +1491,18 @@ void WebChromeClient::renderingUpdateFramesPerSecondChanged()
          drawingArea->renderingUpdateFramesPerSecondChanged();
  }
  
@@ -202956,15 +203965,87 @@ index 5d337c36f13b7536068905f99d062affc54900c0..04c9069558d3fa3150c2a7e14517c15f
  unsigned WebChromeClient::remoteImagesCountForTesting() const
  {
      RefPtr page = m_page.get();
-@@ -2351,7 +2417,7 @@ void WebChromeClient::setMockWebAuthenticationConfiguration(const MockWebAuthent
+@@ -2351,20 +2421,77 @@ void WebChromeClient::setMockWebAuthenticationConfiguration(const MockWebAuthent
  }
  #endif
  
 -#if PLATFORM(PLAYSTATION)
-+#if PLATFORM(PLAYSTATION) || PLATFORM(HAIKU)
++#if PLATFORM(HAIKU)
++// While air/OS's screen reader listens (WebPageAccessibilityHaiku.cpp).
++void WebChromeClient::postAccessibilityNotification(WebCore::AccessibilityObject& object, WebCore::AXNotification notification)
++{
++    using enum WebCore::AXNotification;
++    using Change = WebPage::AccessibilityChangeHaiku;
++    RefPtr page = m_page.get();
++    if (!page)
++        return;
++    if (notification == LiveRegionChanged || notification == LiveRegionCreated)
++        page->accessibilityLiveRegionHaiku(object, notification == LiveRegionCreated);
++    // Changes of one node travel alone; anything else asks for the tree.
++    Change change;
++    switch (notification) {
++    case FocusedUIElementChanged:
++    case ActiveDescendantChanged:
++        change = Change::Focus;
++        break;
++    case SelectedChildrenChanged:
++        change = Change::Children;
++        break;
++    case CheckedStateChanged:
++    case DisabledStateChanged:
++    case ExpandedChanged:
++    case InvalidStatusChanged:
++    case MaximumValueChanged:
++    case MinimumValueChanged:
++    case PressedStateChanged:
++    case ReadOnlyStatusChanged:
++    case RequiredStatusChanged:
++    case SelectedStateChanged:
++    case SelectedTextChanged:
++    case ValueChanged:
++        change = Change::Node;
++        break;
++    default:
++        // What is typed changes the inside of a text field, not the tree.
++        change = object.isTextControl() ? Change::Node : Change::Tree;
++        break;
++    }
++    page->accessibilityChangedHaiku(object.objectID().toUInt64(), change);
++}
++#elif PLATFORM(PLAYSTATION)
  void WebChromeClient::postAccessibilityNotification(WebCore::AccessibilityObject&, WebCore::AXNotification)
  {
      notImplemented();
+ }
++#endif
++#if PLATFORM(PLAYSTATION) || PLATFORM(HAIKU)
+ 
+-void WebChromeClient::postAccessibilityNodeTextChangeNotification(WebCore::AccessibilityObject*, WebCore::AXTextChange, unsigned, const String&)
++void WebChromeClient::postAccessibilityNodeTextChangeNotification(WebCore::AccessibilityObject* object, WebCore::AXTextChange, unsigned, const String&)
+ {
++#if PLATFORM(HAIKU)
++    // Typing: the screen reader echoes it.
++    if (RefPtr page = m_page.get(); page && object)
++        page->accessibilityChangedHaiku(object->objectID().toUInt64(), WebPage::AccessibilityChangeHaiku::Node);
++#else
++    UNUSED_PARAM(object);
+     notImplemented();
++#endif
+ }
+ 
+-void WebChromeClient::postAccessibilityFrameLoadingEventNotification(WebCore::AccessibilityObject*, WebCore::AXLoadingEvent)
++void WebChromeClient::postAccessibilityFrameLoadingEventNotification(WebCore::AccessibilityObject* object, WebCore::AXLoadingEvent)
+ {
++#if PLATFORM(HAIKU)
++    if (RefPtr page = m_page.get(); page && object)
++        page->accessibilityChangedHaiku(object->objectID().toUInt64(), WebPage::AccessibilityChangeHaiku::Tree);
++#else
++    UNUSED_PARAM(object);
+     notImplemented();
++#endif
+ }
+ #endif
+ 
 diff --git a/Source/WebKit/WebProcess/WebCoreSupport/WebChromeClient.h b/Source/WebKit/WebProcess/WebCoreSupport/WebChromeClient.h
 index b9dbf9818f1d6bff413fdd81160d6c7b794f7a77..a562f874e2d8dd6cb4cc026f035904cff47344e9 100644
 --- a/Source/WebKit/WebProcess/WebCoreSupport/WebChromeClient.h
@@ -209558,7 +210639,7 @@ index 79d0d01bad64d238a36b8159489bb510891fc025..14ee124a340455b53b33b67501df01a8
  
  bool WebCookieJar::isEligibleForCache(WebFrame& frame, const URL& firstPartyForCookies, const URL& resourceURL) const
 diff --git a/Source/WebKit/WebProcess/WebPage/WebPage.cpp b/Source/WebKit/WebProcess/WebPage/WebPage.cpp
-index 11766a98414863026a09ccea0dbbdd432db4444f..31cea0f74e46fc00342783a9d669b3fb99de7e92 100644
+index 11766a98414863026a09ccea0dbbdd432db4444f..22d2e9e13182f10dd6ac1d33a0c06f8216df3c7f 100644
 --- a/Source/WebKit/WebProcess/WebPage/WebPage.cpp
 +++ b/Source/WebKit/WebProcess/WebPage/WebPage.cpp
 @@ -505,7 +505,7 @@
@@ -209655,7 +210736,17 @@ index 11766a98414863026a09ccea0dbbdd432db4444f..31cea0f74e46fc00342783a9d669b3fb
  #if PLATFORM(GTK) || PLATFORM(WIN) || PLATFORM(PLAYSTATION) || PLATFORM(WPE)
      if (!m_page->settings().acceleratedCompositingEnabled() && m_page->inspectorController().enabled() && m_page->inspectorController().shouldShowOverlay()) {
          graphicsContext.beginTransparencyLayer(1);
-@@ -4997,7 +5034,17 @@ void WebPage::setUserAgent(String&& userAgent)
+@@ -4707,6 +4744,9 @@ void WebPage::connectInspector(Inspector::FrontendChannel::ConnectionType connec
+ void WebPage::disconnectInspector()
+ {
+     ensureInspectorTarget()->disconnect();
++#if PLATFORM(HAIKU)
++    accessibilityAfterInspectorHaiku();
++#endif
+ }
+ 
+ void WebPage::sendMessageToTargetBackend(const String& message)
+@@ -4997,7 +5037,17 @@ void WebPage::setUserAgent(String&& userAgent)
  
  void WebPage::setHasCustomUserAgent(bool hasCustomUserAgent)
  {
@@ -209673,7 +210764,7 @@ index 11766a98414863026a09ccea0dbbdd432db4444f..31cea0f74e46fc00342783a9d669b3fb
  }
  
  void WebPage::suspendActiveDOMObjectsAndAnimations()
-@@ -5461,7 +5508,7 @@ void WebPage::updatePreferences(const WebPreferencesStore& store)
+@@ -5461,7 +5511,7 @@ void WebPage::updatePreferences(const WebPreferencesStore& store)
  
      updateSettingsGenerated(store, settings);
  
@@ -209682,7 +210773,7 @@ index 11766a98414863026a09ccea0dbbdd432db4444f..31cea0f74e46fc00342783a9d669b3fb
      if (!settings.acceleratedCompositingEnabled()) {
          WEBPAGE_RELEASE_LOG(Layers, "updatePreferences: acceleratedCompositingEnabled setting was false. WebKit cannot function in this mode; changing setting to true");
          settings.setAcceleratedCompositingEnabled(true);
-@@ -5719,10 +5766,11 @@ void WebPage::didUpdateRendering(OptionSet<DidUpdateRenderingFlags> flags)
+@@ -5719,10 +5769,11 @@ void WebPage::didUpdateRendering(OptionSet<DidUpdateRenderingFlags> flags)
  #endif
      }
  
@@ -209698,7 +210789,21 @@ index 11766a98414863026a09ccea0dbbdd432db4444f..31cea0f74e46fc00342783a9d669b3fb
          m_didUpdateRenderingAfterCommittingLoad = true;
          send(Messages::WebPageProxy::DidUpdateRenderingAfterCommittingLoad());
      }
-@@ -8450,6 +8498,13 @@ void WebPage::didCommitLoad(WebFrame* frame)
+@@ -7847,6 +7898,13 @@ void WebPage::didChangeSelection(LocalFrame& frame)
+ {
+     didChangeSelectionOrOverflowScrollPosition();
+ 
++#if PLATFORM(HAIKU)
++    // air/OS's screen reader follows the caret (summit#226); WebCore tells
++    // only the Cocoa and ATSPI ports' accessibility when it moves.
++    if (m_accessibilityBridgeHaiku)
++        accessibilityChangedHaiku(0, AccessibilityChangeHaiku::Caret);
++#endif
++
+     if (m_userIsInteracting && frame.selection().isRange())
+         m_userInteractionsSincePageTransition.add(UserInteractionFlag::SelectedRange);
+ 
+@@ -8450,6 +8508,13 @@ void WebPage::didCommitLoad(WebFrame* frame)
      dismissVolumetricScenesForDetachedElements();
  #endif
  
@@ -209713,7 +210818,7 @@ index 11766a98414863026a09ccea0dbbdd432db4444f..31cea0f74e46fc00342783a9d669b3fb
          m_textManipulationIncludesSubframes = false;
      else if (m_textManipulationIncludesSubframes)
 diff --git a/Source/WebKit/WebProcess/WebPage/WebPage.h b/Source/WebKit/WebProcess/WebPage/WebPage.h
-index 5dfb080fb516a2c8bd2ec72245babd8c28d926bf..b6e783c680bb7e15b33eac8288e76ba8c38ff3cd 100644
+index 5dfb080fb516a2c8bd2ec72245babd8c28d926bf..10a0f0be7226251cf4f299364abe9f83e07d4919 100644
 --- a/Source/WebKit/WebProcess/WebPage/WebPage.h
 +++ b/Source/WebKit/WebProcess/WebPage/WebPage.h
 @@ -25,6 +25,10 @@
@@ -209727,7 +210832,15 @@ index 5dfb080fb516a2c8bd2ec72245babd8c28d926bf..b6e783c680bb7e15b33eac8288e76ba8
  #include "APIObject.h"
  #include "MessageReceiver.h"
  #include "MessageSender.h"
-@@ -925,6 +929,25 @@ public:
+@@ -178,6 +182,7 @@ class SharedBufferReference;
+ namespace WebCore {
+ 
+ class AXIsolatedTree;
++class AccessibilityObject;
+ class CachedPage;
+ class CaptureDevice;
+ class DocumentLoader;
+@@ -925,6 +930,37 @@ public:
      bool suspendForProcessSwap();
  
      void sendSetWindowFrame(const WebCore::FloatRect&);
@@ -209749,11 +210862,23 @@ index 5dfb080fb516a2c8bd2ec72245babd8c28d926bf..b6e783c680bb7e15b33eac8288e76ba8
 +    void mediaRemoteCommandHaiku(String&& command);
 +    void exitPictureInPictureHaiku();
 +    void runBookmarkletHaiku(URL&&, WebCore::ScriptExecutionContextIdentifier, CompletionHandler<void(String&&)>&&);
++    // air/OS's screen reader (WebPageAccessibilityHaiku.cpp, summit#226):
++    // the page's accessibility tree as JSON (enabled false turns it off),
++    // an action on one of its nodes, and a change WebCore reported.
++    void accessibilityTreeHaiku(bool enabled, CompletionHandler<void(String&&)>&&);
++    void accessibilityActionHaiku(uint64_t node, uint32_t action);
++    // What changed: the tree's shape (or anything else), one node, a node and
++    // its children, the focus, the focused field's caret, or only what a
++    // live region says.
++    enum class AccessibilityChangeHaiku : uint8_t { Tree, Node, Children, Focus, Caret, Announcement };
++    void accessibilityChangedHaiku(uint64_t node, AccessibilityChangeHaiku);
++    void accessibilityLiveRegionHaiku(WebCore::AccessibilityObject&, bool created);
++    void accessibilityAfterInspectorHaiku();
 +#endif
  
      double textZoomFactor() const;
      void didSetTextZoomFactor(double);
-@@ -1906,7 +1929,7 @@ public:
+@@ -1906,7 +1942,7 @@ public:
  #if ENABLE(WK_WEB_EXTENSIONS)
      WebExtensionControllerProxy* webExtensionControllerProxy() const
      {
@@ -209762,7 +210887,7 @@ index 5dfb080fb516a2c8bd2ec72245babd8c28d926bf..b6e783c680bb7e15b33eac8288e76ba8
          return m_webExtensionController.get();
  #else
          return nullptr;
-@@ -2534,6 +2557,13 @@ private:
+@@ -2534,6 +2570,13 @@ private:
      void runJavaScript(WebFrame*, RunJavaScriptParameters&&, ContentWorldIdentifier, bool, CompletionHandler<void(RunJavaScriptResult&&)>&&);
      void runJavaScriptInFrameInScriptWorld(RunJavaScriptParameters&&, std::optional<WebCore::FrameIdentifier>, const ContentWorldData&, bool, CompletionHandler<void(RunJavaScriptResult&&)>&&);
      void clearContentWorld(ContentWorldIdentifier, CompletionHandler<void()>&&);
@@ -209776,7 +210901,7 @@ index 5dfb080fb516a2c8bd2ec72245babd8c28d926bf..b6e783c680bb7e15b33eac8288e76ba8
      void getAccessibilityTreeData(CompletionHandler<void(const std::optional<IPC::SharedBufferReference>&)>&&);
      void updateRenderingWithForcedRepaint(CompletionHandler<void()>&&);
      void takeSnapshot(WebCore::IntRect snapshotRect, WebCore::IntSize bitmapSize, SnapshotOptions, CompletionHandler<void(std::optional<ImageBufferBackendHandle>&&, WebCore::Headroom)>&&);
-@@ -3087,8 +3117,12 @@ private:
+@@ -3087,8 +3130,28 @@ private:
  
      const Ref<WebUserContentController> m_userContentController;
  
@@ -209784,6 +210909,22 @@ index 5dfb080fb516a2c8bd2ec72245babd8c28d926bf..b6e783c680bb7e15b33eac8288e76ba8
 -    const RefPtr<WebExtensionControllerProxy> m_webExtensionController;
 +#if PLATFORM(HAIKU)
 +    WebCore::FloatRect m_windowFrameHaiku;
++    // A screen reader asked for the accessibility tree (summit#226).
++    bool m_accessibilityBridgeHaiku { false };
++    bool m_accessibilityEnabledByBridgeHaiku { false };
++    void sendAccessibilityChangesHaiku(bool tree);
++    HashSet<uint64_t> m_accessibilityDirtyNodesHaiku;
++    HashSet<uint64_t> m_accessibilityDirtyChildrenHaiku;
++    bool m_accessibilityFocusChangedHaiku { false };
++    bool m_accessibilityCaretMovedHaiku { false };
++    bool m_accessibilityTreeChangedHaiku { false };
++    bool m_accessibilityNodesQueuedHaiku { false };
++    bool m_accessibilityTreeQueuedHaiku { false };
++    Seconds m_accessibilityTreeCostHaiku;
++    uint64_t m_accessibilityFocusSentHaiku { 0 };
++    String m_accessibilityAnnouncementHaiku;
++    bool m_accessibilityAnnouncementAssertiveHaiku { false };
++    HashMap<uint64_t, String> m_accessibilityLiveRegionTextHaiku;
 +#endif
 +
 +#if ENABLE(WK_WEB_EXTENSIONS) && (PLATFORM(COCOA) || PLATFORM(HAIKU))
@@ -209792,7 +210933,7 @@ index 5dfb080fb516a2c8bd2ec72245babd8c28d926bf..b6e783c680bb7e15b33eac8288e76ba8
  
      const UniqueRef<WebScreenOrientationManager> m_screenOrientationManager;
 diff --git a/Source/WebKit/WebProcess/WebPage/WebPage.messages.in b/Source/WebKit/WebProcess/WebPage/WebPage.messages.in
-index 483df2ae00809b454f95152d8d8bb462a150fe22..88a8b18062e685eeffb96fc658d6a87d8c4078b9 100644
+index 483df2ae00809b454f95152d8d8bb462a150fe22..a05667ff095739808609f721f6644d29bccfbc4b 100644
 --- a/Source/WebKit/WebProcess/WebPage/WebPage.messages.in
 +++ b/Source/WebKit/WebProcess/WebPage/WebPage.messages.in
 @@ -288,6 +288,11 @@ messages -> WebPage WantsAsyncDispatchMessage {
@@ -209807,7 +210948,7 @@ index 483df2ae00809b454f95152d8d8bb462a150fe22..88a8b18062e685eeffb96fc658d6a87d
  
      ClearContentWorld(WebKit::ContentWorldIdentifier worldIdentifier) -> ()
  
-@@ -549,6 +554,15 @@ messages -> WebPage WantsAsyncDispatchMessage {
+@@ -549,6 +554,17 @@ messages -> WebPage WantsAsyncDispatchMessage {
  #endif
      DrawToPDF(std::optional<WebCore::FloatRect> rect, bool allowTransparentBackground) -> (RefPtr<WebCore::SharedBuffer> data)
  #endif
@@ -209818,12 +210959,14 @@ index 483df2ae00809b454f95152d8d8bb462a150fe22..88a8b18062e685eeffb96fc658d6a87d
 +    PictureInPictureCommandHaiku(String command)
 +    MediaRemoteCommandHaiku(String command)
 +    ExitPictureInPictureHaiku()
++    AccessibilityTreeHaiku(bool enabled) -> (String json)
++    AccessibilityActionHaiku(uint64_t node, uint32_t action)
 +    DrawPagesForPrintingHaiku(WebCore::FrameIdentifier frameID, struct WebKit::PrintInfo printInfo, uint32_t first, uint32_t count, float rasterScale, bool printBackgrounds) -> (std::optional<WebCore::SharedMemory::Handle> data, uint32_t pageCount, WebCore::IntSize pageSize)
 +#endif
  #if PLATFORM(GTK)
      DrawPagesForPrinting(WebCore::FrameIdentifier frameID, struct WebKit::PrintInfo printInfo) -> (std::optional<WebCore::SharedMemory::Handle> data, WebCore::ResourceError error)
      DrawPagesForPrintingDuringDOMPrintOperation(WebCore::FrameIdentifier frameID, struct WebKit::PrintInfo printInfo) -> (std::optional<WebCore::SharedMemory::Handle> data, WebCore::ResourceError error) AllowedWhenWaitingForSyncReplyDuringUnboundedIPC
-@@ -631,6 +645,9 @@ messages -> WebPage WantsAsyncDispatchMessage {
+@@ -631,6 +647,9 @@ messages -> WebPage WantsAsyncDispatchMessage {
      SetWritingSuggestion(String text, struct WebKit::EditingRange selectionRange)
      ConfirmCompositionAsync()
  #endif
@@ -211537,6 +212680,624 @@ index 0000000000000000000000000000000000000000..7459ce25f180160a1c12431c73926a1f
 +
 +#endif // ENABLE(INSPECTOR)
 +
+diff --git a/Source/WebKit/WebProcess/WebPage/haiku/WebPageAccessibilityHaiku.cpp b/Source/WebKit/WebProcess/WebPage/haiku/WebPageAccessibilityHaiku.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..8cff5ece8a3a60335d01368ce35f59ccc63c73f1
+--- /dev/null
++++ b/Source/WebKit/WebProcess/WebPage/haiku/WebPageAccessibilityHaiku.cpp
+@@ -0,0 +1,612 @@
++/*
++ * Copyright (C) 2026 air/OS contributors.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHORS ``AS IS'' AND ANY EXPRESS OR
++ * IMPLIED WARRANTIES ARE DISCLAIMED. IN NO EVENT SHALL THE AUTHORS BE LIABLE
++ * FOR ANY DAMAGES ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE.
++ */
++
++// What air/OS's screen reader sees of a page (summit#226). The browser's
++// view publishes the page as a BAccessible tree (AccessibilityMirrorHaiku in
++// the UI process), but WebCore's accessibility tree lives here: the view asks
++// for it (accessibilityTreeHaiku, which turns accessibility on while a
++// screen reader listens) as JSON. Changes to single nodes (a value, the
++// caret, a check box, the focus) follow 30 ms later with just those nodes;
++// for anything else this process says that the tree changed and the view
++// asks for all of it again, at most every 150 ms, or less often where the
++// tree is expensive, so that a busy page spends at most a tenth of its time
++// on it. What the page's live regions say travels with the changes.
++// Nothing here runs unless a screen reader asked.
++
++#include "config.h"
++#include "WebPage.h"
++
++#include "MessageSenderInlines.h"
++#include "WebFrame.h"
++#include "WebPageProxyMessages.h"
++#include <WebCore/AXCoreObject.h>
++#include <WebCore/AXObjectCache.h>
++#include <WebCore/AXUtilities.h>
++#include <WebCore/AccessibilityObject.h>
++#include <WebCore/Document.h>
++#include <WebCore/LocalFrame.h>
++#include <WebCore/LocalFrameInlines.h>
++#include <WebCore/LocalFrameView.h>
++#include <WebCore/Page.h>
++#include <wtf/Deque.h>
++#include <cstdio>
++#include <cstdlib>
++#include <wtf/JSONValues.h>
++#include <wtf/RunLoop.h>
++
++namespace WebKit {
++using namespace WebCore;
++
++// air/OS's B_ACCESSIBLE_STATE_* and B_ACCESSIBLE_ACTION_* bits
++// (<private/interface/Accessible.h>), which this process can not include.
++namespace AccessibleHaiku {
++enum : uint64_t {
++    StateFocusable = 1ULL << 0, StateFocused = 1ULL << 1, StateDisabled = 1ULL << 2, StateCheckable = 1ULL << 3, StateChecked = 1ULL << 4,
++    StateMixed = 1ULL << 5, StatePressed = 1ULL << 6, StateSelectable = 1ULL << 7, StateSelected = 1ULL << 8, StateMultiSelectable = 1ULL << 9,
++    StateExpandable = 1ULL << 10, StateExpanded = 1ULL << 11, StateEditable = 1ULL << 12, StateReadOnly = 1ULL << 13, StateProtected = 1ULL << 15,
++    StateOffscreen = 1ULL << 17, StateRequired = 1ULL << 21, StateInvalid = 1ULL << 22, StateHasPopup = 1ULL << 24, StateVisited = 1ULL << 25,
++};
++enum : uint32_t {
++    ActionPress = 1 << 0, ActionFocus = 1 << 1, ActionIncrement = 1 << 2, ActionDecrement = 1 << 3, ActionSelect = 1 << 4, ActionExpand = 1 << 5,
++    ActionCollapse = 1 << 6, ActionScrollTo = 1 << 8,
++};
++}
++
++// SUMMIT_AX_TRACE=1: what each tree costs.
++static bool accessibilityTraceHaiku()
++{
++    static bool trace = getenv("SUMMIT_AX_TRACE");
++    return trace;
++}
++
++// Pages larger than this are cut off breadth first: a screen reader gets
++// the page's structure and the start of long lists.
++static constexpr unsigned maximumAccessibilityNodesHaiku = 6000;
++
++static AXObjectCache* accessibilityCacheHaiku(WebPage& page)
++{
++    RefPtr frame = page.mainWebFrame().coreLocalFrame();
++    RefPtr document = frame ? frame->document() : nullptr;
++    return document ? document->axObjectCache() : nullptr;
++}
++
++// The first help or summary text, which the ATK and AT-SPI ports give as
++// the description.
++static String accessibleDescriptionHaiku(AXCoreObject& object)
++{
++    Vector<AccessibilityText> texts;
++    object.accessibilityText(texts);
++    for (auto& text : texts) {
++        if (!text.text.isEmpty() && (text.textSource == AccessibilityTextSource::Help || text.textSource == AccessibilityTextSource::Summary))
++            return text.text;
++    }
++    return { };
++}
++
++// The accessible name: the first text the accessible name computation gives
++// that is not help or a summary (as the ATK and AT-SPI ports take it).
++static String accessibleNameHaiku(AXCoreObject& object)
++{
++    if (object.role() == AccessibilityRole::ListBoxOption || object.role() == AccessibilityRole::MenuListOption) {
++        auto value = object.stringValue();
++        if (!value.isEmpty())
++            return value;
++    }
++    Vector<AccessibilityText> texts;
++    object.accessibilityText(texts);
++    for (auto& text : texts) {
++        if (!text.text.isEmpty() && text.textSource != AccessibilityTextSource::Help && text.textSource != AccessibilityTextSource::Summary)
++            return text.text;
++    }
++    if (object.role() == AccessibilityRole::StaticText)
++        return object.stringValue();
++    return { };
++}
++
++static bool isCheckableHaiku(AccessibilityRole role)
++{
++    switch (role) {
++    case AccessibilityRole::Checkbox:
++    case AccessibilityRole::RadioButton:
++    case AccessibilityRole::Switch:
++    case AccessibilityRole::MenuItemCheckbox:
++    case AccessibilityRole::MenuItemRadio:
++    case AccessibilityRole::ToggleButton:
++        return true;
++    default:
++        return false;
++    }
++}
++
++static bool isSelectableHaiku(AccessibilityRole role)
++{
++    switch (role) {
++    case AccessibilityRole::ListBoxOption:
++    case AccessibilityRole::MenuListOption:
++    case AccessibilityRole::Tab:
++    case AccessibilityRole::Row:
++    case AccessibilityRole::TreeItem:
++    case AccessibilityRole::GridCell:
++        return true;
++    default:
++        return false;
++    }
++}
++
++static bool isPressableHaiku(AXCoreObject& object)
++{
++    switch (object.role()) {
++    case AccessibilityRole::Button:
++    case AccessibilityRole::ToggleButton:
++    case AccessibilityRole::PopUpButton:
++    case AccessibilityRole::Link:
++    case AccessibilityRole::MenuItem:
++    case AccessibilityRole::MenuItemCheckbox:
++    case AccessibilityRole::MenuItemRadio:
++    case AccessibilityRole::Summary:
++    case AccessibilityRole::Tab:
++        return true;
++    default:
++        return isCheckableHaiku(object.role());
++    }
++}
++
++static uint64_t accessibleStatesHaiku(AXCoreObject& object)
++{
++    uint64_t states = 0;
++    auto role = object.role();
++    if (object.canSetFocusAttribute())
++        states |= AccessibleHaiku::StateFocusable;
++    if (object.isFocused())
++        states |= AccessibleHaiku::StateFocused;
++    if (!object.isEnabled())
++        states |= AccessibleHaiku::StateDisabled;
++    if (isCheckableHaiku(role)) {
++        states |= AccessibleHaiku::StateCheckable;
++        auto value = object.checkboxOrRadioValue();
++        if (value == AccessibilityButtonState::On)
++            states |= AccessibleHaiku::StateChecked;
++        else if (value == AccessibilityButtonState::Mixed)
++            states |= AccessibleHaiku::StateMixed;
++    }
++    if (object.isPressed())
++        states |= AccessibleHaiku::StatePressed;
++    if (isSelectableHaiku(role))
++        states |= AccessibleHaiku::StateSelectable;
++    if (object.isSelected())
++        states |= AccessibleHaiku::StateSelected;
++    if (object.isMultiSelectable())
++        states |= AccessibleHaiku::StateMultiSelectable;
++    if (object.supportsExpanded()) {
++        states |= AccessibleHaiku::StateExpandable;
++        if (object.isExpanded())
++            states |= AccessibleHaiku::StateExpanded;
++    }
++    if (object.isTextControl())
++        states |= object.canSetValueAttribute() ? AccessibleHaiku::StateEditable : AccessibleHaiku::StateReadOnly;
++    if (object.isSecureField())
++        states |= AccessibleHaiku::StateProtected;
++    if (object.isOffScreen())
++        states |= AccessibleHaiku::StateOffscreen;
++    if (object.isRequired())
++        states |= AccessibleHaiku::StateRequired;
++    if (auto invalid = object.invalidStatusIncludingInferred(); !invalid.isEmpty() && invalid != "false"_s)
++        states |= AccessibleHaiku::StateInvalid;
++    if (object.hasPopup())
++        states |= AccessibleHaiku::StateHasPopup;
++    if (object.isVisited())
++        states |= AccessibleHaiku::StateVisited;
++    return states;
++}
++
++static uint32_t accessibleActionsHaiku(AXCoreObject& object)
++{
++    uint32_t actions = AccessibleHaiku::ActionScrollTo;
++    if (isPressableHaiku(object))
++        actions |= AccessibleHaiku::ActionPress;
++    if (object.canSetFocusAttribute())
++        actions |= AccessibleHaiku::ActionFocus;
++    if (object.role() == AccessibilityRole::Slider || object.role() == AccessibilityRole::SpinButton)
++        actions |= AccessibleHaiku::ActionIncrement | AccessibleHaiku::ActionDecrement;
++    if (isSelectableHaiku(object.role()))
++        actions |= AccessibleHaiku::ActionSelect;
++    if (object.supportsExpanded())
++        actions |= AccessibleHaiku::ActionExpand | AccessibleHaiku::ActionCollapse;
++    return actions;
++}
++
++static Ref<JSON::Object> accessibleNodeHaiku(AXCoreObject& object, uint64_t parent)
++{
++    auto node = JSON::Object::create();
++    node->setDouble("id"_s, object.objectID().toUInt64());
++    node->setDouble("parent"_s, parent);
++    node->setString("role"_s, roleToString(object.role()));
++    auto name = accessibleNameHaiku(object);
++    if (!name.isEmpty())
++        node->setString("name"_s, name);
++    auto description = accessibleDescriptionHaiku(object);
++    if (!description.isEmpty() && description != name)
++        node->setString("description"_s, description);
++    // A password field's text is never exposed.
++    if (!object.isSecureField() && object.role() != AccessibilityRole::StaticText && object.role() != AccessibilityRole::Link) {
++        auto value = object.stringValue();
++        if (!value.isEmpty() && value != name)
++            node->setString("value"_s, value);
++    }
++    if (object.supportsRangeValue()) {
++        auto range = JSON::Array::create();
++        range->pushDouble(object.valueForRange());
++        range->pushDouble(object.minValueForRange());
++        range->pushDouble(object.maxValueForRange());
++        node->setArray("range"_s, WTF::move(range));
++    }
++    node->setDouble("states"_s, accessibleStatesHaiku(object));
++    node->setInteger("actions"_s, accessibleActionsHaiku(object));
++    if (unsigned level = object.headingLevel())
++        node->setInteger("level"_s, level);
++    if (object.isLink()) {
++        auto url = object.url();
++        if (url.isValid())
++            node->setString("url"_s, url.string());
++    }
++    // In the view's coordinates: the page's root view, which is the
++    // BWebKitView's.
++    auto rect = snappedIntRect(object.elementRect());
++    if (RefPtr view = object.documentFrameView())
++        rect = view->contentsToRootView(rect);
++    auto frame = JSON::Array::create();
++    frame->pushInteger(rect.x());
++    frame->pushInteger(rect.y());
++    frame->pushInteger(rect.width());
++    frame->pushInteger(rect.height());
++    node->setArray("frame"_s, WTF::move(frame));
++    // The focused text field's caret, in UTF-8 bytes as air/OS counts them,
++    // so that the screen reader can follow it; a password field's length.
++    if (object.isTextControl() && object.isFocused()) {
++        auto value = object.isSecureField() ? String() : object.stringValue();
++        auto range = object.selectedTextRange();
++        auto offset = [&](unsigned position) -> int {
++            if (object.isSecureField())
++                return position;
++            return value.substring(0, position).utf8().length();
++        };
++        auto selection = JSON::Array::create();
++        selection->pushInteger(offset(range.location));
++        selection->pushInteger(offset(range.location + range.length));
++        node->setArray("selection"_s, WTF::move(selection));
++        if (object.isSecureField())
++            node->setInteger("length"_s, object.stringValue().length());
++    }
++    return node;
++}
++
++// A live region's text, as a screen reader would read it.
++static String liveRegionTextHaiku(AXCoreObject& region)
++{
++    TextUnderElementMode mode;
++    mode.includeFocusableContent = true;
++    mode.descendIntoContainers = DescendIntoContainers::Yes;
++    auto text = region.textUnderElement(mode);
++    if (text.isEmpty())
++        text = accessibleNameHaiku(region);
++    return text.simplifyWhiteSpace(isASCIIWhitespace);
++}
++
++void WebPage::accessibilityTreeHaiku(bool enabled, CompletionHandler<void(String&&)>&& completionHandler)
++{
++    if (!enabled) {
++        m_accessibilityBridgeHaiku = false;
++        m_accessibilityLiveRegionTextHaiku.clear();
++        m_accessibilityAnnouncementHaiku = { };
++        m_accessibilityDirtyNodesHaiku.clear();
++        m_accessibilityDirtyChildrenHaiku.clear();
++        m_accessibilityFocusChangedHaiku = false;
++        m_accessibilityCaretMovedHaiku = false;
++        m_accessibilityTreeChangedHaiku = false;
++        // Only what this turned on: the developer tools may want it too.
++        if (std::exchange(m_accessibilityEnabledByBridgeHaiku, false) && AXObjectCache::accessibilityEnabled())
++            AXObjectCache::disableAccessibilityForTesting();
++        return completionHandler({ });
++    }
++    m_accessibilityBridgeHaiku = true;
++    if (!AXObjectCache::accessibilityEnabled()) {
++        AXObjectCache::enableAccessibility();
++        m_accessibilityEnabledByBridgeHaiku = true;
++    }
++
++    auto start = MonotonicTime::now();
++    RefPtr frame = mainWebFrame().coreLocalFrame();
++    auto* cache = accessibilityCacheHaiku(*this);
++    RefPtr root = frame && cache ? cache->rootObjectForFrame(*frame) : nullptr;
++    if (!root) {
++        if (accessibilityTraceHaiku())
++            fprintf(stderr, "Summit accessibility: no tree (frame %d cache %d)\n", !!frame, !!cache);
++        return completionHandler({ });
++    }
++
++    RefPtr page = corePage();
++    RefPtr focused = page ? cache->focusedObjectForPage(page.get()) : nullptr;
++    auto nodes = JSON::Array::create();
++    // The children lists sent, by node: a cut-off tree gets the path to the
++    // focus added.
++    HashMap<uint64_t, Ref<JSON::Array>> childLists;
++    // Breadth first, so that a cut-off keeps the page's outline.
++    Deque<std::pair<Ref<AXCoreObject>, uint64_t>> queue;
++    queue.append({ *root, 0 });
++    unsigned count = 0;
++    while (!queue.isEmpty() && count < maximumAccessibilityNodesHaiku) {
++        auto [object, parent] = queue.takeFirst();
++        auto node = accessibleNodeHaiku(object, parent);
++        // What live regions say when the screen reader starts listening is
++        // not news.
++        if (object->supportsLiveRegion()) {
++            uint64_t identifier = object->objectID().toUInt64();
++            if (!m_accessibilityLiveRegionTextHaiku.contains(identifier) && m_accessibilityLiveRegionTextHaiku.size() < 500)
++                m_accessibilityLiveRegionTextHaiku.set(identifier, liveRegionTextHaiku(object));
++        }
++        auto children = JSON::Array::create();
++        for (auto& child : object->unignoredChildren()) {
++            if (count + queue.size() >= maximumAccessibilityNodesHaiku)
++                break;
++            children->pushDouble(child->objectID().toUInt64());
++            queue.append({ child, object->objectID().toUInt64() });
++        }
++        node->setArray("children"_s, children.copyRef());
++        childLists.add(object->objectID().toUInt64(), WTF::move(children));
++        nodes->pushObject(WTF::move(node));
++        ++count;
++    }
++    bool truncated = !queue.isEmpty() || count >= maximumAccessibilityNodesHaiku;
++
++    // Where the tree was cut off before the focus, the way down to it.
++    if (truncated && focused && !childLists.contains(focused->objectID().toUInt64())) {
++        Vector<Ref<AXCoreObject>> path;
++        RefPtr<AXCoreObject> ancestor = focused;
++        while (ancestor && !childLists.contains(ancestor->objectID().toUInt64()) && path.size() < 200) {
++            path.append(*ancestor);
++            ancestor = ancestor->parentObjectUnignored();
++        }
++        if (ancestor && childLists.contains(ancestor->objectID().toUInt64())) {
++            uint64_t parent = ancestor->objectID().toUInt64();
++            childLists.get(parent)->pushDouble(path.last()->objectID().toUInt64());
++            for (size_t i = path.size(); i--;) {
++                auto node = accessibleNodeHaiku(path[i], parent);
++                auto children = JSON::Array::create();
++                if (i)
++                    children->pushDouble(path[i - 1]->objectID().toUInt64());
++                node->setArray("children"_s, WTF::move(children));
++                nodes->pushObject(WTF::move(node));
++                parent = path[i]->objectID().toUInt64();
++            }
++        }
++    }
++
++    auto tree = JSON::Object::create();
++    tree->setArray("nodes"_s, WTF::move(nodes));
++    if (truncated)
++        tree->setBoolean("truncated"_s, true);
++    if (RefPtr document = frame->document())
++        tree->setString("title"_s, document->title());
++    if (focused) {
++        m_accessibilityFocusSentHaiku = focused->objectID().toUInt64();
++        tree->setDouble("focus"_s, m_accessibilityFocusSentHaiku);
++    }
++    auto json = tree->toJSONString();
++    m_accessibilityTreeCostHaiku = MonotonicTime::now() - start;
++    if (accessibilityTraceHaiku())
++        fprintf(stderr, "Summit accessibility: tree of %u nodes, %u characters in %.1f ms\n", count, json.length(), m_accessibilityTreeCostHaiku.milliseconds());
++    completionHandler(WTF::move(json));
++}
++
++// The inspector turns accessibility off as it goes when it turned it on,
++// which it may have done before the screen reader started listening.
++void WebPage::accessibilityAfterInspectorHaiku()
++{
++    if (!m_accessibilityBridgeHaiku || AXObjectCache::accessibilityEnabled())
++        return;
++    AXObjectCache::enableAccessibility();
++    m_accessibilityEnabledByBridgeHaiku = true;
++    accessibilityChangedHaiku(0, AccessibilityChangeHaiku::Tree);
++}
++
++void WebPage::accessibilityActionHaiku(uint64_t node, uint32_t action)
++{
++    if (!m_accessibilityBridgeHaiku || !AXID::isValidIdentifier(node))
++        return;
++    auto* cache = accessibilityCacheHaiku(*this);
++    RefPtr object = cache ? cache->objectForID(AXID { node }) : nullptr;
++    if (!object)
++        return;
++    switch (action) {
++    case AccessibleHaiku::ActionPress:
++        object->press();
++        break;
++    case AccessibleHaiku::ActionFocus:
++        object->setFocused(true);
++        break;
++    case AccessibleHaiku::ActionIncrement:
++        object->increment();
++        break;
++    case AccessibleHaiku::ActionDecrement:
++        object->decrement();
++        break;
++    case AccessibleHaiku::ActionSelect:
++        object->setSelected(true);
++        break;
++    case AccessibleHaiku::ActionExpand:
++        object->setIsExpanded(true);
++        break;
++    case AccessibleHaiku::ActionCollapse:
++        object->setIsExpanded(false);
++        break;
++    case AccessibleHaiku::ActionScrollTo:
++        object->scrollToMakeVisible();
++        break;
++    default:
++        break;
++    }
++}
++
++void WebPage::accessibilityLiveRegionHaiku(AccessibilityObject& region, bool created)
++{
++    if (!m_accessibilityBridgeHaiku)
++        return;
++    auto status = region.liveRegionStatus();
++    if (!AXCoreObject::liveRegionStatusIsEnabled(AtomString { status }))
++        return;
++    uint64_t identifier = region.objectID().toUInt64();
++    auto text = liveRegionTextHaiku(region);
++    if (m_accessibilityLiveRegionTextHaiku.size() > 500)
++        m_accessibilityLiveRegionTextHaiku.clear();
++    auto previous = m_accessibilityLiveRegionTextHaiku.get(identifier);
++    m_accessibilityLiveRegionTextHaiku.set(identifier, text);
++
++    // A region's first content is not news, except an alert's.
++    bool alert = region.role() == AccessibilityRole::ApplicationAlert || region.role() == AccessibilityRole::ApplicationAlertDialog;
++    if (created && !alert)
++        return;
++    if (text.isEmpty() || text == previous)
++        return;
++    // What was added at either end, unless the region asks to be read whole.
++    String announcement = text;
++    if (!region.liveRegionAtomic() && !previous.isEmpty()) {
++        if (text.startsWith(previous))
++            announcement = text.substring(previous.length()).trim(isASCIIWhitespace);
++        else if (text.endsWith(previous))
++            announcement = text.left(text.length() - previous.length()).trim(isASCIIWhitespace);
++    }
++    if (announcement.isEmpty())
++        return;
++    if (m_accessibilityAnnouncementHaiku.length() > 2000)
++        return;
++    if (!m_accessibilityAnnouncementHaiku.isEmpty())
++        m_accessibilityAnnouncementHaiku = makeString(m_accessibilityAnnouncementHaiku, '\n', announcement);
++    else
++        m_accessibilityAnnouncementHaiku = WTF::move(announcement);
++    if (equalLettersIgnoringASCIICase(status, "assertive"_s))
++        m_accessibilityAnnouncementAssertiveHaiku = true;
++    accessibilityChangedHaiku(identifier, AccessibilityChangeHaiku::Announcement);
++}
++
++void WebPage::accessibilityChangedHaiku(uint64_t node, AccessibilityChangeHaiku change)
++{
++    if (!m_accessibilityBridgeHaiku)
++        return;
++    switch (change) {
++    case AccessibilityChangeHaiku::Tree:
++        m_accessibilityTreeChangedHaiku = true;
++        break;
++    case AccessibilityChangeHaiku::Node:
++        if (node)
++            m_accessibilityDirtyNodesHaiku.add(node);
++        break;
++    case AccessibilityChangeHaiku::Children:
++        if (node)
++            m_accessibilityDirtyChildrenHaiku.add(node);
++        break;
++    case AccessibilityChangeHaiku::Focus:
++        m_accessibilityFocusChangedHaiku = true;
++        break;
++    case AccessibilityChangeHaiku::Caret:
++        m_accessibilityCaretMovedHaiku = true;
++        break;
++    case AccessibilityChangeHaiku::Announcement:
++        break;
++    }
++
++    if (change == AccessibilityChangeHaiku::Tree) {
++        if (std::exchange(m_accessibilityTreeQueuedHaiku, true))
++            return;
++        auto delay = std::clamp(m_accessibilityTreeCostHaiku * 10, Seconds { 150_ms }, Seconds { 2_s });
++        RunLoop::mainSingleton().dispatchAfter(delay, [weakThis = WeakPtr { *this }] {
++            RefPtr page = weakThis.get();
++            if (!page)
++                return;
++            page->m_accessibilityTreeQueuedHaiku = false;
++            if (page->m_accessibilityBridgeHaiku && std::exchange(page->m_accessibilityTreeChangedHaiku, false))
++                page->sendAccessibilityChangesHaiku(true);
++        });
++        return;
++    }
++    if (std::exchange(m_accessibilityNodesQueuedHaiku, true))
++        return;
++    RunLoop::mainSingleton().dispatchAfter(30_ms, [weakThis = WeakPtr { *this }] {
++        RefPtr page = weakThis.get();
++        if (!page)
++            return;
++        page->m_accessibilityNodesQueuedHaiku = false;
++        if (page->m_accessibilityBridgeHaiku)
++            page->sendAccessibilityChangesHaiku(false);
++    });
++}
++
++// The nodes that changed by themselves (with the focus, if it moved), or
++// that the tree changed.
++void WebPage::sendAccessibilityChangesHaiku(bool treeChanged)
++{
++    uint64_t focus = 0;
++    String nodesJSON;
++    if (!treeChanged) {
++        auto* cache = accessibilityCacheHaiku(*this);
++        RefPtr page = corePage();
++        RefPtr focused = cache && page ? cache->focusedObjectForPage(page.get()) : nullptr;
++        auto dirty = std::exchange(m_accessibilityDirtyNodesHaiku, { });
++        if (std::exchange(m_accessibilityFocusChangedHaiku, false) && focused) {
++            focus = focused->objectID().toUInt64();
++            // The node that lost the focus says so too.
++            if (m_accessibilityFocusSentHaiku)
++                dirty.add(m_accessibilityFocusSentHaiku);
++            m_accessibilityFocusSentHaiku = focus;
++            dirty.add(focus);
++        }
++        if (std::exchange(m_accessibilityCaretMovedHaiku, false) && focused)
++            dirty.add(focused->objectID().toUInt64());
++        for (auto identifier : std::exchange(m_accessibilityDirtyChildrenHaiku, { })) {
++            RefPtr object = cache ? cache->objectForID(AXID { identifier }) : nullptr;
++            if (!object)
++                continue;
++            dirty.add(identifier);
++            for (auto& child : object->unignoredChildren()) {
++                if (dirty.size() >= 500)
++                    break;
++                dirty.add(child->objectID().toUInt64());
++            }
++        }
++        if (cache && !dirty.isEmpty()) {
++            auto nodes = JSON::Array::create();
++            for (auto identifier : dirty) {
++                RefPtr object = AXID::isValidIdentifier(identifier) ? cache->objectForID(AXID { identifier }) : nullptr;
++                if (object && !object->isIgnored())
++                    nodes->pushObject(accessibleNodeHaiku(*object, 0));
++            }
++            if (nodes->length()) {
++                auto changes = JSON::Object::create();
++                changes->setArray("nodes"_s, WTF::move(nodes));
++                nodesJSON = changes->toJSONString();
++            }
++        }
++    }
++    auto announcement = std::exchange(m_accessibilityAnnouncementHaiku, { });
++    bool assertive = std::exchange(m_accessibilityAnnouncementAssertiveHaiku, false);
++    if (!treeChanged && !focus && nodesJSON.isEmpty() && announcement.isEmpty())
++        return;
++    if (accessibilityTraceHaiku())
++        fprintf(stderr, "Summit accessibility: %s, %u characters of nodes, focus %llu\n", treeChanged ? "tree changed" : "nodes changed", nodesJSON.length(), static_cast<unsigned long long>(focus));
++    send(Messages::WebPageProxy::AccessibilityChangedHaiku(focus, announcement, assertive, nodesJSON, treeChanged));
++}
++
++} // namespace WebKit
 diff --git a/Source/WebKit/WebProcess/WebPage/haiku/WebPageHaiku.cpp b/Source/WebKit/WebProcess/WebPage/haiku/WebPageHaiku.cpp
 new file mode 100644
 index 0000000000000000000000000000000000000000..21f278735563ccf7fba622283107cf94e3a1079e

@@ -62,13 +62,15 @@ meanwhile matched `more` too.
 
 WebKit builds its accessibility tree only once something asks for it, and
 then keeps it for every page of the web process, at a cost on each change.
-On Haiku nothing asks except the developer tools: Elements › Accessibility
+On Haiku two things ask: air/OS's screen reader (next section) and the
+developer tools. Elements › Accessibility
 shows the selected element's role, name (label) and states
 (`DOM.getAccessibilityPropertiesForNode`), asked for only while that tab is
 shown, and the MCP `inspector` tool can send the same command. When the
 inspector session that turned accessibility on ends (the tools close), the
 engine turns it off again in that process (`InspectorDOMAgent`,
-`PLATFORM(HAIKU)`): there is no assistive technology to keep it on for.
+`PLATFORM(HAIKU)`); a page the screen reader listens to turns it straight
+back on (`WebPage::accessibilityAfterInspectorHaiku`).
 
 Verified on the X399 (25 Oct, ax118b build) with a test page: the tab
 showed a button as role `button`, label "Mute", pressed; a checkbox as
@@ -76,6 +78,56 @@ showed a button as role `button`, label "Mute", pressed; a checkbox as
 aria-label>` as `navigation` "Primary". After the tools closed, renaming
 the heading and removing and adding elements (what crashed the web
 process before 19 Oct's fix) left it running.
+
+## Screen readers (#226)
+
+air/OS's accessibility interface (`BAccessible`, haiku#54) lets a view
+publish a tree of its own, which the screen reader reads and acts on with
+the window locked. A web page's tree lives in its web process, so the view
+keeps a copy:
+
+- `BWebKitView` attaches `AccessibilityMirrorHaiku` (UI process) as its
+  tree. Nothing else happens until a screen reader looks at the view; then
+  the mirror asks the page for its tree (`WebPage::accessibilityTreeHaiku`,
+  which turns WebKit's accessibility on) and answers every question from the
+  copy, so the screen reader never waits for the web process. Actions
+  (press, focus, increment, select, expand, scroll to) go to the page
+  asynchronously.
+- The page sends the tree as JSON: role, name, description, value, range,
+  states, actions, heading level, link, frame, and for the focused text
+  field its selection (UTF-8 offsets, as `BTextView`) or, for a password,
+  only its length. Large pages are cut off at 6000 nodes, breadth first,
+  always with the path down to the focus.
+- Changes to single nodes (typing, the caret, values, checked, selected,
+  expanded, focus) travel 30 ms later as just those nodes. Anything else
+  says the tree changed and the mirror asks for all of it, at most every
+  150 ms, or ten times the tree's cost (about 1.3 s on a long Wikipedia
+  article whose tree takes ~130 ms), so a busy page spends at most a tenth
+  of its time on it.
+- The mirror compares each node with its last copy and sends the events
+  air/OS's own controls send: focus, typed and deleted text with the caret
+  (so typing is echoed and arrow keys read characters and lines), value
+  and checked changes, unavailable/available, expanded (said again as a
+  name change), the selected item of a focused list.
+- Live regions: additions to a polite or assertive region are announced
+  (`BAccessible::Announce`, assertive ones interrupting), the whole text
+  for `aria-atomic`, and a new `role=alert`; only for the page in front.
+  WebCore posts `LiveRegionCreated` only on Cocoa; Haiku posts it too.
+- Another document or web process (navigation, crash) resets the copy; the
+  screen reader quitting turns the page's accessibility off again.
+
+`SUMMIT_AX_TRACE=1` logs each tree's size and cost, the changes sent and
+what live regions said.
+
+Verified on the laptop (13 Nov, s93x build) with an event watcher standing
+in for the screen reader: a form page gave focus, typed and deleted text,
+caret and line moves in a text area, hidden password lengths, check box,
+slider, expanded button, list selection and live-region text (additions,
+alert, status, replaced text); on Wikipedia's World War II article (6000
+nodes cut off) typing in search was echoed from 30 ms node updates, a link
+beyond the cut-off got its focus event, and navigating away and back
+replaced the tree. Not yet heard with the real screen reader on a screen
+(the laptop's screen was blanked).
 
 ## Override Page Colours
 
