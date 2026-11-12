@@ -34,6 +34,11 @@ namespace {
 constexpr uint32 kPromptAnswered = 'sppa';
 constexpr uint32 kLocationFound = 'splf';
 constexpr uint32 kLocationRefresh = 'splr';
+// notification_server's answer when a page's notification goes away (air/OS).
+constexpr uint32 kNotificationGone = 'spng';
+// notification_server's request code and signature (private Notifications.h).
+constexpr uint32 kNotificationServerRequest = 'nssm';
+constexpr const char* kNotificationServerSignature = "application/x-vnd.Haiku-notification_server";
 // How long a position is reused, and how often watching pages get a new one.
 constexpr bigtime_t kPositionLifetime = 60 * 1000000LL;
 constexpr bigtime_t kRefreshInterval = 5 * 60 * 1000000LL;
@@ -248,6 +253,23 @@ void SitePermissionService::MessageReceived(BMessage* message)
         // Haiku can not take a notification back; it times out by itself.
         fNotifications.erase(message->GetUInt64("identifier", 0));
         break;
+    case kNotificationGone: {
+        // Dismissed, timed out, or clicked (which closes it too): the page's
+        // or service worker's notificationclose, and getNotifications() no
+        // longer lists it. A click reaches Summit as a start with arguments,
+        // which can come after this answer: one the user closed waits a
+        // moment, so a click is not taken for a notification already gone.
+        if (message->GetBool("by_user", false) && !message->GetBool("summit:waited", false)) {
+            BMessage later(*message);
+            later.AddBool("summit:waited", true);
+            BMessageRunner::StartSending(BMessenger(this), &later, 1500000, 1);
+            break;
+        }
+        const uint64 identifier = message->GetUInt64("identifier", 0);
+        if (fNotifications.erase(identifier))
+            if (auto context = fContext.lock()) context->NotificationClosed(identifier);
+        break;
+    }
     case B_WEBKIT_GEOLOCATION_START: StartLocation(message->GetBool("high_accuracy", false)); break;
     case B_WEBKIT_GEOLOCATION_STOP: StopLocation(); break;
     case kLocationFound: LocationResult(*message); break;
@@ -470,7 +492,19 @@ void SitePermissionService::ShowNotification(const BMessage& message)
         std::fprintf(stderr, "Summit permissions: notification %llu shown for %s (%s)\n",
             static_cast<unsigned long long>(identifier), origin.c_str(), fPrivate ? "private" : "normal");
     if (fNotifications.size() > 200) fNotifications.erase(fNotifications.begin());
-    notification.Send();
+    // As BNotification::Send() builds it, asking air/OS's notification_server
+    // to say when the notification goes away (docs/airos/NOTIFICATIONS.md);
+    // stock Haiku's ignores the fields. The click still starts Summit with
+    // the arguments above.
+    BMessage request(kNotificationServerRequest);
+    if (notification.Archive(&request) == B_OK && Looper()) {
+        request.AddMessenger("_reply:target", BMessenger(this));
+        BMessage gone(kNotificationGone);
+        gone.AddUInt64("identifier", identifier);
+        request.AddMessage("_reply:closed", &gone);
+        BMessenger(kNotificationServerSignature).SendMessage(&request);
+    } else
+        notification.Send();
 }
 
 void SitePermissionService::NotificationClicked(uint64 identifier)
