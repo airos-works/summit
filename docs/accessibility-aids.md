@@ -115,6 +115,14 @@ keeps a copy:
   WebCore posts `LiveRegionCreated` only on Cocoa; Haiku posts it too.
 - Another document or web process (navigation, crash) resets the copy; the
   screen reader quitting turns the page's accessibility off again.
+- The tree starts at the document (the frame's scroll area is left out, so
+  the page is one "document"); a slider or progress bar's value is its
+  `aria-valuetext` or number; a text field that takes the focus also says
+  where its caret is, so the first arrow key reads a line or a character
+  as in a `BTextView`.
+- Tab moves through links as well as fields (`TabsToLinks`, on for Haiku
+  pages as in Firefox, Chrome and WebKitGTK; WebKit's default follows
+  Safari, where links take Option-Tab).
 
 `SUMMIT_AX_TRACE=1` logs each tree's size and cost, the changes sent and
 what live regions said.
@@ -126,8 +134,16 @@ slider, expanded button, list selection and live-region text (additions,
 alert, status, replaced text); on Wikipedia's World War II article (6000
 nodes cut off) typing in search was echoed from 30 ms node updates, a link
 beyond the cut-off got its focus event, and navigating away and back
-replaced the tree. Not yet heard with the real screen reader on a screen
-(the laptop's screen was blanked).
+replaced the tree. Then with air/OS's ScreenReader itself (no speech engine
+on the laptop, so its captions and syslog): Tab through Wikipedia's Haiku
+article ("Jump to content, link", "Search Wikipedia, combo box, expanded",
+"Toggle Development subsection, button, expanded", "Release history,
+link") and a GitHub issue ("Products, button, collapsed"); Option+Command+R
+("read all") gave the issue's headings with levels, landmarks and lists with
+their item counts; the form page said typed and deleted characters, caret
+characters, lines in a text area, "stars" for a password, "not checked",
+"expanded", the selected list item, the slider's value and the three
+live-region messages.
 
 ## Override Page Colours
 

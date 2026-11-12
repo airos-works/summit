@@ -161621,10 +161621,10 @@ index 0000000000000000000000000000000000000000..8cfbb2ef9ab1590473ee5af50c1bd2eb
 +#endif // USE(COORDINATED_GRAPHICS)
 diff --git a/Source/WebKit/UIProcess/haiku/AccessibilityMirrorHaiku.cpp b/Source/WebKit/UIProcess/haiku/AccessibilityMirrorHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..b9ac29d0bbc323bdc10d0156266727ae46935fbc
+index 0000000000000000000000000000000000000000..9093d7e5ce3f2591b7c238c405750b84a1edb71e
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/AccessibilityMirrorHaiku.cpp
-@@ -0,0 +1,803 @@
+@@ -0,0 +1,822 @@
 +/*
 + * Copyright (C) 2026 air/OS contributors.
 + *
@@ -161913,6 +161913,8 @@ index 0000000000000000000000000000000000000000..b9ac29d0bbc323bdc10d0156266727ae
 +
 +    bool NodesChanged(const char* json);
 +    void Compare(MirrorNode&, const NodeSnapshot&, std::vector<PendingEvent>&);
++    BMessage CaretDetails(const MirrorNode&);
++    void Focused(MirrorNode&);
 +    void CompareText(MirrorNode&, const NodeSnapshot&, std::vector<PendingEvent>&);
 +
 +    void Clear()
@@ -162165,10 +162167,8 @@ index 0000000000000000000000000000000000000000..b9ac29d0bbc323bdc10d0156266727ae
 +    uint64 focus = fPendingFocus ? fPendingFocus : identifierOf(*tree, "focus");
 +    fPendingFocus = 0;
 +    if (focus && focus != fFocus) {
-+        if (MirrorNode* node = Node(focus)) {
-+            fFocus = focus;
-+            node->NotifyEvent(B_ACCESSIBLE_EVENT_FOCUS_CHANGED);
-+        }
++        if (MirrorNode* node = Node(focus))
++            Focused(*node);
 +    }
 +    if (fStale) {
 +        fStale = false;
@@ -162287,10 +162287,18 @@ index 0000000000000000000000000000000000000000..b9ac29d0bbc323bdc10d0156266727ae
 +        textChanged = true;
 +    }
 +
++    if (node.fSelection[0] < 0 || (!textChanged && node.fSelection[0] == before.selection[0] && node.fSelection[1] == before.selection[1]))
++        return;
++    events.push_back({ node.fIdentifier, B_ACCESSIBLE_EVENT_CARET_MOVED, CaretDetails(node) });
++}
++
++// Where the caret is, with the character after it and its line (or the
++// selected text), as a BTextView says it.
++BMessage Mirror::CaretDetails(const MirrorNode& node)
++{
++    bool hidden = node.fStates & B_ACCESSIBLE_STATE_PROTECTED;
 +    int32 start = node.fSelection[0];
 +    int32 end = node.fSelection[1];
-+    if (start < 0 || (!textChanged && start == before.selection[0] && end == before.selection[1]))
-+        return;
 +    BMessage details;
 +    details.AddInt32("caret", end);
 +    details.AddInt32(B_ACCESSIBLE_FIELD_SEL_START, start);
@@ -162323,7 +162331,19 @@ index 0000000000000000000000000000000000000000..b9ac29d0bbc323bdc10d0156266727ae
 +            details.AddString("line_text", utf8Part(text, lineStart, lineEnd));
 +        }
 +    }
-+    events.push_back({ node.fIdentifier, B_ACCESSIBLE_EVENT_CARET_MOVED, std::move(details) });
++    return details;
++}
++
++// The focus moved to a node: a text field also says where its caret is, so
++// that the screen reader knows the line it starts on.
++void Mirror::Focused(MirrorNode& node)
++{
++    fFocus = node.fIdentifier;
++    node.NotifyEvent(B_ACCESSIBLE_EVENT_FOCUS_CHANGED);
++    if ((node.fStates & B_ACCESSIBLE_STATE_EDITABLE) && node.fSelection[0] >= 0) {
++        BMessage details = CaretDetails(node);
++        node.NotifyEvent(B_ACCESSIBLE_EVENT_CARET_MOVED, &details);
++    }
 +}
 +
 +void Mirror::changed(const BMessage& message)
@@ -162364,10 +162384,9 @@ index 0000000000000000000000000000000000000000..b9ac29d0bbc323bdc10d0156266727ae
 +    if (message.FindString("nodes", &nodes) == B_OK && !NodesChanged(nodes))
 +        wantTree = true;
 +    if (uint64 focus = message.GetUInt64("focus", 0); focus && focus != fFocus) {
-+        if (MirrorNode* node = fRootIdentifier ? Node(focus) : nullptr) {
-+            fFocus = focus;
-+            node->NotifyEvent(B_ACCESSIBLE_EVENT_FOCUS_CHANGED);
-+        } else {
++        if (MirrorNode* node = fRootIdentifier ? Node(focus) : nullptr)
++            Focused(*node);
++        else {
 +            // A node the copy does not have yet.
 +            fPendingFocus = focus;
 +            wantTree = true;
@@ -171278,10 +171297,10 @@ index 0000000000000000000000000000000000000000..c9a119d02f85b7c5ad8fe9153bfc9604
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebView.cpp b/Source/WebKit/UIProcess/haiku/WebView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..cbdeebea5fdc2e194722c3bd3bcd84ebf237098e
+index 0000000000000000000000000000000000000000..83b6a1a6c9cd37bb5e75b90e97297fd99297433d
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebView.cpp
-@@ -0,0 +1,3902 @@
+@@ -0,0 +1,3906 @@
 +/*
 + * Copyright (C) 2013 Intel Corporation. All rights reserved.
 + *
@@ -173331,6 +173350,10 @@ index 0000000000000000000000000000000000000000..cbdeebea5fdc2e194722c3bd3bcd84eb
 +        configuration = API::PageConfiguration::create();
 +        m_state->context->configure(*configuration);
 +    }
++    // Tab moves through links as well as fields, as in Firefox, Chrome and
++    // WebKitGTK (Safari leaves links to Option-Tab); it is how keyboard and
++    // screen reader users move through a page (#226).
++    configuration->preferences().setTabsToLinks(true);
 +#if USE(COORDINATED_GRAPHICS)
 +    // The coordinated layer tree is the whole point of this configuration: it
 +    // is what paints tiles, and SkiaPaintingEngine paints those on a worker
@@ -212682,10 +212705,10 @@ index 0000000000000000000000000000000000000000..7459ce25f180160a1c12431c73926a1f
 +
 diff --git a/Source/WebKit/WebProcess/WebPage/haiku/WebPageAccessibilityHaiku.cpp b/Source/WebKit/WebProcess/WebPage/haiku/WebPageAccessibilityHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..8cff5ece8a3a60335d01368ce35f59ccc63c73f1
+index 0000000000000000000000000000000000000000..29be8343e2e7c63c867d738ca0dcbe2e4c2fc8d4
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/WebPage/haiku/WebPageAccessibilityHaiku.cpp
-@@ -0,0 +1,612 @@
+@@ -0,0 +1,632 @@
 +/*
 + * Copyright (C) 2026 air/OS contributors.
 + *
@@ -212932,6 +212955,12 @@ index 0000000000000000000000000000000000000000..8cff5ece8a3a60335d01368ce35f59cc
 +    // A password field's text is never exposed.
 +    if (!object.isSecureField() && object.role() != AccessibilityRole::StaticText && object.role() != AccessibilityRole::Link) {
 +        auto value = object.stringValue();
++        // A slider or progress bar says its aria-valuetext, or its number.
++        if (value.isEmpty() && object.supportsRangeValue()) {
++            value = object.valueDescription();
++            if (value.isEmpty())
++                value = String::number(object.valueForRange());
++        }
 +        if (!value.isEmpty() && value != name)
 +            node->setString("value"_s, value);
 +    }
@@ -212982,6 +213011,20 @@ index 0000000000000000000000000000000000000000..8cff5ece8a3a60335d01368ce35f59cc
 +    return node;
 +}
 +
++// The frame's scroll area holds the document and its scroll bars; the
++// document is what the screen reader reads (and the view is its scroll
++// area), so it stands for both.
++static RefPtr<AXCoreObject> documentObjectHaiku(AXCoreObject* object)
++{
++    if (!object || object->role() != AccessibilityRole::ScrollArea)
++        return object;
++    for (auto& child : object->unignoredChildren()) {
++        if (child->role() == AccessibilityRole::WebArea)
++            return child.ptr();
++    }
++    return object;
++}
++
 +// A live region's text, as a screen reader would read it.
 +static String liveRegionTextHaiku(AXCoreObject& region)
 +{
@@ -213019,7 +213062,7 @@ index 0000000000000000000000000000000000000000..8cff5ece8a3a60335d01368ce35f59cc
 +    auto start = MonotonicTime::now();
 +    RefPtr frame = mainWebFrame().coreLocalFrame();
 +    auto* cache = accessibilityCacheHaiku(*this);
-+    RefPtr root = frame && cache ? cache->rootObjectForFrame(*frame) : nullptr;
++    RefPtr<AXCoreObject> root = documentObjectHaiku(frame && cache ? cache->rootObjectForFrame(*frame) : nullptr);
 +    if (!root) {
 +        if (accessibilityTraceHaiku())
 +            fprintf(stderr, "Summit accessibility: no tree (frame %d cache %d)\n", !!frame, !!cache);
@@ -213027,7 +213070,7 @@ index 0000000000000000000000000000000000000000..8cff5ece8a3a60335d01368ce35f59cc
 +    }
 +
 +    RefPtr page = corePage();
-+    RefPtr focused = page ? cache->focusedObjectForPage(page.get()) : nullptr;
++    RefPtr<AXCoreObject> focused = documentObjectHaiku(page ? cache->focusedObjectForPage(page.get()) : nullptr);
 +    auto nodes = JSON::Array::create();
 +    // The children lists sent, by node: a cut-off tree gets the path to the
 +    // focus added.
@@ -213251,7 +213294,7 @@ index 0000000000000000000000000000000000000000..8cff5ece8a3a60335d01368ce35f59cc
 +    if (!treeChanged) {
 +        auto* cache = accessibilityCacheHaiku(*this);
 +        RefPtr page = corePage();
-+        RefPtr focused = cache && page ? cache->focusedObjectForPage(page.get()) : nullptr;
++        RefPtr<AXCoreObject> focused = documentObjectHaiku(cache && page ? cache->focusedObjectForPage(page.get()) : nullptr);
 +        auto dirty = std::exchange(m_accessibilityDirtyNodesHaiku, { });
 +        if (std::exchange(m_accessibilityFocusChangedHaiku, false) && focused) {
 +            focus = focused->objectID().toUInt64();
