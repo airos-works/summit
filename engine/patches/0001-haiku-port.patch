@@ -14780,6 +14780,177 @@ index 0000000000000000000000000000000000000000..6d04dc37fb0fc9f820a19116f1ee3f66
 +    background: #fff;
 +    font: 16px/1.5 system-ui, sans-serif;
 +}
+diff --git a/Source/WebCore/Modules/push-api/PushCrypto.cpp b/Source/WebCore/Modules/push-api/PushCrypto.cpp
+index 95b29788c371109770f5f10c17f459b7fe324931..4ff1ef542d67e593f6ddfdf5f5ebf7737510a2fa 100644
+--- a/Source/WebCore/Modules/push-api/PushCrypto.cpp
++++ b/Source/WebCore/Modules/push-api/PushCrypto.cpp
+@@ -28,9 +28,157 @@
+ 
+ #include <wtf/Scope.h>
+ 
++#if PLATFORM(HAIKU)
++#include <memory>
++#include <openssl/bn.h>
++#include <openssl/ec.h>
++#include <openssl/ecdh.h>
++#include <openssl/evp.h>
++#include <openssl/hmac.h>
++#include <openssl/obj_mac.h>
++#endif
++
+ namespace WebCore::PushCrypto {
+ 
+-#if !PLATFORM(COCOA)
++#if PLATFORM(HAIKU)
++
++// Haiku: OpenSSL's libcrypto, which the port's Web Crypto uses too. The EC_KEY
++// interface is deprecated in OpenSSL 3 but is what CryptoKeyECOpenSSL uses,
++// and it keeps the raw-key conversions (65-byte uncompressed points, 32-byte
++// scalars, the formats PushDatabase stores) short.
++
++ALLOW_DEPRECATED_DECLARATIONS_BEGIN
++
++namespace {
++
++struct ECKeyDeleter {
++    void operator()(EC_KEY* key) const { EC_KEY_free(key); }
++};
++using ECKey = std::unique_ptr<EC_KEY, ECKeyDeleter>;
++
++struct ECPointDeleter {
++    void operator()(EC_POINT* point) const { EC_POINT_free(point); }
++};
++using ECPoint = std::unique_ptr<EC_POINT, ECPointDeleter>;
++
++struct BignumDeleter {
++    void operator()(BIGNUM* number) const { BN_clear_free(number); }
++};
++using Bignum = std::unique_ptr<BIGNUM, BignumDeleter>;
++
++struct CipherContextDeleter {
++    void operator()(EVP_CIPHER_CTX* context) const { EVP_CIPHER_CTX_free(context); }
++};
++
++ECKey newP256Key()
++{
++    return ECKey { EC_KEY_new_by_curve_name(NID_X9_62_prime256v1) };
++}
++
++// An uncompressed point (0x04 || x || y) on the key's curve, or null. OpenSSL
++// refuses points that are not on the curve.
++ECPoint pointFromBytes(const EC_KEY& key, std::span<const uint8_t> bytes)
++{
++    if (bytes.size() != p256dhPublicKeyLength)
++        return nullptr;
++    auto* group = EC_KEY_get0_group(&key);
++    ECPoint point { EC_POINT_new(group) };
++    if (!point || EC_POINT_oct2point(group, point.get(), bytes.data(), bytes.size(), nullptr) != 1)
++        return nullptr;
++    return point;
++}
++
++} // namespace
++
++P256DHKeyPair P256DHKeyPair::generate(void)
++{
++    auto key = newP256Key();
++    RELEASE_ASSERT(key && EC_KEY_generate_key(key.get()) == 1);
++
++    Vector<uint8_t> publicKey(p256dhPublicKeyLength);
++    auto publicKeyLength = EC_POINT_point2oct(EC_KEY_get0_group(key.get()), EC_KEY_get0_public_key(key.get()), POINT_CONVERSION_UNCOMPRESSED, publicKey.mutableSpan().data(), publicKey.size(), nullptr);
++    RELEASE_ASSERT(publicKeyLength == p256dhPublicKeyLength);
++
++    Vector<uint8_t> privateKey(p256dhPrivateKeyLength);
++    auto privateKeyLength = BN_bn2binpad(EC_KEY_get0_private_key(key.get()), privateKey.mutableSpan().data(), privateKey.size());
++    RELEASE_ASSERT(privateKeyLength == static_cast<int>(p256dhPrivateKeyLength));
++
++    return P256DHKeyPair { WTF::move(publicKey), WTF::move(privateKey) };
++}
++
++bool validateP256DHPublicKey(std::span<const uint8_t> publicKey)
++{
++    auto key = newP256Key();
++    if (!key)
++        return false;
++    auto point = pointFromBytes(*key, publicKey);
++    return point && EC_KEY_set_public_key(key.get(), point.get()) == 1 && EC_KEY_check_key(key.get()) == 1;
++}
++
++std::optional<Vector<uint8_t>> computeP256DHSharedSecret(std::span<const uint8_t> publicKey, const P256DHKeyPair& keyPair)
++{
++    if (publicKey.size() != p256dhPublicKeyLength || keyPair.publicKey.size() != p256dhPublicKeyLength || keyPair.privateKey.size() != p256dhPrivateKeyLength)
++        return std::nullopt;
++
++    auto key = newP256Key();
++    if (!key)
++        return std::nullopt;
++    Bignum privateKey { BN_bin2bn(keyPair.privateKey.span().data(), keyPair.privateKey.size(), nullptr) };
++    auto ownPoint = pointFromBytes(*key, keyPair.publicKey.span());
++    if (!privateKey || !ownPoint || EC_KEY_set_private_key(key.get(), privateKey.get()) != 1 || EC_KEY_set_public_key(key.get(), ownPoint.get()) != 1)
++        return std::nullopt;
++
++    auto peerPoint = pointFromBytes(*key, publicKey);
++    if (!peerPoint)
++        return std::nullopt;
++
++    Vector<uint8_t> sharedSecret(p256dhSharedSecretLength);
++    if (ECDH_compute_key(sharedSecret.mutableSpan().data(), sharedSecret.size(), peerPoint.get(), key.get(), nullptr) != static_cast<int>(p256dhSharedSecretLength))
++        return std::nullopt;
++    return sharedSecret;
++}
++
++Vector<uint8_t> hmacSHA256(std::span<const uint8_t> key, std::span<const uint8_t> message)
++{
++    Vector<uint8_t> result(sha256DigestLength);
++    unsigned resultLength = result.size();
++    if (!HMAC(EVP_sha256(), key.data(), key.size(), message.data(), message.size(), result.mutableSpan().data(), &resultLength) || resultLength != sha256DigestLength)
++        return { };
++    return result;
++}
++
++std::optional<Vector<uint8_t>> decryptAES128GCM(std::span<const uint8_t> key, std::span<const uint8_t> iv, std::span<const uint8_t> cipherTextWithTag)
++{
++    if (key.size() != 16 || iv.empty() || cipherTextWithTag.size() < aes128GCMTagLength)
++        return std::nullopt;
++
++    std::unique_ptr<EVP_CIPHER_CTX, CipherContextDeleter> context { EVP_CIPHER_CTX_new() };
++    if (!context
++        || EVP_DecryptInit_ex(context.get(), EVP_aes_128_gcm(), nullptr, nullptr, nullptr) != 1
++        || EVP_CIPHER_CTX_ctrl(context.get(), EVP_CTRL_GCM_SET_IVLEN, iv.size(), nullptr) != 1
++        || EVP_DecryptInit_ex(context.get(), nullptr, nullptr, key.data(), iv.data()) != 1)
++        return std::nullopt;
++
++    auto cipherText = cipherTextWithTag.first(cipherTextWithTag.size() - aes128GCMTagLength);
++    auto tag = cipherTextWithTag.subspan(cipherText.size());
++    Vector<uint8_t> plainText(cipherText.size());
++    int length = 0;
++    if (!cipherText.empty() && EVP_DecryptUpdate(context.get(), plainText.mutableSpan().data(), &length, cipherText.data(), cipherText.size()) != 1)
++        return std::nullopt;
++    if (EVP_CIPHER_CTX_ctrl(context.get(), EVP_CTRL_GCM_SET_TAG, tag.size(), const_cast<uint8_t*>(tag.data())) != 1)
++        return std::nullopt;
++    int finalLength = 0;
++    // Fails when the tag does not match: the message was not for these keys
++    // or was altered.
++    if (EVP_DecryptFinal_ex(context.get(), plainText.mutableSpan().subspan(length).data(), &finalLength) != 1)
++        return std::nullopt;
++    plainText.shrink(length + finalLength);
++    return plainText;
++}
++
++ALLOW_DEPRECATED_DECLARATIONS_END
++
++#elif !PLATFORM(COCOA)
+ 
+ P256DHKeyPair P256DHKeyPair::generate(void)
+ {
+@@ -57,6 +205,6 @@ std::optional<Vector<uint8_t>> decryptAES128GCM(std::span<const uint8_t>, std::s
+     return std::nullopt;
+ }
+ 
+-#endif // !PLATFORM(COCOA)
++#endif // PLATFORM(HAIKU)
+ 
+ } // namespace WebCore::PushCrypto
 diff --git a/Source/WebCore/Modules/reporting/PermissionsPolicyViolationReportBody.cpp b/Source/WebCore/Modules/reporting/PermissionsPolicyViolationReportBody.cpp
 new file mode 100644
 index 0000000000000000000000000000000000000000..48d87ce7b27fd315a75a8f2b2da07c175b82ec94
@@ -103567,10 +103738,33 @@ index 2860a7b91df4fe4b4dce1343124b325599fb9f9f..2bb8dd71b5b44ae240e04c1be1f6bd17
  };
  
 diff --git a/Source/WebKit/NetworkProcess/NetworkProcess.cpp b/Source/WebKit/NetworkProcess/NetworkProcess.cpp
-index ebe242f01a72f820b093eed6e630d041f21e2657..0c6b4bedba33ce6041ef0b3ac0d3ba9bdc695e5a 100644
+index ebe242f01a72f820b093eed6e630d041f21e2657..ab3aa8a6675adf6ee764193d3e1a272c2a857fc0 100644
 --- a/Source/WebKit/NetworkProcess/NetworkProcess.cpp
 +++ b/Source/WebKit/NetworkProcess/NetworkProcess.cpp
-@@ -1788,7 +1788,7 @@ void NetworkProcess::preconnectTo(PAL::SessionID sessionID, WebPageProxyIdentifi
+@@ -140,6 +140,10 @@
+ #include <WebCore/CurlContext.h>
+ #endif
+ 
++#if PLATFORM(HAIKU)
++#include "haiku/WebPushServiceHaiku.h"
++#endif
++
+ #if HAVE(WEBCONTENTRESTRICTIONS)
+ #include <WebCore/MockParentalControlsURLFilter.h>
+ #include <WebCore/ParentalControlsURLFilter.h>
+@@ -830,6 +834,11 @@ void NetworkProcess::getAllPushSubscriptionOrigins(PAL::SessionID sessionID, Com
+         session->notificationManager().getAllPushSubscriptionOrigins(WTF::move(completionHandler));
+         return;
+     }
++#elif PLATFORM(HAIKU)
++    if (RefPtr service = session ? WebPushServiceHaiku::forSession(sessionID) : nullptr) {
++        service->getOrigins(WTF::move(completionHandler));
++        return;
++    }
+ #endif
+     completionHandler({ });
+ }
+@@ -1788,7 +1797,7 @@ void NetworkProcess::preconnectTo(PAL::SessionID sessionID, WebPageProxyIdentifi
  
      LOG_WITH_STREAM(Network, stream << "(NetworkProcess) Preconnecting to URL "_s << url.string() << " (storedCredentialsPolicy "_s << (int)storedCredentialsPolicy << ")"_s);
  
@@ -103579,6 +103773,64 @@ index ebe242f01a72f820b093eed6e630d041f21e2657..0c6b4bedba33ce6041ef0b3ac0d3ba9b
  #if ENABLE(LEGACY_CUSTOM_PROTOCOL_MANAGER)
      if (RefPtr { supplement<LegacyCustomProtocolManager>() }->supportsScheme(url.protocol().toString()))
          return;
+@@ -2043,6 +2052,9 @@ void NetworkProcess::deleteWebsiteDataImpl(PAL::SessionID sessionID, OptionSet<W
+ 
+ #if ENABLE(WEB_PUSH_NOTIFICATIONS)
+         session->notificationManager().removeAllPushSubscriptions([clearTasksHandler](auto&&) { });
++#elif PLATFORM(HAIKU)
++        if (RefPtr service = WebPushServiceHaiku::forSession(sessionID))
++            service->removeSubscriptions(std::nullopt, [clearTasksHandler](unsigned) { });
+ #endif
+     }
+ 
+@@ -2200,6 +2212,9 @@ void NetworkProcess::deleteWebsiteDataForOrigins(PAL::SessionID sessionID, Optio
+ 
+ #if ENABLE(WEB_PUSH_NOTIFICATIONS)
+             session->notificationManager().removePushSubscriptionsForOrigin(SecurityOriginData { originData }, [clearTasksHandler](auto&&) { });
++#elif PLATFORM(HAIKU)
++            if (RefPtr service = WebPushServiceHaiku::forSession(sessionID))
++                service->removeSubscriptions(originData, [clearTasksHandler](unsigned) { });
+ #endif
+         }
+     }
+@@ -2385,6 +2400,9 @@ void NetworkProcess::deleteAndRestrictWebsiteDataForRegistrableDomains(PAL::Sess
+                         continue;
+ #endif
+                     session->notificationManager().removePushSubscriptionsForOrigin(SecurityOriginData { securityOrigin }, [callbackAggregator](auto&&) { });
++#elif PLATFORM(HAIKU)
++                    if (RefPtr service = WebPushServiceHaiku::forSession(session->sessionID()))
++                        service->removeSubscriptions(securityOrigin, [callbackAggregator](unsigned) { });
+ #endif
+                 }
+             }
+@@ -3058,6 +3076,15 @@ void NetworkProcess::setPushAndNotificationsEnabledForOrigin(PAL::SessionID sess
+         session->notificationManager().setPushAndNotificationsEnabledForOrigin(origin, enabled, WTF::move(callback));
+         return;
+     }
++#elif PLATFORM(HAIKU)
++    // Blocked in Site Permissions: the site's subscriptions end, as in
++    // Firefox. (They exist only while it may show notifications.)
++    if (RefPtr service = WebPushServiceHaiku::forSession(sessionID); service && !enabled) {
++        service->removeSubscriptions(origin, [callback = WTF::move(callback)](unsigned) mutable {
++            callback();
++        });
++        return;
++    }
+ #endif
+     callback();
+ }
+@@ -3069,6 +3096,11 @@ void NetworkProcess::removePushSubscriptionsForOrigin(PAL::SessionID sessionID,
+         session->notificationManager().removePushSubscriptionsForOrigin(SecurityOriginData { origin }, WTF::move(callback));
+         return;
+     }
++#elif PLATFORM(HAIKU)
++    if (RefPtr service = WebPushServiceHaiku::forSession(sessionID)) {
++        service->removeSubscriptions(origin, WTF::move(callback));
++        return;
++    }
+ #endif
+     callback(0);
+ }
 diff --git a/Source/WebKit/NetworkProcess/NetworkProcess.h b/Source/WebKit/NetworkProcess/NetworkProcess.h
 index 94308215424329b5c30c041b99aa1993b6d09628..921ba98e3917603aa335a2029ad246cf81ed44e7 100644
 --- a/Source/WebKit/NetworkProcess/NetworkProcess.h
@@ -104133,10 +104385,21 @@ index 867bf9c5ec02bd497e31cbd97fc869fcd5933434..101bce06886cc474b12531cca0c318fc
      const RefPtr<NetworkLoadChecker> m_networkLoadChecker;
      bool m_shouldRestartLoad { false };
 diff --git a/Source/WebKit/NetworkProcess/NetworkSession.cpp b/Source/WebKit/NetworkProcess/NetworkSession.cpp
-index 7e2ac1cc53c0433da0931d4cb7ca298b3758fbe5..97daf0fd0fcfaab3ee3a587819a5b0777f7a208b 100644
+index 7e2ac1cc53c0433da0931d4cb7ca298b3758fbe5..2e858be717ed5fcc592773cbcb4cfa356a5e2576 100644
 --- a/Source/WebKit/NetworkProcess/NetworkSession.cpp
 +++ b/Source/WebKit/NetworkProcess/NetworkSession.cpp
-@@ -88,6 +88,12 @@
+@@ -81,6 +81,10 @@
+ #if USE(CURL)
+ #include "NetworkSessionCurl.h"
+ #endif
++
++#if PLATFORM(HAIKU)
++#include "haiku/WebPushServiceHaiku.h"
++#endif
+ #if ENABLE(CONTENT_EXTENSIONS)
+ #include <WebCore/ResourceMonitorThrottlerHolder.h>
+ #endif
+@@ -88,6 +92,12 @@
  namespace WebKit {
  using namespace WebCore;
  
@@ -104149,28 +104412,31 @@ index 7e2ac1cc53c0433da0931d4cb7ca298b3758fbe5..97daf0fd0fcfaab3ee3a587819a5b077
  constexpr Seconds cachedNetworkResourceLoaderLifetime { 30_s };
  
  WTF_MAKE_TZONE_ALLOCATED_IMPL(NetworkSession);
-@@ -230,6 +236,10 @@ NetworkSession::NetworkSession(NetworkProcess& networkProcess, const NetworkSess
+@@ -230,6 +240,12 @@ NetworkSession::NetworkSession(NetworkProcess& networkProcess, const NetworkSess
  
      m_isStaleWhileRevalidateEnabled = parameters.staleWhileRevalidateEnabled;
  
 +#if PLATFORM(HAIKU)
 +    // The host's persisted sites are its cross-site cookie exceptions.
 +    setCrossSiteCookieExceptionsHaiku(m_sessionID, m_persistedDomains);
++    // Web Push: the session's subscriptions, kept with its service workers.
++    WebPushServiceHaiku::sessionCreated(networkProcess, m_sessionID, parameters.serviceWorkerRegistrationDirectory);
 +#endif
      setTrackingPreventionEnabled(parameters.resourceLoadStatisticsParameters.enabled);
  
      setShouldSendPrivateTokenIPCForTesting(parameters.shouldSendPrivateTokenIPCForTesting);
-@@ -254,6 +264,9 @@ NetworkSession::NetworkSession(NetworkProcess& networkProcess, const NetworkSess
+@@ -254,6 +270,10 @@ NetworkSession::NetworkSession(NetworkProcess& networkProcess, const NetworkSess
  NetworkSession::~NetworkSession()
  {
      destroyResourceLoadStatistics([] { });
 +#if PLATFORM(HAIKU)
 +    setCrossSiteCookieExceptionsHaiku(m_sessionID, { });
++    WebPushServiceHaiku::sessionDestroyed(m_sessionID);
 +#endif
      for (auto& loader : std::exchange(m_keptAliveLoads, { }))
          loader->abort();
  }
-@@ -1114,6 +1127,9 @@ void NetworkSession::setInspectionForServiceWorkersAllowed(bool inspectable)
+@@ -1114,6 +1134,9 @@ void NetworkSession::setInspectionForServiceWorkersAllowed(bool inspectable)
  void NetworkSession::setPersistedDomains(HashSet<WebCore::RegistrableDomain>&& domains)
  {
      m_persistedDomains = WTF::move(domains);
@@ -104220,6 +104486,89 @@ index 4b22e2662316689b935303ec0e3ea4b4d2ce225c..ac6a0e57f0133a2279533fd87ce712f3
  
 -#endif // ENABLE(SERVER_PRECONNECT)
 +#endif // ENABLE(SERVER_PRECONNECT) || PLATFORM(HAIKU)
+diff --git a/Source/WebKit/NetworkProcess/ServiceWorker/WebSWServerConnection.cpp b/Source/WebKit/NetworkProcess/ServiceWorker/WebSWServerConnection.cpp
+index 5ec7b559c5758579d151310b77ec28d3504e4ad5..d70f490b973ff42382db8c5b5eceb3bdba55bab7 100644
+--- a/Source/WebKit/NetworkProcess/ServiceWorker/WebSWServerConnection.cpp
++++ b/Source/WebKit/NetworkProcess/ServiceWorker/WebSWServerConnection.cpp
+@@ -62,6 +62,9 @@
+ #include <WebCore/ServiceWorkerUpdateViaCache.h>
+ #include <algorithm>
+ #include <cstdint>
++#if PLATFORM(HAIKU)
++#include "haiku/WebPushServiceHaiku.h"
++#endif
+ #include <wtf/MainThread.h>
+ #include <wtf/TZoneMallocInlines.h>
+ #include <wtf/Vector.h>
+@@ -681,9 +684,33 @@ void WebSWServerConnection::updateThrottleState()
+     }
+ }
+ 
++#if PLATFORM(HAIKU)
++static RefPtr<WebCore::SWServerRegistration> pushRegistrationHaiku(WebSWServerConnection& connection, WebCore::ServiceWorkerRegistrationIdentifier registrationIdentifier)
++{
++    RefPtr server = connection.server();
++    return server ? server->getRegistration(registrationIdentifier) : nullptr;
++}
++
++static RefPtr<WebPushServiceHaiku> pushServiceHaiku(WebSWServerConnection& connection)
++{
++    CheckedPtr session = connection.session();
++    return session ? WebPushServiceHaiku::forSession(session->sessionID()) : nullptr;
++}
++#endif
++
+ void WebSWServerConnection::subscribeToPushService(WebCore::ServiceWorkerRegistrationIdentifier registrationIdentifier, Vector<uint8_t>&& applicationServerKey, CompletionHandler<void(std::expected<PushSubscriptionData, ExceptionData>&&)>&& completionHandler)
+ {
+-#if !ENABLE(WEB_PUSH_NOTIFICATIONS)
++#if PLATFORM(HAIKU)
++    // The session's own push service (WebPushServiceHaiku); the web process
++    // asked for the notification permission first.
++    RefPtr registration = pushRegistrationHaiku(*this, registrationIdentifier);
++    RefPtr service = pushServiceHaiku(*this);
++    if (!registration || !service) {
++        completionHandler(makeUnexpected(ExceptionData { ExceptionCode::NotAllowedError, registration ? "Push messages are not available in this browsing session"_s : "Subscribing for push requires an active service worker"_s }));
++        return;
++    }
++    service->subscribe(registration->scopeURLWithoutFragment(), WTF::move(applicationServerKey), WTF::move(completionHandler));
++#elif !ENABLE(WEB_PUSH_NOTIFICATIONS)
+     UNUSED_PARAM(registrationIdentifier);
+     UNUSED_PARAM(applicationServerKey);
+     completionHandler(makeUnexpected(ExceptionData { ExceptionCode::AbortError, "Push service not implemented"_s }));
+@@ -721,7 +748,15 @@ void WebSWServerConnection::subscribeToPushService(WebCore::ServiceWorkerRegistr
+ 
+ void WebSWServerConnection::unsubscribeFromPushService(WebCore::ServiceWorkerRegistrationIdentifier registrationIdentifier, WebCore::PushSubscriptionIdentifier subscriptionIdentifier, CompletionHandler<void(std::expected<bool, ExceptionData>&&)>&& completionHandler)
+ {
+-#if !ENABLE(WEB_PUSH_NOTIFICATIONS)
++#if PLATFORM(HAIKU)
++    RefPtr registration = pushRegistrationHaiku(*this, registrationIdentifier);
++    RefPtr service = pushServiceHaiku(*this);
++    if (!registration || !service) {
++        completionHandler(false);
++        return;
++    }
++    service->unsubscribe(registration->scopeURLWithoutFragment(), subscriptionIdentifier, WTF::move(completionHandler));
++#elif !ENABLE(WEB_PUSH_NOTIFICATIONS)
+     UNUSED_PARAM(registrationIdentifier);
+     UNUSED_PARAM(subscriptionIdentifier);
+ 
+@@ -751,7 +786,15 @@ void WebSWServerConnection::unsubscribeFromPushService(WebCore::ServiceWorkerReg
+ 
+ void WebSWServerConnection::getPushSubscription(WebCore::ServiceWorkerRegistrationIdentifier registrationIdentifier, CompletionHandler<void(std::expected<std::optional<PushSubscriptionData>, ExceptionData>&&)>&& completionHandler)
+ {
+-#if !ENABLE(WEB_PUSH_NOTIFICATIONS)
++#if PLATFORM(HAIKU)
++    RefPtr registration = pushRegistrationHaiku(*this, registrationIdentifier);
++    RefPtr service = pushServiceHaiku(*this);
++    if (!registration || !service) {
++        completionHandler(std::optional<PushSubscriptionData>(std::nullopt));
++        return;
++    }
++    service->getSubscription(registration->scopeURLWithoutFragment(), WTF::move(completionHandler));
++#elif !ENABLE(WEB_PUSH_NOTIFICATIONS)
+     UNUSED_PARAM(registrationIdentifier);
+ 
+     completionHandler(std::optional<PushSubscriptionData>(std::nullopt));
 diff --git a/Source/WebKit/NetworkProcess/cache/NetworkCacheBlobStorage.cpp b/Source/WebKit/NetworkProcess/cache/NetworkCacheBlobStorage.cpp
 index 40c68f3934366f90ef413c29f6ef4bc425385a41..f384637d976b04475ea8e34591f3ba1edbda16a5 100644
 --- a/Source/WebKit/NetworkProcess/cache/NetworkCacheBlobStorage.cpp
@@ -105817,6 +106166,1203 @@ index 0000000000000000000000000000000000000000..3382baa3a9773022fcf15d40877521e0
 +    SUMMIT_STARTUP_TRACE("network process main");
 +    return AuxiliaryProcessMain<NetworkProcess, AuxiliaryProcessMainBase>(argc, argv);
 +}
++
++} // namespace WebKit
+diff --git a/Source/WebKit/NetworkProcess/haiku/WebPushServiceHaiku.cpp b/Source/WebKit/NetworkProcess/haiku/WebPushServiceHaiku.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..1707e79e64622d8451daa93b68edab895e7203ce
+--- /dev/null
++++ b/Source/WebKit/NetworkProcess/haiku/WebPushServiceHaiku.cpp
+@@ -0,0 +1,1056 @@
++/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
++
++#include "config.h"
++#include "WebPushServiceHaiku.h"
++
++#include "NetworkProcess.h"
++#include "NetworkSession.h"
++#include <WebCore/CurlContext.h>
++#include <WebCore/NotificationPayload.h>
++#include <WebCore/PushDatabase.h>
++#include <WebCore/PushMessageCrypto.h>
++#include <WebCore/SWServer.h>
++#include <curl/curl.h>
++#include <fcntl.h>
++#include <poll.h>
++#include <unistd.h>
++#include <wtf/FileSystem.h>
++#include <wtf/Lock.h>
++#include <wtf/NeverDestroyed.h>
++#include <wtf/Scope.h>
++#include <wtf/StdLibExtras.h>
++#include <wtf/Threading.h>
++#include <wtf/UUID.h>
++#include <wtf/text/Base64.h>
++#include <wtf/text/CString.h>
++#include <wtf/text/MakeString.h>
++
++namespace WebKit {
++using namespace WebCore;
++
++namespace {
++
++// Firefox's push service. SUMMIT_PUSH_SERVICE names another autopush server
++// (a test one).
++constexpr auto defaultPushServiceURL = "wss://push.services.mozilla.com/"_s;
++// Between keep-alive messages ("{}", which the service echoes): the service
++// and the routers between keep an idle connection open for longer, but a
++// connection that died silently (Wi-Fi gone, a VPN switched off) would never
++// tell, as Haiku's TCP does not give up on its own (haiku#41).
++constexpr Seconds defaultKeepAliveInterval = 5_min;
++constexpr Seconds keepAliveAnswerTimeout = 30_s;
++constexpr Seconds registerTimeout = 30_s;
++constexpr Seconds connectTimeout = 20_s;
++constexpr Seconds longestReconnectDelay = 5_min;
++// A message from the service is a few kilobytes of JSON: a push message is
++// at most 4 KB before encryption and base64.
++constexpr size_t largestMessage = 256 * 1024;
++
++bool tracing()
++{
++    static bool enabled = [] {
++        const char* setting = getenv("SUMMIT_PUSH_TRACE");
++        return setting && *setting && strcmp(setting, "0");
++    }();
++    return enabled;
++}
++
++// A string for PUSH_TRACE's %s: never null.
++const char* traceText(const UTF8CString& text)
++{
++    return text.isNull() ? "" : text.legacyCStringPointer();
++}
++
++#define PUSH_TRACE(...) do { \
++    if (tracing()) { \
++        fprintf(stderr, "WebPush: " __VA_ARGS__); \
++        fputc('\n', stderr); \
++    } \
++} while (0)
++
++// SUMMIT_PUSH_KEEPALIVE: seconds, for testing; the service closes a
++// connection that pings twice within half a minute, so 60 at least.
++Seconds keepAliveInterval()
++{
++    if (const char* setting = getenv("SUMMIT_PUSH_KEEPALIVE")) {
++        if (auto seconds = atoi(setting); seconds > 0)
++            return Seconds(std::max(seconds, 60));
++    }
++    return defaultKeepAliveInterval;
++}
++
++// Each store has a database of its own, so every subscription is in one set.
++PushSubscriptionSetIdentifier subscriptionSet()
++{
++    PushSubscriptionSetIdentifier identifier;
++    identifier.bundleIdentifier = "haiku"_s;
++    return identifier;
++}
++
++PushSubscriptionData subscriptionData(PushRecord&& record)
++{
++    return PushSubscriptionData {
++        record.identifier,
++        WTF::move(record.endpoint),
++        WTF::move(record.expirationTime),
++        WTF::move(record.serverVAPIDPublicKey),
++        WTF::move(record.clientPublicKey),
++        WTF::move(record.sharedAuthSecret)
++    };
++}
++
++HashMap<PAL::SessionID, Ref<WebPushServiceHaiku>>& services()
++{
++    static NeverDestroyed<HashMap<PAL::SessionID, Ref<WebPushServiceHaiku>>> services;
++    return services;
++}
++
++// "dh=...;p256ecdsa=..." (Crypto-Key) or "salt=..." (Encryption): the value
++// of name. Several keys may be listed, separated by commas.
++String headerParameter(const String& header, ASCIILiteral name)
++{
++    for (auto list : StringView(header).split(',')) {
++        for (auto parameter : list.split(';')) {
++            auto trimmed = parameter.trim(isASCIIWhitespace<char16_t>);
++            auto equals = trimmed.find('=');
++            if (equals == notFound)
++                continue;
++            if (equalIgnoringASCIICase(trimmed.left(equals).trim(isASCIIWhitespace<char16_t>), name)) {
++                auto value = trimmed.substring(equals + 1).trim(isASCIIWhitespace<char16_t>);
++                if (value.startsWith('"') && value.endsWith('"') && value.length() >= 2)
++                    value = value.substring(1, value.length() - 2);
++                return value.toString();
++            }
++        }
++    }
++    return { };
++}
++
++} // namespace
++
++// One connection to the push service, on a thread of its own with libcurl's
++// WebSocket support (blocking calls: the network process's curl scheduler
++// has no WebSocket client of its own, and this connection lives for hours).
++// What it reads and its end are reported to the service on the main run loop.
++class WebPushSocketHaiku final : public ThreadSafeRefCounted<WebPushSocketHaiku> {
++public:
++    struct Client {
++        Function<void()> opened;
++        Function<void(String&&)> received;
++        Function<void(String&&)> closed;
++    };
++
++    static RefPtr<WebPushSocketHaiku> start(const String& url, Client&& client)
++    {
++        Ref socket = adoptRef(*new WebPushSocketHaiku(url, WTF::move(client)));
++        if (!socket->createWakePipe())
++            return nullptr;
++        Thread::create("WebPush socket"_s, [socket = socket.copyRef()] {
++            socket->run();
++        })->detach();
++        return socket;
++    }
++
++    ~WebPushSocketHaiku()
++    {
++        if (m_wakeRead >= 0)
++            close(m_wakeRead);
++        if (m_wakeWrite >= 0)
++            close(m_wakeWrite);
++    }
++
++    // Main thread.
++    void send(UTF8CString&& text)
++    {
++        {
++            Locker locker { m_lock };
++            m_outgoing.append(WTF::move(text));
++        }
++        wake();
++    }
++
++    // Main thread: no callback runs after this; the thread ends soon (or
++    // once its connection attempt gives up). The callbacks go now, on the
++    // main thread, as they hold the service's weak pointers.
++    void cancel()
++    {
++        m_cancelled = true;
++        m_client = { };
++        {
++            Locker locker { m_lock };
++            m_stopping = true;
++        }
++        wake();
++    }
++
++private:
++    WebPushSocketHaiku(const String& url, Client&& client)
++        : m_url(url.utf8())
++        , m_client(WTF::move(client))
++    {
++        // The certificate authorities WebKit's other connections trust.
++        auto& caCertInfo = CurlContext::singleton().sslHandle().getCACertInfo();
++        if (auto* path = std::get_if<String>(&caCertInfo))
++            m_caPath = path->utf8();
++        else if (auto* certificate = std::get_if<CertificateInfo::Certificate>(&caCertInfo))
++            m_caBlob = Vector<uint8_t> { certificate->span() };
++    }
++
++    bool createWakePipe()
++    {
++        int descriptors[2];
++        if (pipe(descriptors))
++            return false;
++        m_wakeRead = descriptors[0];
++        m_wakeWrite = descriptors[1];
++        fcntl(m_wakeRead, F_SETFL, fcntl(m_wakeRead, F_GETFL) | O_NONBLOCK);
++        fcntl(m_wakeWrite, F_SETFL, fcntl(m_wakeWrite, F_GETFL) | O_NONBLOCK);
++        return true;
++    }
++
++    void wake()
++    {
++        char byte = 1;
++        [[maybe_unused]] auto written = write(m_wakeWrite, &byte, 1);
++    }
++
++    void post(Function<void(Client&)>&& function)
++    {
++        RunLoop::mainSingleton().dispatch([protectedThis = Ref { *this }, function = WTF::move(function)]() mutable {
++            if (!protectedThis->m_cancelled)
++                function(protectedThis->m_client);
++        });
++    }
++
++    void postClosed(const char* reason)
++    {
++        post([reason = String::fromUTF8(reason)](Client& client) mutable {
++            client.closed(WTF::move(reason));
++        });
++    }
++
++    bool stopping()
++    {
++        Locker locker { m_lock };
++        return m_stopping;
++    }
++
++    static bool sendText(CURL* curl, curl_socket_t socket, const UTF8CString& text)
++    {
++        size_t offset = 0;
++        auto deadline = MonotonicTime::now() + 30_s;
++        while (offset < text.length()) {
++            size_t sent = 0;
++            auto result = curl_ws_send(curl, text.legacyCStringPointer() + offset, text.length() - offset, &sent, 0, CURLWS_TEXT);
++            if (result == CURLE_OK) {
++                offset += sent;
++                continue;
++            }
++            // The socket's buffer is full: send the same again once it drains.
++            if (result != CURLE_AGAIN || MonotonicTime::now() > deadline)
++                return false;
++            struct pollfd descriptor { socket, POLLOUT, 0 };
++            poll(&descriptor, 1, 1000);
++        }
++        return true;
++    }
++
++    void run()
++    {
++        CURL* curl = curl_easy_init();
++        if (!curl) {
++            postClosed("no curl handle");
++            return;
++        }
++        auto cleanup = makeScopeExit([&] {
++            curl_easy_cleanup(curl);
++        });
++
++        curl_easy_setopt(curl, CURLOPT_URL, m_url.legacyCStringPointer());
++        // 2: the WebSocket upgrade, then the frames are ours (curl_ws_*).
++        curl_easy_setopt(curl, CURLOPT_CONNECT_ONLY, 2L);
++        curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
++        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, static_cast<long>(connectTimeout.milliseconds()));
++        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
++        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
++        if (!m_caPath.isNull())
++            curl_easy_setopt(curl, CURLOPT_CAINFO, m_caPath.legacyCStringPointer());
++        else if (!m_caBlob.isEmpty()) {
++            struct curl_blob blob { m_caBlob.mutableSpan().data(), m_caBlob.size(), CURL_BLOB_NOCOPY };
++            curl_easy_setopt(curl, CURLOPT_CAINFO_BLOB, &blob);
++        }
++        struct curl_slist* headers = curl_slist_append(nullptr, "Sec-WebSocket-Protocol: push-notification");
++        auto freeHeaders = makeScopeExit([&] {
++            curl_slist_free_all(headers);
++        });
++        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
++
++        auto result = curl_easy_perform(curl);
++        if (result != CURLE_OK) {
++            postClosed(curl_easy_strerror(result));
++            return;
++        }
++        curl_socket_t socket = CURL_SOCKET_BAD;
++        if (curl_easy_getinfo(curl, CURLINFO_ACTIVESOCKET, &socket) != CURLE_OK || socket == CURL_SOCKET_BAD) {
++            postClosed("no socket");
++            return;
++        }
++        post([](Client& client) {
++            client.opened();
++        });
++
++        Vector<uint8_t> message;
++        std::array<uint8_t, 16384> buffer;
++        while (true) {
++            Deque<UTF8CString> outgoing;
++            {
++                Locker locker { m_lock };
++                if (m_stopping)
++                    return;
++                outgoing = std::exchange(m_outgoing, { });
++            }
++            for (auto& text : outgoing) {
++                if (!sendText(curl, socket, text)) {
++                    postClosed("send failed");
++                    return;
++                }
++            }
++
++            struct pollfd descriptors[2] = { { socket, POLLIN, 0 }, { m_wakeRead, POLLIN, 0 } };
++            if (poll(descriptors, 2, -1) < 0 && errno != EINTR) {
++                postClosed("poll failed");
++                return;
++            }
++            if (descriptors[1].revents) {
++                char drain[64];
++                while (read(m_wakeRead, drain, sizeof(drain)) > 0) { }
++            }
++            if (!descriptors[0].revents)
++                continue;
++
++            // Read everything there is: TLS may hold more than the socket
++            // showed.
++            while (!stopping()) {
++                size_t received = 0;
++                const struct curl_ws_frame* frame = nullptr;
++                result = curl_ws_recv(curl, buffer.data(), buffer.size(), &received, &frame);
++                if (result == CURLE_AGAIN)
++                    break;
++                if (result != CURLE_OK || !frame) {
++                    postClosed(result == CURLE_GOT_NOTHING ? "connection closed" : curl_easy_strerror(result));
++                    return;
++                }
++                if (frame->flags & CURLWS_CLOSE) {
++                    postClosed("closed by the push service");
++                    return;
++                }
++                // libcurl answers pings itself.
++                if (frame->flags & (CURLWS_PING | CURLWS_PONG))
++                    continue;
++                message.append(std::span { buffer }.first(received));
++                if (message.size() > largestMessage) {
++                    postClosed("message too large");
++                    return;
++                }
++                if (frame->bytesleft || (frame->flags & CURLWS_CONT))
++                    continue;
++                post([text = String::fromUTF8(message.span())](Client& client) mutable {
++                    client.received(WTF::move(text));
++                });
++                message.clear();
++            }
++        }
++    }
++
++    const UTF8CString m_url;
++    UTF8CString m_caPath;
++    Vector<uint8_t> m_caBlob;
++    // Main thread only.
++    Client m_client;
++    bool m_cancelled { false };
++    int m_wakeRead { -1 };
++    int m_wakeWrite { -1 };
++    Lock m_lock;
++    Deque<UTF8CString> m_outgoing WTF_GUARDED_BY_LOCK(m_lock);
++    bool m_stopping WTF_GUARDED_BY_LOCK(m_lock) { false };
++};
++
++void WebPushServiceHaiku::sessionCreated(NetworkProcess& networkProcess, PAL::SessionID sessionID, const String& directory)
++{
++    if (sessionID.isEphemeral() || directory.isEmpty())
++        return;
++    if (const char* setting = getenv("SUMMIT_WEB_PUSH"); setting && !strcmp(setting, "0"))
++        return;
++    // A libcurl built without WebSockets (stock Haiku's may be) cannot
++    // reach the push service: subscribe() then fails at once.
++    static bool hasWebSockets = [] {
++        auto* info = curl_version_info(CURLVERSION_NOW);
++        for (auto* protocol = info ? info->protocols : nullptr; protocol && *protocol; ++protocol) {
++            if (!strcmp(*protocol, "wss"))
++                return true;
++        }
++        return false;
++    }();
++    if (!hasWebSockets) {
++        PUSH_TRACE("libcurl has no WebSocket support: no push messages");
++        return;
++    }
++    Ref service = adoptRef(*new WebPushServiceHaiku(networkProcess, sessionID, FileSystem::pathByAppendingComponent(directory, "PushSubscriptions.db"_s)));
++    services().set(sessionID, service.copyRef());
++    service->openDatabase();
++}
++
++void WebPushServiceHaiku::sessionDestroyed(PAL::SessionID sessionID)
++{
++    if (RefPtr service = services().take(sessionID))
++        service->shutdown();
++}
++
++RefPtr<WebPushServiceHaiku> WebPushServiceHaiku::forSession(PAL::SessionID sessionID)
++{
++    return services().get(sessionID);
++}
++
++WebPushServiceHaiku::WebPushServiceHaiku(NetworkProcess& networkProcess, PAL::SessionID sessionID, String&& databasePath)
++    : m_networkProcess(networkProcess)
++    , m_sessionID(sessionID)
++    , m_databasePath(WTF::move(databasePath))
++    , m_keepAliveTimer(RunLoop::mainSingleton(), "WebPushServiceHaiku::keepAliveTimer"_s, this, &WebPushServiceHaiku::keepAliveTimerFired)
++    , m_reconnectTimer(RunLoop::mainSingleton(), "WebPushServiceHaiku::reconnectTimer"_s, this, &WebPushServiceHaiku::reconnectTimerFired)
++    , m_requestTimer(RunLoop::mainSingleton(), "WebPushServiceHaiku::requestTimer"_s, this, &WebPushServiceHaiku::requestTimerFired)
++{
++}
++
++WebPushServiceHaiku::~WebPushServiceHaiku()
++{
++    disconnect();
++}
++
++// The session ends: what waits is answered (while this is still alive, as
++// the answers look it up), and nothing new starts.
++void WebPushServiceHaiku::shutdown()
++{
++    disconnect();
++    m_databaseFailed = true;
++    m_database = nullptr;
++    for (auto& waiter : std::exchange(m_databaseWaiters, { }))
++        waiter(nullptr);
++    auto pendingRegisters = std::exchange(m_pendingRegisters, { });
++    for (auto& pending : pendingRegisters.values())
++        pending.completion(makeUnexpected(ExceptionData { ExceptionCode::AbortError, "The browsing session ended"_s }));
++    m_pendingUnregisters.clear();
++    m_requestTimer.stop();
++}
++
++void WebPushServiceHaiku::openDatabase()
++{
++    m_databaseOpening = true;
++    PushDatabase::create(m_databasePath, [weakThis = WeakPtr { *this }](RefPtr<PushDatabase>&& database) mutable {
++        RefPtr protectedThis = weakThis.get();
++        if (!protectedThis)
++            return;
++        protectedThis->m_databaseOpening = false;
++        if (!database) {
++            PUSH_TRACE("cannot open %s", traceText(protectedThis->m_databasePath.utf8()));
++            protectedThis->m_databaseFailed = true;
++            for (auto& waiter : std::exchange(protectedThis->m_databaseWaiters, { }))
++                waiter(nullptr);
++            return;
++        }
++        protectedThis->m_database = WTF::move(database);
++        // The user agent identifier the service gave this store (its
++        // "public token" in WebKit's terms).
++        protect(protectedThis->m_database)->getPublicToken([weakThis = WTF::move(weakThis)](Vector<uint8_t>&& token) mutable {
++            RefPtr protectedThis = weakThis.get();
++            if (!protectedThis)
++                return;
++            protectedThis->m_uaid = String::fromUTF8(token.span());
++            protect(protectedThis->m_database)->getTopics([weakThis = WTF::move(weakThis)](PushTopics&& topics) mutable {
++                RefPtr protectedThis = weakThis.get();
++                if (!protectedThis)
++                    return;
++                protectedThis->m_hasSubscriptions = !topics.enabledTopics.isEmpty() || !topics.ignoredTopics.isEmpty();
++                PUSH_TRACE("store open: %zu subscriptions, uaid %s", topics.enabledTopics.size() + topics.ignoredTopics.size(), protectedThis->m_uaid.isEmpty() ? "(none)" : "known");
++                RefPtr database = protectedThis->m_database;
++                for (auto& waiter : std::exchange(protectedThis->m_databaseWaiters, { }))
++                    waiter(database.get());
++                protectedThis->connectIfNeeded();
++            });
++        });
++    });
++}
++
++void WebPushServiceHaiku::withDatabase(Function<void(PushDatabase*)>&& function)
++{
++    if (m_databaseFailed) {
++        function(nullptr);
++        return;
++    }
++    if (m_database && !m_databaseOpening && m_databaseWaiters.isEmpty()) {
++        function(m_database.get());
++        return;
++    }
++    m_databaseWaiters.append(WTF::move(function));
++}
++
++// Subscribing and unsubscribing run one at a time, as in webpushd: a page
++// that subscribes twice in a row gets the subscription the first call made.
++void WebPushServiceHaiku::runSerially(Function<void(CompletionHandler<void()>&&)>&& operation)
++{
++    m_operations.append(WTF::move(operation));
++    if (!m_operationRunning)
++        runNextOperation();
++}
++
++void WebPushServiceHaiku::runNextOperation()
++{
++    if (m_operations.isEmpty()) {
++        m_operationRunning = false;
++        return;
++    }
++    m_operationRunning = true;
++    auto operation = m_operations.takeFirst();
++    operation([weakThis = WeakPtr { *this }] {
++        if (RefPtr protectedThis = weakThis.get())
++            protectedThis->runNextOperation();
++    });
++}
++
++void WebPushServiceHaiku::subscribe(const URL& scope, Vector<uint8_t>&& applicationServerKey, CompletionHandler<void(SubscriptionResult&&)>&& completionHandler)
++{
++    runSerially([weakThis = WeakPtr { *this }, scope = scope.string(), applicationServerKey = WTF::move(applicationServerKey), completionHandler = WTF::move(completionHandler)](CompletionHandler<void()>&& done) mutable {
++        RefPtr protectedThis = weakThis.get();
++        if (!protectedThis) {
++            completionHandler(makeUnexpected(ExceptionData { ExceptionCode::AbortError, "The browsing session ended"_s }));
++            return done();
++        }
++        auto finish = [completionHandler = WTF::move(completionHandler), done = WTF::move(done)](SubscriptionResult&& result) mutable {
++            completionHandler(WTF::move(result));
++            done();
++        };
++        protectedThis->withDatabase([weakThis = WTF::move(weakThis), scope = WTF::move(scope), applicationServerKey = WTF::move(applicationServerKey), finish = WTF::move(finish)](PushDatabase* database) mutable {
++            if (!database) {
++                finish(makeUnexpected(ExceptionData { ExceptionCode::AbortError, "Push subscriptions cannot be stored"_s }));
++                return;
++            }
++            database->getRecordBySubscriptionSetAndScope(subscriptionSet(), scope, [weakThis = WTF::move(weakThis), scope, applicationServerKey = WTF::move(applicationServerKey), finish = WTF::move(finish)](std::optional<PushRecord>&& existing) mutable {
++                RefPtr protectedThis = weakThis.get();
++                if (!protectedThis) {
++                    finish(makeUnexpected(ExceptionData { ExceptionCode::AbortError, "The browsing session ended"_s }));
++                    return;
++                }
++                if (existing) {
++                    if (existing->serverVAPIDPublicKey != applicationServerKey) {
++                        finish(makeUnexpected(ExceptionData { ExceptionCode::InvalidStateError, "Provided applicationServerKey does not match the key in the existing subscription."_s }));
++                        return;
++                    }
++                    finish(subscriptionData(WTF::move(*existing)));
++                    return;
++                }
++
++                auto channelID = WTF::UUID::createVersion4().toString();
++                protectedThis->registerChannel(channelID, applicationServerKey, [weakThis = WTF::move(weakThis), scope = WTF::move(scope), channelID, applicationServerKey, finish = WTF::move(finish)](std::expected<String, ExceptionData>&& endpoint) mutable {
++                    RefPtr protectedThis = weakThis.get();
++                    if (!protectedThis || !protectedThis->m_database) {
++                        finish(makeUnexpected(ExceptionData { ExceptionCode::AbortError, "The browsing session ended"_s }));
++                        return;
++                    }
++                    if (!endpoint) {
++                        finish(makeUnexpected(WTF::move(endpoint.error())));
++                        return;
++                    }
++
++                    auto clientKeys = PushCrypto::ClientKeys::generate();
++                    PushRecord record;
++                    record.subscriptionSetIdentifier = subscriptionSet();
++                    record.securityOrigin = SecurityOriginData::fromURL(URL { scope }).toString();
++                    record.scope = scope;
++                    record.endpoint = WTF::move(*endpoint);
++                    record.topic = channelID;
++                    record.serverVAPIDPublicKey = WTF::move(applicationServerKey);
++                    record.clientPublicKey = WTF::move(clientKeys.clientP256DHKeyPair.publicKey);
++                    record.clientPrivateKey = WTF::move(clientKeys.clientP256DHKeyPair.privateKey);
++                    record.sharedAuthSecret = WTF::move(clientKeys.sharedAuthSecret);
++                    protect(protectedThis->m_database)->insertRecord(record, [weakThis = WTF::move(weakThis), channelID, finish = WTF::move(finish)](std::optional<PushRecord>&& inserted) mutable {
++                        RefPtr protectedThis = weakThis.get();
++                        if (!inserted) {
++                            if (protectedThis)
++                                protectedThis->unregisterChannel(channelID);
++                            finish(makeUnexpected(ExceptionData { ExceptionCode::AbortError, "Push subscriptions cannot be stored"_s }));
++                            return;
++                        }
++                        PUSH_TRACE("subscribed %s", traceText(inserted->scope.utf8()));
++                        if (protectedThis) {
++                            protectedThis->m_hasSubscriptions = true;
++                            protectedThis->connectIfNeeded();
++                        }
++                        finish(subscriptionData(WTF::move(*inserted)));
++                    });
++                });
++            });
++        });
++    });
++}
++
++void WebPushServiceHaiku::unsubscribe(const URL& scope, std::optional<PushSubscriptionIdentifier> identifier, CompletionHandler<void(std::expected<bool, ExceptionData>&&)>&& completionHandler)
++{
++    runSerially([weakThis = WeakPtr { *this }, scope = scope.string(), identifier, completionHandler = WTF::move(completionHandler)](CompletionHandler<void()>&& done) mutable {
++        auto finish = [completionHandler = WTF::move(completionHandler), done = WTF::move(done)](bool removed) mutable {
++            completionHandler(removed);
++            done();
++        };
++        RefPtr protectedThis = weakThis.get();
++        if (!protectedThis) {
++            finish(false);
++            return;
++        }
++        protectedThis->withDatabase([weakThis = WTF::move(weakThis), scope = WTF::move(scope), identifier, finish = WTF::move(finish)](PushDatabase* database) mutable {
++            if (!database) {
++                finish(false);
++                return;
++            }
++            database->getRecordBySubscriptionSetAndScope(subscriptionSet(), scope, [weakThis = WTF::move(weakThis), identifier, finish = WTF::move(finish)](std::optional<PushRecord>&& record) mutable {
++                RefPtr protectedThis = weakThis.get();
++                if (!protectedThis || !protectedThis->m_database || !record || !record->identifier || (identifier && *identifier != *record->identifier)) {
++                    finish(false);
++                    return;
++                }
++                protect(protectedThis->m_database)->removeRecordByIdentifier(*record->identifier, [weakThis = WTF::move(weakThis), channelID = record->topic, finish = WTF::move(finish)](bool removed) mutable {
++                    if (RefPtr protectedThis = weakThis.get(); protectedThis && removed) {
++                        PUSH_TRACE("unsubscribed channel %s", traceText(channelID.utf8()));
++                        protectedThis->unregisterChannel(channelID);
++                        protectedThis->subscriptionsChanged();
++                    }
++                    finish(removed);
++                });
++            });
++        });
++    });
++}
++
++void WebPushServiceHaiku::getSubscription(const URL& scope, CompletionHandler<void(std::expected<std::optional<PushSubscriptionData>, ExceptionData>&&)>&& completionHandler)
++{
++    withDatabase([scope = scope.string(), completionHandler = WTF::move(completionHandler)](PushDatabase* database) mutable {
++        if (!database) {
++            completionHandler(std::optional<PushSubscriptionData> { });
++            return;
++        }
++        database->getRecordBySubscriptionSetAndScope(subscriptionSet(), scope, [completionHandler = WTF::move(completionHandler)](std::optional<PushRecord>&& record) mutable {
++            if (!record) {
++                completionHandler(std::optional<PushSubscriptionData> { });
++                return;
++            }
++            completionHandler(std::optional<PushSubscriptionData> { subscriptionData(WTF::move(*record)) });
++        });
++    });
++}
++
++void WebPushServiceHaiku::removeSubscriptions(const std::optional<SecurityOriginData>& origin, CompletionHandler<void(unsigned)>&& completionHandler)
++{
++    withDatabase([weakThis = WeakPtr { *this }, origin = origin ? origin->toString() : String { }, completionHandler = WTF::move(completionHandler)](PushDatabase* database) mutable {
++        if (!database) {
++            completionHandler(0);
++            return;
++        }
++        auto removed = [weakThis = WTF::move(weakThis), completionHandler = WTF::move(completionHandler)](Vector<RemovedPushRecord>&& records) mutable {
++            if (RefPtr protectedThis = weakThis.get()) {
++                for (auto& record : records)
++                    protectedThis->unregisterChannel(record.topic);
++                if (!records.isEmpty()) {
++                    PUSH_TRACE("removed %zu subscriptions", records.size());
++                    protectedThis->subscriptionsChanged();
++                }
++            }
++            completionHandler(records.size());
++        };
++        if (origin.isNull())
++            database->removeRecordsBySubscriptionSet(subscriptionSet(), WTF::move(removed));
++        else
++            database->removeRecordsBySubscriptionSetAndSecurityOrigin(subscriptionSet(), origin, WTF::move(removed));
++    });
++}
++
++void WebPushServiceHaiku::getOrigins(CompletionHandler<void(Vector<SecurityOriginData>&&)>&& completionHandler)
++{
++    withDatabase([completionHandler = WTF::move(completionHandler)](PushDatabase* database) mutable {
++        if (!database) {
++            completionHandler({ });
++            return;
++        }
++        database->getAllPushSubscriptionOrigins([completionHandler = WTF::move(completionHandler)](Vector<String>&& originStrings) mutable {
++            Vector<SecurityOriginData> origins;
++            for (auto& originString : originStrings) {
++                auto origin = SecurityOriginData::fromURL(URL { originString });
++                if (!origin.isNull() && !origin.isOpaque())
++                    origins.append(WTF::move(origin));
++            }
++            completionHandler(WTF::move(origins));
++        });
++    });
++}
++
++void WebPushServiceHaiku::subscriptionsChanged()
++{
++    if (!m_database)
++        return;
++    m_database->getTopics([weakThis = WeakPtr { *this }](PushTopics&& topics) {
++        RefPtr protectedThis = weakThis.get();
++        if (!protectedThis)
++            return;
++        protectedThis->m_hasSubscriptions = !topics.enabledTopics.isEmpty() || !topics.ignoredTopics.isEmpty();
++        if (protectedThis->needsConnection())
++            protectedThis->connectIfNeeded();
++        else
++            protectedThis->disconnect();
++    });
++}
++
++bool WebPushServiceHaiku::needsConnection() const
++{
++    return m_hasSubscriptions || !m_pendingRegisters.isEmpty() || !m_pendingUnregisters.isEmpty();
++}
++
++void WebPushServiceHaiku::connectIfNeeded()
++{
++    if (m_state != State::Closed || m_reconnectTimer.isActive() || !m_database || !needsConnection())
++        return;
++    connect();
++}
++
++void WebPushServiceHaiku::connect()
++{
++    m_reconnectTimer.stop();
++    String url = defaultPushServiceURL;
++    if (const char* setting = getenv("SUMMIT_PUSH_SERVICE"); setting && *setting)
++        url = String::fromUTF8(setting);
++    PUSH_TRACE("connecting to %s", traceText(url.utf8()));
++    m_state = State::Connecting;
++    WeakPtr weakThis { *this };
++    m_socket = WebPushSocketHaiku::start(url, {
++        [weakThis] {
++            if (RefPtr protectedThis = weakThis.get())
++                protectedThis->socketOpened();
++        },
++        [weakThis](String&& text) {
++            if (RefPtr protectedThis = weakThis.get())
++                protectedThis->socketReceived(WTF::move(text));
++        },
++        [weakThis](String&& reason) {
++            if (RefPtr protectedThis = weakThis.get())
++                protectedThis->socketClosed(WTF::move(reason));
++        }
++    });
++    if (!m_socket)
++        socketClosed("cannot start a connection"_s);
++}
++
++void WebPushServiceHaiku::disconnect()
++{
++    if (RefPtr socket = std::exchange(m_socket, nullptr)) {
++        PUSH_TRACE("disconnecting");
++        socket->cancel();
++    }
++    m_state = State::Closed;
++    m_awaitingKeepAliveAnswer = false;
++    m_keepAliveTimer.stop();
++    m_reconnectTimer.stop();
++    for (auto& pending : m_pendingRegisters.values())
++        pending.sent = false;
++}
++
++void WebPushServiceHaiku::socketOpened()
++{
++    PUSH_TRACE("connected");
++    m_state = State::Greeting;
++    auto hello = JSON::Object::create();
++    hello->setString("messageType"_s, "hello"_s);
++    hello->setString("uaid"_s, m_uaid);
++    hello->setArray("channelIDs"_s, JSON::Array::create());
++    hello->setBoolean("use_webpush"_s, true);
++    send(WTF::move(hello));
++}
++
++void WebPushServiceHaiku::socketClosed(String&& reason)
++{
++    PUSH_TRACE("connection ended: %s", traceText(reason.utf8()));
++    disconnect();
++    // A connection that lasted a minute worked: the next one starts at once.
++    // One that ended sooner (the service may be refusing this client) counts
++    // as failed, so that those wait 2, 4, 8 ... seconds, up to five minutes.
++    if (m_readySince && MonotonicTime::now() - *m_readySince >= 1_min)
++        m_failedConnections = 0;
++    m_readySince = std::nullopt;
++    if (!needsConnection())
++        return;
++    auto delay = std::min(Seconds(1u << std::min(m_failedConnections, 9u)), longestReconnectDelay);
++    ++m_failedConnections;
++    m_reconnectTimer.startOneShot(delay);
++}
++
++void WebPushServiceHaiku::reconnectTimerFired()
++{
++    connectIfNeeded();
++}
++
++void WebPushServiceHaiku::send(Ref<JSON::Object>&& message)
++{
++    if (RefPtr socket = m_socket)
++        socket->send(message->toJSONString().utf8());
++}
++
++void WebPushServiceHaiku::socketReceived(String&& text)
++{
++    if (m_awaitingKeepAliveAnswer) {
++        m_awaitingKeepAliveAnswer = false;
++        m_keepAliveTimer.startOneShot(keepAliveInterval());
++    }
++    auto value = JSON::Value::parseJSON(text);
++    RefPtr message = value ? value->asObject() : nullptr;
++    if (!message)
++        return;
++    auto type = message->getString("messageType"_s);
++    if (type == "hello"_s)
++        receivedHello(*message);
++    else if (type == "register"_s)
++        receivedRegister(*message);
++    else if (type == "unregister"_s)
++        receivedUnregister(*message);
++    else if (type == "notification"_s)
++        receivedNotification(*message);
++    // "{}" answers a keep-alive; broadcasts are for Firefox's own services.
++}
++
++void WebPushServiceHaiku::receivedHello(JSON::Object& message)
++{
++    if (m_state != State::Greeting)
++        return;
++    auto uaid = message.getString("uaid"_s);
++    auto status = message.getInteger("status"_s).value_or(0);
++    if (status != 200 || uaid.isEmpty()) {
++        PUSH_TRACE("hello refused (status %d)", status);
++        disconnect();
++        socketClosed("hello refused"_s);
++        return;
++    }
++    PUSH_TRACE("ready%s", uaid == m_uaid ? "" : " (new uaid)");
++    if (uaid != m_uaid) {
++        // A new identifier: the service forgot this store (unused for a long
++        // time) or never knew it. Its subscriptions are gone there, so the
++        // database drops them too; sites subscribe again on their next visit.
++        bool hadIdentifier = !m_uaid.isEmpty();
++        m_uaid = uaid;
++        if (hadIdentifier)
++            m_pendingUnregisters.clear();
++        auto token = uaid.utf8();
++        protect(m_database)->updatePublicToken(byteCast<uint8_t>(token.span()), [weakThis = WeakPtr { *this }](PushDatabase::PublicTokenChanged changed) {
++            RefPtr protectedThis = weakThis.get();
++            if (protectedThis && changed == PushDatabase::PublicTokenChanged::Yes) {
++                PUSH_TRACE("the push service forgot this store: subscriptions dropped");
++                protectedThis->subscriptionsChanged();
++            }
++        });
++    }
++    m_state = State::Ready;
++    m_readySince = MonotonicTime::now();
++    m_keepAliveTimer.startOneShot(keepAliveInterval());
++    sendPending();
++}
++
++void WebPushServiceHaiku::sendPending()
++{
++    if (m_state != State::Ready)
++        return;
++    for (auto& [channelID, pending] : m_pendingRegisters) {
++        if (pending.sent)
++            continue;
++        pending.sent = true;
++        auto request = JSON::Object::create();
++        request->setString("messageType"_s, "register"_s);
++        request->setString("channelID"_s, channelID);
++        request->setString("key"_s, base64URLEncodeToString(pending.applicationServerKey.span()));
++        send(WTF::move(request));
++    }
++    for (auto& channelID : m_pendingUnregisters) {
++        auto request = JSON::Object::create();
++        request->setString("messageType"_s, "unregister"_s);
++        request->setString("channelID"_s, channelID);
++        // 200: the user (or the site) unsubscribed.
++        request->setInteger("code"_s, 200);
++        send(WTF::move(request));
++    }
++}
++
++void WebPushServiceHaiku::registerChannel(const String& channelID, const Vector<uint8_t>& applicationServerKey, CompletionHandler<void(std::expected<String, ExceptionData>&&)>&& completion)
++{
++    m_pendingRegisters.set(channelID, PendingRegister { applicationServerKey, WTF::move(completion), MonotonicTime::now() + registerTimeout, false });
++    if (!m_requestTimer.isActive())
++        m_requestTimer.startRepeating(1_s);
++    // A page waits for this: try at once even while waiting to reconnect.
++    if (m_state == State::Closed)
++        connect();
++    else
++        sendPending();
++}
++
++void WebPushServiceHaiku::unregisterChannel(const String& channelID)
++{
++    m_pendingUnregisters.add(channelID);
++    if (m_state == State::Ready) {
++        auto request = JSON::Object::create();
++        request->setString("messageType"_s, "unregister"_s);
++        request->setString("channelID"_s, channelID);
++        request->setInteger("code"_s, 200);
++        send(WTF::move(request));
++    } else
++        connectIfNeeded();
++}
++
++void WebPushServiceHaiku::requestTimerFired()
++{
++    auto now = MonotonicTime::now();
++    Vector<String> expired;
++    for (auto& [channelID, pending] : m_pendingRegisters) {
++        if (pending.deadline <= now)
++            expired.append(channelID);
++    }
++    for (auto& channelID : expired) {
++        PUSH_TRACE("register %s: no answer", traceText(channelID.utf8()));
++        auto pending = m_pendingRegisters.take(channelID);
++        pending.completion(makeUnexpected(ExceptionData { ExceptionCode::AbortError, "The push service did not answer"_s }));
++    }
++    if (m_pendingRegisters.isEmpty())
++        m_requestTimer.stop();
++    if (!expired.isEmpty() && !needsConnection())
++        disconnect();
++}
++
++void WebPushServiceHaiku::receivedRegister(JSON::Object& message)
++{
++    auto channelID = message.getString("channelID"_s);
++    if (!m_pendingRegisters.contains(channelID))
++        return;
++    auto pending = m_pendingRegisters.take(channelID);
++    auto status = message.getInteger("status"_s).value_or(0);
++    auto endpoint = message.getString("pushEndpoint"_s);
++    PUSH_TRACE("register %s: status %d", traceText(channelID.utf8()), status);
++    if (status != 200 || !URL { endpoint }.protocolIs("https"_s)) {
++        pending.completion(makeUnexpected(ExceptionData { ExceptionCode::AbortError, makeString("The push service refused the subscription (status "_s, status, ')') }));
++        return;
++    }
++    pending.completion(WTF::move(endpoint));
++}
++
++void WebPushServiceHaiku::receivedUnregister(JSON::Object& message)
++{
++    auto channelID = message.getString("channelID"_s);
++    if (!m_pendingUnregisters.remove(channelID))
++        return;
++    PUSH_TRACE("unregister %s: status %d", traceText(channelID.utf8()), message.getInteger("status"_s).value_or(0));
++    if (!needsConnection())
++        disconnect();
++}
++
++void WebPushServiceHaiku::acknowledge(const String& channelID, const String& version, int code)
++{
++    auto update = JSON::Object::create();
++    update->setString("channelID"_s, channelID);
++    update->setString("version"_s, version);
++    // 100 delivered, 101 could not be decrypted, 102 another failure.
++    update->setInteger("code"_s, code);
++    auto updates = JSON::Array::create();
++    updates->pushObject(WTF::move(update));
++    auto ack = JSON::Object::create();
++    ack->setString("messageType"_s, "ack"_s);
++    ack->setArray("updates"_s, WTF::move(updates));
++    send(WTF::move(ack));
++}
++
++void WebPushServiceHaiku::receivedNotification(JSON::Object& message)
++{
++    auto channelID = message.getString("channelID"_s);
++    auto version = message.getString("version"_s);
++    if (channelID.isEmpty() || version.isEmpty() || !m_database)
++        return;
++    auto data = message.getString("data"_s);
++    RefPtr headers = message.getObject("headers"_s);
++    String encoding, cryptoKey, encryption;
++    if (headers) {
++        encoding = headers->getString("encoding"_s);
++        cryptoKey = headers->getString("crypto_key"_s);
++        encryption = headers->getString("encryption"_s);
++    }
++
++    m_database->getRecordByTopic(channelID, [weakThis = WeakPtr { *this }, channelID, version, data = WTF::move(data), encoding = WTF::move(encoding), cryptoKey = WTF::move(cryptoKey), encryption = WTF::move(encryption)](std::optional<PushRecord>&& record) mutable {
++        RefPtr protectedThis = weakThis.get();
++        if (!protectedThis)
++            return;
++        if (!record) {
++            // Left over from a subscription removed while the service could
++            // not be told: tell it now.
++            PUSH_TRACE("message for unknown channel %s", traceText(channelID.utf8()));
++            protectedThis->acknowledge(channelID, version, 102);
++            protectedThis->unregisterChannel(channelID);
++            return;
++        }
++
++        std::optional<Vector<uint8_t>> payload;
++        if (!data.isEmpty()) {
++            PushCrypto::ClientKeys clientKeys {
++                { WTF::move(record->clientPublicKey), WTF::move(record->clientPrivateKey) },
++                WTF::move(record->sharedAuthSecret)
++            };
++            auto encrypted = base64URLDecode(data);
++            if (encrypted && equalIgnoringASCIICase(encoding, "aes128gcm"_s))
++                payload = PushCrypto::decryptAES128GCMPayload(clientKeys, *encrypted);
++            else if (encrypted && equalIgnoringASCIICase(encoding, "aesgcm"_s)) {
++                // The draft encoding older senders still use: the sender's
++                // key and the salt come in headers.
++                auto serverPublicKey = base64URLDecode(headerParameter(cryptoKey, "dh"_s));
++                auto salt = base64URLDecode(headerParameter(encryption, "salt"_s));
++                if (serverPublicKey && salt)
++                    payload = PushCrypto::decryptAESGCMPayload(clientKeys, *serverPublicKey, *salt, *encrypted);
++            }
++            if (!payload) {
++                PUSH_TRACE("message for %s (%s) cannot be decrypted", traceText(record->scope.utf8()), traceText(encoding.utf8()));
++                protectedThis->acknowledge(channelID, version, 101);
++                return;
++            }
++        }
++        PUSH_TRACE("message for %s: %zu bytes", traceText(record->scope.utf8()), payload ? payload->size() : 0);
++        protectedThis->acknowledge(channelID, version, 100);
++        protectedThis->deliver(record->scope, WTF::move(payload));
++    });
++}
++
++void WebPushServiceHaiku::deliver(const String& scope, std::optional<Vector<uint8_t>>&& payload)
++{
++    CheckedPtr session = m_networkProcess->networkSession(m_sessionID);
++    if (!session)
++        return;
++    // The service worker's push event; it starts the worker (in a web process
++    // of its own when no page of the site is open).
++    protect(session->ensureSWServer())->processPushMessage(WTF::move(payload), std::nullopt, URL { scope }, [scope](bool handled, std::optional<NotificationPayload>&&) {
++        PUSH_TRACE("push event for %s %s", traceText(scope.utf8()), handled ? "handled" : "not handled");
++    });
++}
++
++void WebPushServiceHaiku::keepAliveTimerFired()
++{
++    if (m_state != State::Ready)
++        return;
++    if (m_awaitingKeepAliveAnswer) {
++        // Silence: the connection is gone without a word. Start a new one.
++        PUSH_TRACE("no answer to the keep-alive: reconnecting");
++        disconnect();
++        m_readySince = std::nullopt;
++        m_failedConnections = 0;
++        connectIfNeeded();
++        return;
++    }
++    m_awaitingKeepAliveAnswer = true;
++    if (RefPtr socket = m_socket)
++        socket->send(String { "{}"_s }.utf8());
++    m_keepAliveTimer.startOneShot(keepAliveAnswerTimeout);
++}
++
++} // namespace WebKit
+diff --git a/Source/WebKit/NetworkProcess/haiku/WebPushServiceHaiku.h b/Source/WebKit/NetworkProcess/haiku/WebPushServiceHaiku.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..c154227bed99ae57e87030293a24fd756d069b67
+--- /dev/null
++++ b/Source/WebKit/NetworkProcess/haiku/WebPushServiceHaiku.h
+@@ -0,0 +1,129 @@
++/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
++
++#pragma once
++
++#include <WebCore/ExceptionData.h>
++#include <WebCore/PushSubscriptionData.h>
++#include <WebCore/PushSubscriptionIdentifier.h>
++#include <WebCore/SecurityOriginData.h>
++#include <expected>
++#include <optional>
++#include <pal/SessionID.h>
++#include <wtf/CompletionHandler.h>
++#include <wtf/Deque.h>
++#include <wtf/Forward.h>
++#include <wtf/HashMap.h>
++#include <wtf/HashSet.h>
++#include <wtf/JSONValues.h>
++#include <wtf/RefCountedAndCanMakeWeakPtr.h>
++#include <wtf/RunLoop.h>
++#include <wtf/text/StringHash.h>
++#include <wtf/text/WTFString.h>
++
++namespace WebCore {
++class PushDatabase;
++}
++
++namespace WebKit {
++
++class NetworkProcess;
++class WebPushSocketHaiku;
++
++// Web Push for Haiku (Summit #148). Apple's ports keep subscriptions in
++// webpushd and receive messages through the Apple Push Notification service;
++// here each persistent network session keeps its own: subscriptions in a
++// PushDatabase beside the service worker registrations, and one WebSocket to
++// Mozilla's push service (autopush, the protocol of Firefox and its forks,
++// which needs no account) while any subscription exists. Messages are
++// decrypted here (RFC 8291) and fired at the service worker as push events;
++// the worker shows its notification as for any other page.
++//
++// A subscription exists only while the site may show notifications: the web
++// process asks for the permission before subscribing, and the host's Site
++// Permissions remove an origin's subscriptions when it blocks or forgets the
++// permission (NetworkProcess::setPushAndNotificationsEnabledForOrigin and
++// removePushSubscriptionsForOrigin). Main thread only.
++class WebPushServiceHaiku final : public RefCountedAndCanMakeWeakPtr<WebPushServiceHaiku> {
++public:
++    // directory: the session's service worker registrations directory. Only
++    // persistent sessions have a service.
++    static void sessionCreated(NetworkProcess&, PAL::SessionID, const String& directory);
++    static void sessionDestroyed(PAL::SessionID);
++    static RefPtr<WebPushServiceHaiku> forSession(PAL::SessionID);
++
++    ~WebPushServiceHaiku();
++
++    using SubscriptionResult = std::expected<WebCore::PushSubscriptionData, WebCore::ExceptionData>;
++    void subscribe(const URL& scope, Vector<uint8_t>&& applicationServerKey, CompletionHandler<void(SubscriptionResult&&)>&&);
++    void unsubscribe(const URL& scope, std::optional<WebCore::PushSubscriptionIdentifier>, CompletionHandler<void(std::expected<bool, WebCore::ExceptionData>&&)>&&);
++    void getSubscription(const URL& scope, CompletionHandler<void(std::expected<std::optional<WebCore::PushSubscriptionData>, WebCore::ExceptionData>&&)>&&);
++    // Every subscription of origin, or of every origin; answers how many.
++    void removeSubscriptions(const std::optional<WebCore::SecurityOriginData>&, CompletionHandler<void(unsigned)>&&);
++    void getOrigins(CompletionHandler<void(Vector<WebCore::SecurityOriginData>&&)>&&);
++
++private:
++    WebPushServiceHaiku(NetworkProcess&, PAL::SessionID, String&& databasePath);
++
++    void shutdown();
++    void openDatabase();
++    void withDatabase(Function<void(WebCore::PushDatabase*)>&&);
++    void runSerially(Function<void(CompletionHandler<void()>&&)>&&);
++    void runNextOperation();
++    void subscriptionsChanged();
++
++    // The push service.
++    enum class State : uint8_t { Closed, Connecting, Greeting, Ready };
++    void connectIfNeeded();
++    void connect();
++    void disconnect();
++    void socketOpened();
++    void socketReceived(String&&);
++    void socketClosed(String&& reason);
++    void send(Ref<JSON::Object>&&);
++    void sendPending();
++    void receivedHello(JSON::Object&);
++    void receivedRegister(JSON::Object&);
++    void receivedUnregister(JSON::Object&);
++    void receivedNotification(JSON::Object&);
++    void acknowledge(const String& channelID, const String& version, int code);
++    void deliver(const String& scope, std::optional<Vector<uint8_t>>&& payload);
++    void registerChannel(const String& channelID, const Vector<uint8_t>& applicationServerKey, CompletionHandler<void(std::expected<String, WebCore::ExceptionData>&&)>&&);
++    void unregisterChannel(const String& channelID);
++    bool needsConnection() const;
++    void keepAliveTimerFired();
++    void reconnectTimerFired();
++    void requestTimerFired();
++
++    const Ref<NetworkProcess> m_networkProcess;
++    const PAL::SessionID m_sessionID;
++    const String m_databasePath;
++    RefPtr<WebCore::PushDatabase> m_database;
++    bool m_databaseOpening { false };
++    bool m_databaseFailed { false };
++    Vector<Function<void(WebCore::PushDatabase*)>> m_databaseWaiters;
++    Deque<Function<void(CompletionHandler<void()>&&)>> m_operations;
++    bool m_operationRunning { false };
++    // Whether the database holds any subscription (known after it opened).
++    bool m_hasSubscriptions { false };
++
++    State m_state { State::Closed };
++    RefPtr<WebPushSocketHaiku> m_socket;
++    String m_uaid;
++    struct PendingRegister {
++        Vector<uint8_t> applicationServerKey;
++        CompletionHandler<void(std::expected<String, WebCore::ExceptionData>&&)> completion;
++        MonotonicTime deadline;
++        bool sent { false };
++    };
++    HashMap<String, PendingRegister> m_pendingRegisters;
++    HashSet<String> m_pendingUnregisters;
++    unsigned m_failedConnections { 0 };
++    // When the current connection was greeted (State::Ready).
++    std::optional<MonotonicTime> m_readySince;
++    bool m_awaitingKeepAliveAnswer { false };
++    RunLoop::Timer m_keepAliveTimer;
++    RunLoop::Timer m_reconnectTimer;
++    RunLoop::Timer m_requestTimer;
++};
 +
 +} // namespace WebKit
 diff --git a/Source/WebKit/NetworkProcess/soup/NetworkProcessSoup.cpp b/Source/WebKit/NetworkProcess/soup/NetworkProcessSoup.cpp
@@ -110869,10 +112415,10 @@ index 0000000000000000000000000000000000000000..abdba4dff009ff314eecd9f825a128aa
 +} // namespace WebKit
 diff --git a/Source/WebKit/PlatformHaiku.cmake b/Source/WebKit/PlatformHaiku.cmake
 new file mode 100644
-index 0000000000000000000000000000000000000000..e02b02e592bb4b1c67db048fc2c735f579ef4949
+index 0000000000000000000000000000000000000000..c42c267ae8300d695b4b796d3169f6f957d3ea47
 --- /dev/null
 +++ b/Source/WebKit/PlatformHaiku.cmake
-@@ -0,0 +1,616 @@
+@@ -0,0 +1,618 @@
 +include(Headers.cmake)
 +include(Platform/Curl.cmake)
 +
@@ -110897,6 +112443,8 @@ index 0000000000000000000000000000000000000000..e02b02e592bb4b1c67db048fc2c735f5
 +list(APPEND WebKit_SOURCES
 +    NetworkProcess/NetworkDataTaskDataURL.cpp
 +    NetworkProcess/Classifier/WebResourceLoadStatisticsStore.cpp
++    # Web Push (Summit #148): subscriptions and the push service connection.
++    NetworkProcess/haiku/WebPushServiceHaiku.cpp
 +
 +    Platform/IPC/unix/ArgumentCodersUnix.cpp
 +    Platform/IPC/haiku/ConnectionHaiku.cpp
@@ -166350,10 +167898,10 @@ index 0000000000000000000000000000000000000000..a1df802a24259059253fe0d7e648aee7
 +};
 diff --git a/Source/WebKit/UIProcess/haiku/SitePermissionsHaiku.cpp b/Source/WebKit/UIProcess/haiku/SitePermissionsHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..578101acce272cccf5200ac7f6dc29e16da041fb
+index 0000000000000000000000000000000000000000..632858825639840dec65e23c974c3992e1970fd8
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/SitePermissionsHaiku.cpp
-@@ -0,0 +1,540 @@
+@@ -0,0 +1,627 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -166364,6 +167912,7 @@ index 0000000000000000000000000000000000000000..578101acce272cccf5200ac7f6dc29e1
 +#include "APINotificationProvider.h"
 +#include "APINumber.h"
 +#include "APISecurityOrigin.h"
++#include "NetworkProcessProxy.h"
 +#include "WebGeolocationManagerProxy.h"
 +#include "WebGeolocationPosition.h"
 +#include "WebKitContext.h"
@@ -166372,10 +167921,12 @@ index 0000000000000000000000000000000000000000..578101acce272cccf5200ac7f6dc29e1
 +#include "WebPageProxy.h"
 +#include "WebProcessPool.h"
 +#include "WebViewPrivate.h"
++#include "WebsiteDataStore.h"
 +#include <Message.h>
 +#include <WebCore/GeolocationPositionData.h>
 +#include <WebCore/NotificationDirection.h>
 +#include <WebCore/SecurityOrigin.h>
++#include <wtf/NeverDestroyed.h>
 +#include <wtf/RunLoop.h>
 +#include <wtf/text/MakeString.h>
 +
@@ -166412,6 +167963,68 @@ index 0000000000000000000000000000000000000000..578101acce272cccf5200ac7f6dc29e1
 +
 +private:
 +    const std::weak_ptr<SitePermissionsHaiku> m_permissions;
++};
++
++// The contexts' permissions, private ones marked, for the notifications of
++// service workers.
++Vector<std::pair<std::weak_ptr<SitePermissionsHaiku>, bool>>& sitePermissionsRegistry()
++{
++    static NeverDestroyed<Vector<std::pair<std::weak_ptr<SitePermissionsHaiku>, bool>>> registry;
++    return registry;
++}
++
++// Service workers' notifications (registration.showNotification(), which a
++// push event's handler calls, Summit #148) go to WebKit's one manager for
++// every store, not to a process pool's. They are shown by the context of
++// their store's kind: a private window's context for an ephemeral store.
++class PersistentNotificationProviderHaiku final : public API::NotificationProvider {
++    WTF_MAKE_TZONE_ALLOCATED_INLINE(PersistentNotificationProviderHaiku);
++public:
++    bool show(WebPageProxy*, WebNotification& notification, RefPtr<WebCore::NotificationResources>&&) override
++    {
++        auto permissions = find(notification.sessionID().isEphemeral());
++        return permissions && permissions->showNotification(nullptr, notification);
++    }
++    void cancel(WebNotification& notification) override
++    {
++        forEach([&](SitePermissionsHaiku& permissions) {
++            permissions.cancelNotification(notification);
++        });
++    }
++    void didDestroyNotification(WebNotification& notification) override
++    {
++        forEach([&](SitePermissionsHaiku& permissions) {
++            permissions.forgetNotification(notification);
++        });
++    }
++    HashMap<String, bool> notificationPermissions() override
++    {
++        auto permissions = find(false);
++        return permissions ? permissions->decisions(SitePermissionsHaiku::Kind::Notifications) : HashMap<String, bool> { };
++    }
++
++private:
++    static std::shared_ptr<SitePermissionsHaiku> find(bool privateBrowsing)
++    {
++        auto& registry = sitePermissionsRegistry();
++        registry.removeAllMatching([](auto& entry) {
++            return entry.first.expired();
++        });
++        for (auto& [weakPermissions, isPrivate] : registry) {
++            if (isPrivate == privateBrowsing) {
++                if (auto permissions = weakPermissions.lock())
++                    return permissions;
++            }
++        }
++        return nullptr;
++    }
++    static void forEach(NOESCAPE const Function<void(SitePermissionsHaiku&)>& function)
++    {
++        for (auto& entry : sitePermissionsRegistry()) {
++            if (auto permissions = entry.first.lock())
++                function(*permissions);
++        }
++    }
 +};
 +
 +#if ENABLE(GEOLOCATION)
@@ -166466,6 +168079,10 @@ index 0000000000000000000000000000000000000000..578101acce272cccf5200ac7f6dc29e1
 +    ASSERT(RunLoop::isMain());
 +    if (RefPtr manager = m_processPool.supplement<WebNotificationManagerProxy>())
 +        manager->setProvider(makeUnique<NotificationProviderHaiku>(weak_from_this()));
++    sitePermissionsRegistry().append({ weak_from_this(), m_private });
++    static bool persistentProviderInstalled;
++    if (!std::exchange(persistentProviderInstalled, true))
++        WebNotificationManagerProxy::serviceWorkerManagerSingleton().setProvider(makeUnique<PersistentNotificationProviderHaiku>());
 +#if ENABLE(GEOLOCATION)
 +    if (RefPtr manager = m_processPool.supplement<WebGeolocationManagerProxy>())
 +        manager->setProvider(makeUnique<GeolocationProviderHaiku>(weak_from_this()));
@@ -166585,6 +168202,18 @@ index 0000000000000000000000000000000000000000..578101acce272cccf5200ac7f6dc29e1
 +    if (!manager)
 +        return;
 +    Ref apiOrigin = API::SecurityOrigin::createFromString(origin);
++    // A site that may no longer show notifications loses its push
++    // subscriptions (WebPushServiceHaiku), in the persistent stores whose
++    // network process runs: on Haiku each store has its own, and WebKit's
++    // manager for service workers would start one for every container to
++    // tell it.
++    if (!m_private && !(allowed && *allowed)) {
++        auto securityOrigin = apiOrigin->securityOrigin();
++        WebsiteDataStore::forEachWebsiteDataStore([&](WebsiteDataStore& store) {
++            if (RefPtr networkProcess = store.isPersistent() ? store.networkProcessIfExists() : nullptr)
++                networkProcess->removePushSubscriptionsForOrigin(store.sessionID(), securityOrigin, [](unsigned) { });
++        });
++    }
 +    if (allowed)
 +        manager->providerDidUpdateNotificationPolicy(apiOrigin.ptr(), *allowed);
 +    else {
@@ -166799,8 +168428,12 @@ index 0000000000000000000000000000000000000000..578101acce272cccf5200ac7f6dc29e1
 +    if (!post(message))
 +        return false;
 +    m_notifications.set(identifier, notification.identifier());
++    // A page's notification belongs to the process pool's manager, a service
++    // worker's to WebKit's one for service workers; identifiers are unique
++    // across both, and each ignores the other's.
 +    if (RefPtr manager = m_processPool.supplement<WebNotificationManagerProxy>())
 +        manager->providerDidShowNotification(notification.identifier());
++    WebNotificationManagerProxy::serviceWorkerManagerSingleton().providerDidShowNotification(notification.identifier());
 +    return true;
 +}
 +
@@ -166827,6 +168460,8 @@ index 0000000000000000000000000000000000000000..578101acce272cccf5200ac7f6dc29e1
 +        return;
 +    if (RefPtr manager = m_processPool.supplement<WebNotificationManagerProxy>())
 +        manager->providerDidClickNotification(found->value);
++    // A service worker's: its notificationclick event.
++    WebNotificationManagerProxy::serviceWorkerManagerSingleton().providerDidClickNotification(found->value);
 +}
 +
 +void SitePermissionsHaiku::notificationClosed(uint64_t identifier)
@@ -166837,10 +168472,10 @@ index 0000000000000000000000000000000000000000..578101acce272cccf5200ac7f6dc29e1
 +        return;
 +    const uint64_t raw = found->value.toUInt64();
 +    m_notifications.remove(found);
-+    if (RefPtr manager = m_processPool.supplement<WebNotificationManagerProxy>()) {
-+        Ref identifiers = API::Array::create({ RefPtr<API::Object> { API::UInt64::create(raw) } });
++    Ref identifiers = API::Array::create({ RefPtr<API::Object> { API::UInt64::create(raw) } });
++    if (RefPtr manager = m_processPool.supplement<WebNotificationManagerProxy>())
 +        manager->providerDidCloseNotifications(identifiers.ptr());
-+    }
++    WebNotificationManagerProxy::serviceWorkerManagerSingleton().providerDidCloseNotifications(identifiers.ptr());
 +}
 +
 +void SitePermissionsHaiku::geolocationStart(WebGeolocationManagerProxy& manager)
@@ -168717,10 +170352,10 @@ index 0000000000000000000000000000000000000000..c9a119d02f85b7c5ad8fe9153bfc9604
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebView.cpp b/Source/WebKit/UIProcess/haiku/WebView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..d0fc4079b710fe2d0da1607124f19fcb95aad6bb
+index 0000000000000000000000000000000000000000..ae5469db272076da27f55d785f920d7eb1a12e80
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebView.cpp
-@@ -0,0 +1,3802 @@
+@@ -0,0 +1,3847 @@
 +/*
 + * Copyright (C) 2013 Intel Corporation. All rights reserved.
 + *
@@ -168762,6 +170397,7 @@ index 0000000000000000000000000000000000000000..d0fc4079b710fe2d0da1607124f19fcb
 +#include "APIContentWorld.h"
 +#include "APIFrameInfo.h"
 +#include "APIIconLoadingClient.h"
++#include "BrowserCommandBrokerHaiku.h"
 +#include "BrowserTabRegistryHaiku.h"
 +#include "APIError.h"
 +#include "APINavigationAction.h"
@@ -170105,6 +171741,43 @@ index 0000000000000000000000000000000000000000..d0fc4079b710fe2d0da1607124f19fcb
 +    JavaScriptUIClientHaiku(std::weak_ptr<WebViewStateHaiku> state, bool hostsNewPages, Function<void(const URL&)>&& openInTab = { })
 +        : m_state(std::move(state)), m_hostsNewPages(hostsNewPages), m_openInTab(WTF::move(openInTab)) { }
 +
++#if ENABLE(WK_WEB_EXTENSIONS)
++    // A service worker's client.focus(), which a click on its notification
++    // calls (a push message's, Summit #148): the host selects the page's tab
++    // and raises its window, with the browser commands of an extension's
++    // tabs.update({active}) and windows.update({focused}). Answered at once;
++    // the host shows the page right after.
++    bool focusFromServiceWorker(WebPageProxy& page) override
++    {
++        static constexpr uint64_t serviceWorkerCommandOwner = std::numeric_limits<uint64_t>::max() - 1;
++        auto state = m_state.lock();
++        auto context = state ? state->context : nullptr;
++        auto commands = context ? context->browserCommands() : nullptr;
++        auto tabs = context ? context->browserTabs() : nullptr;
++        auto* client = static_cast<WebView*>(page.pageClient());
++        if (!commands || !tabs || !client || client->page() != &page)
++            return false;
++        auto tab = tabs->tab(page.identifier());
++        auto window = tab ? tabs->window(tab->windowIdentifier) : std::nullopt;
++        auto view = client->nativeView();
++        if (!window || !view.IsValid())
++            return false;
++        BMessage activate(B_WEBKIT_BROWSER_COMMAND);
++        activate.AddUInt32("command", B_WEBKIT_BROWSER_ACTIVATE_TAB);
++        activate.AddMessenger("view", view);
++        activate.AddUInt64("page_identifier", page.identifier().toUInt64());
++        activate.AddMessenger("window", window->messenger);
++        activate.AddUInt64("window_identifier", window->identifier);
++        commands->request(serviceWorkerCommandOwner, WTF::move(activate), [](BrowserCommandBrokerHaiku::Result&&) { });
++        BMessage focus(B_WEBKIT_BROWSER_COMMAND);
++        focus.AddUInt32("command", B_WEBKIT_BROWSER_FOCUS_WINDOW);
++        focus.AddMessenger("window", window->messenger);
++        focus.AddUInt64("window_identifier", window->identifier);
++        commands->request(serviceWorkerCommandOwner, WTF::move(focus), [](BrowserCommandBrokerHaiku::Result&&) { });
++        return false;
++    }
++#endif
++
 +#if ENABLE(POINTER_LOCK)
 +    // Element.requestPointerLock() (Summit #143). WebCore asks only from a
 +    // user gesture in a focused, visible page; the view hides the pointer,
@@ -170852,6 +172525,13 @@ index 0000000000000000000000000000000000000000..d0fc4079b710fe2d0da1607124f19fcb
 +    // web apps and extensions (OneTab) call it unguarded.
 +    configuration->preferences().setStorageAPIEnabled(true);
 +    configuration->preferences().setStorageAPIEstimateEnabled(true);
++    // The Push API (Summit #148): PushManager on service worker registrations
++    // and push events in service workers, as in Safari and Firefox. The
++    // network process keeps the subscriptions and the connection to the push
++    // service (WebPushServiceHaiku); private windows have neither, so
++    // subscribe() fails there, as in Firefox. SUMMIT_WEB_PUSH=0 hides it.
++    if (const char* push = std::getenv("SUMMIT_WEB_PUSH"); !push || std::strcmp(push, "0"))
++        configuration->preferences().setPushAPIEnabled(true);
 +    // Origin private file system (navigator.storage.getDirectory, sync access
 +    // handles in workers, createWritable), on by default for Cocoa, GTK and
 +    // WPE (Summit #146): SQLite-in-WebAssembly apps and web editors keep
@@ -172525,10 +174205,10 @@ index 0000000000000000000000000000000000000000..d0fc4079b710fe2d0da1607124f19fcb
 +}
 diff --git a/Source/WebKit/UIProcess/haiku/WebViewContextHaiku.cpp b/Source/WebKit/UIProcess/haiku/WebViewContextHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..1a43669a7086bdff449f85e4d649dafeb64ffcca
+index 0000000000000000000000000000000000000000..f6e28d7cb6371c547f702b27926afbd3af379243
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebViewContextHaiku.cpp
-@@ -0,0 +1,583 @@
+@@ -0,0 +1,656 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -172552,7 +174232,11 @@ index 0000000000000000000000000000000000000000..1a43669a7086bdff449f85e4d649dafe
 +#include "SitePermissionsHaiku.h"
 +#include "APIProcessPoolConfiguration.h"
 +#include "StoragePathsHaiku.h"
++#include "WebKitContext.h"
++#include "WebPageProxy.h"
++#include "WebProcessProxy.h"
 +#include "WebsiteDataStore.h"
++#include "WebsiteDataStoreClient.h"
 +#include "WebsiteDataStoreConfiguration.h"
 +#if ENABLE(WK_WEB_EXTENSIONS)
 +#include "WebExtensionController.h"
@@ -172569,7 +174253,9 @@ index 0000000000000000000000000000000000000000..1a43669a7086bdff449f85e4d649dafe
 +#include <WebCore/HTTPHeaderNames.h>
 +#include <WebCore/ResourceRequest.h>
 +#include <pal/SessionID.h>
++#include <Message.h>
 +#include <cstdlib>
++#include <limits>
 +#include <cstring>
 +#include <cstring>
 +#include <wtf/FileSystem.h>
@@ -172602,6 +174288,67 @@ index 0000000000000000000000000000000000000000..1a43669a7086bdff449f85e4d649dafe
 +    configuration->setDefaultWebsiteDataStore(&store);
 +    return WebExtensionController::create(WTF::move(configuration));
 +}
++#endif
++
++#if ENABLE(WK_WEB_EXTENSIONS)
++// The browser commands of service workers (BrowserCommandBrokerHaiku owner).
++static constexpr uint64_t serviceWorkerCommandOwnerHaiku = std::numeric_limits<uint64_t>::max() - 1;
++
++// clients.openWindow() of a service worker, which a click on its notification
++// calls (a push message's, Summit #148): the host opens the page in a tab,
++// as for an extension's tabs.create(), in the store's container, and raises
++// its window. WebKit's default client opens nothing, so the click did nothing.
++class WebsiteDataStoreClientHaiku final : public WebsiteDataStoreClient {
++public:
++    WebsiteDataStoreClientHaiku(std::weak_ptr<BrowserCommandBrokerHaiku> commands, std::weak_ptr<BrowserTabRegistryHaiku> tabs, uint32_t container)
++        : m_commands(WTF::move(commands))
++        , m_tabs(WTF::move(tabs))
++        , m_container(container)
++    {
++    }
++
++    void openWindowFromServiceWorker(const String& url, const WebCore::SecurityOriginData&, CompletionHandler<void(WebPageProxy*)>&& completion) final
++    {
++        auto commands = m_commands.lock();
++        BMessage message(B_WEBKIT_BROWSER_COMMAND);
++        bool complete = commands && commands->hasListener()
++            && message.AddUInt32("command", B_WEBKIT_BROWSER_OPEN_TAB) == B_OK
++            && message.AddString("url", url.utf8().legacyCStringPointer()) == B_OK
++            && message.AddBool("active", true) == B_OK
++            && message.AddInt32("index", -1) == B_OK
++            && (!m_container || message.AddUInt32("container", m_container) == B_OK);
++        if (!complete) {
++            completion(nullptr);
++            return;
++        }
++        commands->request(serviceWorkerCommandOwnerHaiku, WTF::move(message), [commands = m_commands, tabs = m_tabs, completion = WTF::move(completion)](BrowserCommandBrokerHaiku::Result&& result) mutable {
++            RefPtr page = result.status == B_OK && !result.createdPages.isEmpty() ? WebProcessProxy::webPage(result.createdPages.first()) : nullptr;
++            if (page)
++                focusWindowOfPage(commands, tabs, *page);
++            completion(page.get());
++        });
++    }
++
++private:
++    static void focusWindowOfPage(const std::weak_ptr<BrowserCommandBrokerHaiku>& weakCommands, const std::weak_ptr<BrowserTabRegistryHaiku>& weakTabs, WebPageProxy& page)
++    {
++        auto commands = weakCommands.lock();
++        auto tabs = weakTabs.lock();
++        auto tab = tabs ? tabs->tab(page.identifier()) : std::nullopt;
++        auto window = tab ? tabs->window(tab->windowIdentifier) : std::nullopt;
++        if (!commands || !window)
++            return;
++        BMessage focus(B_WEBKIT_BROWSER_COMMAND);
++        focus.AddUInt32("command", B_WEBKIT_BROWSER_FOCUS_WINDOW);
++        focus.AddMessenger("window", window->messenger);
++        focus.AddUInt64("window_identifier", window->identifier);
++        commands->request(serviceWorkerCommandOwnerHaiku, WTF::move(focus), [](BrowserCommandBrokerHaiku::Result&&) { });
++    }
++
++    const std::weak_ptr<BrowserCommandBrokerHaiku> m_commands;
++    const std::weak_ptr<BrowserTabRegistryHaiku> m_tabs;
++    const uint32_t m_container;
++};
 +#endif
 +
 +// Safari's tracking prevention (Summit #141), which is WebKit's own:
@@ -172666,6 +174413,8 @@ index 0000000000000000000000000000000000000000..1a43669a7086bdff449f85e4d649dafe
 +        [this](const String& url, const String& path, const String& validator, int64_t expectedSize, uint64_t continues, uint64_t& identifier) {
 +            return resumeDownload(url, path, validator, expectedSize, { }, identifier, continues);
 +        });
++    if (m_dataStore->isPersistent())
++        m_dataStore->setClient(makeUniqueRef<WebsiteDataStoreClientHaiku>(browserCommands(), m_browserTabs, 0));
 +#endif
 +}
 +
@@ -172715,6 +174464,10 @@ index 0000000000000000000000000000000000000000..1a43669a7086bdff449f85e4d649dafe
 +    // One process pool serves the profile and its containers: WebKit keeps
 +    // web processes of different stores apart, and downloads, site
 +    // permissions and extensions' native objects stay the profile's.
++#if ENABLE(WK_WEB_EXTENSIONS)
++    if (m_dataStore->isPersistent())
++        m_dataStore->setClient(makeUniqueRef<WebsiteDataStoreClientHaiku>(browserCommands(), m_browserTabs, m_container));
++#endif
 +}
 +
 +WebViewContextHaiku::~WebViewContextHaiku()
@@ -227434,10 +229187,10 @@ index 359c3765d3a41ba1c6cfdb6b44fa292cc7811a0d..18a4d1524bbb7a68b2bec420d013fd89
  endif ()
 diff --git a/Source/cmake/OptionsHaiku.cmake b/Source/cmake/OptionsHaiku.cmake
 new file mode 100644
-index 0000000000000000000000000000000000000000..e0e44de1489a6683158552a106d98277f3480599
+index 0000000000000000000000000000000000000000..0bbf07f2b5b5ab9585833995ca973f01886b96cd
 --- /dev/null
 +++ b/Source/cmake/OptionsHaiku.cmake
-@@ -0,0 +1,475 @@
+@@ -0,0 +1,482 @@
 +include(GNUInstallDirs)
 +include(VersioningUtils)
 +
@@ -227726,6 +229479,13 @@ index 0000000000000000000000000000000000000000..e0e44de1489a6683158552a106d98277
 +SET_AND_EXPOSE_TO_BUILD(HAVE_GL_FENCE TRUE)
 +
 +SET_AND_EXPOSE_TO_BUILD(USE_INSPECTOR_SOCKET_SERVER ${ENABLE_REMOTE_INSPECTOR})
++
++# Service workers' notifications: registration.showNotification() and the
++# notificationclick and notificationclose events, as on GTK and WPE
++# (PlatformEnableGlib.h; not a CMake option). A push message's handler must
++# show a notification (Summit #148), and a click on it goes to the worker,
++# which opens or focuses the site's page.
++SET_AND_EXPOSE_TO_BUILD(ENABLE_NOTIFICATION_EVENT ON)
 +
 +# WebGPU: Dawn's monolithic libwebgpu_dawn.so (Vulkan backend; it dlopens
 +# libvulkan.so.1 itself, so a machine without Vulkan only loses adapters) and
