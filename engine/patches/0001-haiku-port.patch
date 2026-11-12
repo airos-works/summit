@@ -41110,7 +41110,7 @@ index 100e61c99fcc079ca9b363aab12482437ef928c7..c4a67dde3a5846b566a25d6d109e452a
  }
  
 diff --git a/Source/WebCore/platform/graphics/coordinated/CoordinatedBackingStoreProxy.cpp b/Source/WebCore/platform/graphics/coordinated/CoordinatedBackingStoreProxy.cpp
-index 160ba4f2623722caaf670da2b6eb3f4b1d3f2f5f..dba24c950c70f584b5dc19338d08004e20750d75 100644
+index 160ba4f2623722caaf670da2b6eb3f4b1d3f2f5f..5026f486ac8c18e6a9463bf2528fae1d4140426a 100644
 --- a/Source/WebCore/platform/graphics/coordinated/CoordinatedBackingStoreProxy.cpp
 +++ b/Source/WebCore/platform/graphics/coordinated/CoordinatedBackingStoreProxy.cpp
 @@ -33,6 +33,10 @@
@@ -41202,7 +41202,29 @@ index 160ba4f2623722caaf670da2b6eb3f4b1d3f2f5f..dba24c950c70f584b5dc19338d08004e
  
          bool tileSizeChanged = false;
          if (!m_contentsRect.isEmpty()) {
-@@ -407,11 +451,14 @@ IntSize CoordinatedBackingStoreProxy::computeTileSize(const IntSize& viewportSiz
+@@ -369,9 +413,21 @@ void CoordinatedBackingStoreProxy::createOrDestroyTiles(const IntRect& unscaledV
+         for (const auto& position : tilePositionsToCreate) {
+             auto tile = Tile(generateTileID(), tileRectForPosition(position));
+ #if ENABLE(DAMAGE_TRACKING)
++#if PLATFORM(HAIKU)
++            // All of the tile, in layer units: IntRect::scale() truncates the
++            // position and the size, and at 175 % a tile of device rows
++            // 512-1023 (layer rows 292.57-585.14) went in as 292-584. Its last
++            // device rows were left out of the frame that brought it, and kept
++            // what the frame before showed there: the white of a tile not yet
++            // painted, a line across a dark page (#227).
++            FloatRect unscaledDirtyRect(tile.dirtyRect);
++            unscaledDirtyRect.scale(1 / contentsScale);
++            damage.add(enclosingIntRect(unscaledDirtyRect));
++#else
+             IntRect unscaledDirtyRect = tile.dirtyRect;
+             unscaledDirtyRect.scale(1 / contentsScale);
+             damage.add(unscaledDirtyRect);
++#endif
+ #else
+             UNUSED_PARAM(damage);
+ #endif
+@@ -407,11 +463,14 @@ IntSize CoordinatedBackingStoreProxy::computeTileSize(const IntSize& viewportSiz
          return overridenTileSize;
  
      IntSize tileSize;
@@ -41220,7 +41242,7 @@ index 160ba4f2623722caaf670da2b6eb3f4b1d3f2f5f..dba24c950c70f584b5dc19338d08004e
          static constexpr int minGPUTileHeight = 256;
  
          auto gpuTileSize = [&](const IntSize& baseSize) -> IntSize {
-@@ -434,9 +481,25 @@ IntSize CoordinatedBackingStoreProxy::computeTileSize(const IntSize& viewportSiz
+@@ -434,9 +493,25 @@ IntSize CoordinatedBackingStoreProxy::computeTileSize(const IntSize& viewportSiz
              tileSize = gpuTileSize(baseSize);
          }
      } else {
@@ -41246,7 +41268,7 @@ index 160ba4f2623722caaf670da2b6eb3f4b1d3f2f5f..dba24c950c70f584b5dc19338d08004e
          // If the contents width is small, increase tile size vertically.
          if (m_contentsRect.width() < tileSize.width())
              tileSize.setHeight(maxUntiledContentSize);
-@@ -499,6 +562,30 @@ void CoordinatedBackingStoreProxy::adjustForContentsRect(IntRect& rect) const
+@@ -499,6 +574,30 @@ void CoordinatedBackingStoreProxy::adjustForContentsRect(IntRect& rect) const
  
  std::pair<IntRect, IntRect> CoordinatedBackingStoreProxy::computeCoverAndKeepRect() const
  {
@@ -41277,7 +41299,7 @@ index 160ba4f2623722caaf670da2b6eb3f4b1d3f2f5f..dba24c950c70f584b5dc19338d08004e
      IntRect coverRect = m_visibleRect;
      IntRect keepRect = m_visibleRect;
  
-@@ -513,6 +600,31 @@ std::pair<IntRect, IntRect> CoordinatedBackingStoreProxy::computeCoverAndKeepRec
+@@ -513,6 +612,31 @@ std::pair<IntRect, IntRect> CoordinatedBackingStoreProxy::computeCoverAndKeepRec
  
      adjustForContentsRect(coverRect);
  
@@ -71826,7 +71848,7 @@ index f4510ce2501dd8b7577ceb994e9090da9e649dda..874f59b9469cc9b1bf8d1d20a4775e06
  
      GLuint m_vertexShader;
 diff --git a/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedBackingStore.cpp b/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedBackingStore.cpp
-index 0badc4492a49e10ae2faa80d59da84a9cea259d6..1c7a3fdc764a57e51c1b7fa10078603ea4fb30f4 100644
+index 0badc4492a49e10ae2faa80d59da84a9cea259d6..2d01d9fd7aee254d7b8127041d4e468cb61179b9 100644
 --- a/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedBackingStore.cpp
 +++ b/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedBackingStore.cpp
 @@ -24,35 +24,176 @@
@@ -72090,7 +72112,56 @@ index 0badc4492a49e10ae2faa80d59da84a9cea259d6..1c7a3fdc764a57e51c1b7fa10078603e
          const auto allEdgesExposed = allTileEdgesExposed(layerRect, tile.rect()) ? TextureMapper::AllEdgesExposed::Yes : TextureMapper::AllEdgesExposed::No;
  
  #if ENABLE(DAMAGE_TRACKING)
-@@ -105,6 +307,112 @@ void CoordinatedBackingStore::paintToTextureMapper(TextureMapper& textureMapper,
+@@ -100,11 +302,161 @@ void CoordinatedBackingStore::paintToTextureMapper(TextureMapper& textureMapper,
+ 
+             continue;
+         }
++#endif
++#if PLATFORM(HAIKU)
++        // Tiles side by side share an edge, but the GPU places each tile's
++        // corners on its own. Where the layer sits on a half device pixel (at
++        // 175 %, every scroll position of 2 mod 4 CSS pixels) shared edges pass
++        // through pixel centres, and rounding could leave such a row of pixels
++        // to neither tile: a white line across a dark page until the next
++        // scroll (#227; 17 of 40 such positions on the laptop). An edge inside
++        // the layer that lands within a 16th of a pixel of pixel centres is
++        // drawn a 64th of a pixel further, so one of the two tiles always
++        // holds the row; drawn twice, opaque pixels stay as they were. Other
++        // edges, and tiles that aren't opaque, are drawn exactly as before.
++        // SUMMIT_TILE_OVERLAP=0 draws tiles edge to edge.
++        static const bool overlapsTiles = [] {
++            const char* value = getenv("SUMMIT_TILE_OVERLAP");
++            return !value || strcmp(value, "0");
++        }();
++        if (overlapsTiles && allEdgesExposed == TextureMapper::AllEdgesExposed::No && tile.texture().isOpaque()
++            && !tile.texture().filterOperation() && cullsTiles && !adjustedTransform.b() && !adjustedTransform.c()
++            && adjustedTransform.a() && adjustedTransform.d()) {
++            const double a = adjustedTransform.a(), d = adjustedTransform.d();
++            const float overlapX = 1 / (64 * std::abs(a));
++            const float overlapY = 1 / (64 * std::abs(d));
++            // Whether a layer coordinate lands within a 16th of a pixel of
++            // pixel centres in the target.
++            auto onPixelCentres = [](double target) {
++                const double fraction = target - std::floor(target);
++                return std::abs(fraction - 0.5) < 1.0 / 16;
++            };
++            const double e = adjustedTransform.e(), f = adjustedTransform.f();
++            FloatRect drawn = tile.rect();
++            if (drawn.x() > layerRect.x() && onPixelCentres(a * drawn.x() + e))
++                drawn.shiftXEdgeTo(drawn.x() - overlapX);
++            if (drawn.maxX() < layerRect.maxX() && onPixelCentres(a * drawn.maxX() + e))
++                drawn.shiftMaxXEdgeTo(drawn.maxX() + overlapX);
++            if (drawn.y() > layerRect.y() && onPixelCentres(d * drawn.y() + f))
++                drawn.shiftYEdgeTo(drawn.y() - overlapY);
++            if (drawn.maxY() < layerRect.maxY() && onPixelCentres(d * drawn.maxY() + f))
++                drawn.shiftMaxYEdgeTo(drawn.maxY() + overlapY);
++            if (drawn != tile.rect()) {
++                textureMapper.drawTexture(tile.texture(), drawn, adjustedTransform, opacity, allEdgesExposed);
++                continue;
++            }
++        }
+ #endif
+         textureMapper.drawTexture(tile.texture(), tile.rect(), adjustedTransform, opacity, allEdgesExposed);
      }
  }
  
