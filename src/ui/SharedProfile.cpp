@@ -278,6 +278,16 @@ void SharedProfile::RemoveWindowSession(uint64 key)
     if (fSessions.erase(key)) { ++fRevision; fUnsavedOtherChanges = true; }
 }
 
+std::vector<WindowSession> SharedProfile::TakeWindowSessions()
+{
+    std::lock_guard lock(fMutex);
+    std::vector<WindowSession> sessions;
+    for (auto& [key, session] : fSessions)
+        if (!session.tabs.empty()) sessions.push_back(std::move(session));
+    if (!fSessions.empty()) { fSessions.clear(); ++fRevision; fUnsavedOtherChanges = true; }
+    return sessions;
+}
+
 bool SharedProfile::Save(std::string& error)
 {
     summit::StallScope scope("profile save", 'save');

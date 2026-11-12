@@ -53,6 +53,8 @@ struct PreferencesState {
     BrowsingAids aids;
     // Preferences › AutoFill (#149) reads and changes the saved addresses.
     std::shared_ptr<SharedProfile> profile;
+    // Keep running without windows for push messages (#148).
+    bool backgroundNotifications = true;
 };
 // Edit › Preferences…. One window for the application; changes apply to every
 // browser window as they are made and are saved in the profile.
@@ -116,6 +118,7 @@ private:
     BStringView* fHint;
     BMenuField* fSearchEngine;
     BCheckBox* fRestoreSession;
+    BCheckBox* fBackgroundNotifications;
     BCheckBox* fCheckForUpdates;
     BStringView* fUpdateInfo;
     BCheckBox* fBookmarksBar;

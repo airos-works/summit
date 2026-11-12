@@ -48,7 +48,7 @@ constexpr uint32 homeEdited = 'phed', useStartPage = 'phsp', bookmarksBarToggled
     searchChosen = 'psrc', userAgentChosen = 'puac', clearHistory = 'pchi', clearHistoryConfirmed = 'pchc', clearCache = 'pcca',
     clearSiteData = 'pcsd', clearSiteDataConfirmed = 'pcsc', cacheMeasured = 'pcms',
     forgetCertificates = 'pfce', forgetCertificatesConfirmed = 'pfcc', siteSelected = 'psse', siteAllow = 'pssa',
-    restoreSessionToggled = 'prss', mcpToggled = 'pmcp', mcpLocalToggled = 'pmcl', mcpPortEdited = 'pmpe',
+    restoreSessionToggled = 'prss', backgroundNotificationsToggled = 'prbn', mcpToggled = 'pmcp', mcpLocalToggled = 'pmcl', mcpPortEdited = 'pmpe',
     mcpCopy = 'pmcc', mcpNewToken = 'pmnt', mcpNewTokenConfirmed = 'pmnc', checkForUpdatesToggled = 'pupd',
     siteBlock = 'pssb', siteRemove = 'pssr', protocolSelected = 'ppse', protocolRemove = 'pprm',
     preventTrackingToggled = 'pptr', httpsFirstToggled = 'phtf', cookieSiteSelected = 'pcss', cookieSiteAdd = 'pcsa', cookieSiteRemove = 'pcsr',
@@ -103,6 +103,13 @@ PreferencesWindow::PreferencesWindow(BMessenger owner, const PreferencesState& s
     fRestoreSession->SetValue(state.restoreSession ? B_CONTROL_ON : B_CONTROL_OFF);
     auto* restoreHint = new BStringView("restore-hint", "Also after the computer was shut down or restarted.");
     restoreHint->SetHighUIColor(B_PANEL_TEXT_COLOR, B_DARKEN_2_TINT);
+    // Push messages (#148) arrive only while Summit runs.
+    fBackgroundNotifications = new BCheckBox("background-notifications",
+        "Keep running after the last window closes, for notifications from sites", new BMessage(backgroundNotificationsToggled));
+    fBackgroundNotifications->SetValue(state.backgroundNotifications ? B_CONTROL_ON : B_CONTROL_OFF);
+    auto* backgroundHint = new BStringView("background-hint", "Only while a site may show notifications. Summit stays in "
+        "the Deskbar; starting it opens its windows again, and File › Quit quits.");
+    backgroundHint->SetHighUIColor(B_PANEL_TEXT_COLOR, B_DARKEN_2_TINT);
     fCheckForUpdates = new BCheckBox("check-for-updates", "Check for a new build of Summit once a day",
         new BMessage(checkForUpdatesToggled));
     fCheckForUpdates->SetValue(state.checkForUpdates ? B_CONTROL_ON : B_CONTROL_OFF);
@@ -214,6 +221,8 @@ PreferencesWindow::PreferencesWindow(BMessenger owner, const PreferencesState& s
             .AddStrut(4)
             .Add(fRestoreSession)
             .Add(restoreHint)
+            .Add(fBackgroundNotifications)
+            .Add(backgroundHint)
         .End()
         .AddStrut(6)
         .Add(SectionTitle("bookmarks-title", "Bookmarks"))
@@ -697,6 +706,12 @@ void PreferencesWindow::MessageReceived(BMessage* message)
             fOwner.SendMessage(&changed);
             break;
         }
+        case backgroundNotificationsToggled: {
+            BMessage changed(kPreferencesChanged);
+            changed.AddBool("background_notifications", fBackgroundNotifications->Value() == B_CONTROL_ON);
+            fOwner.SendMessage(&changed);
+            break;
+        }
         case checkForUpdatesToggled: {
             BMessage changed(kPreferencesChanged);
             changed.AddBool("check_for_updates", fCheckForUpdates->Value() == B_CONTROL_ON);
@@ -925,6 +940,9 @@ void PreferencesWindow::MessageReceived(BMessage* message)
             bool restore = true;
             if (message->FindBool("restore_session", &restore) == B_OK)
                 fRestoreSession->SetValue(restore ? B_CONTROL_ON : B_CONTROL_OFF);
+            bool background = true;
+            if (message->FindBool("background_notifications", &background) == B_OK)
+                fBackgroundNotifications->SetValue(background ? B_CONTROL_ON : B_CONTROL_OFF);
             bool updates = true;
             if (message->FindBool("check_for_updates", &updates) == B_OK)
                 fCheckForUpdates->SetValue(updates ? B_CONTROL_ON : B_CONTROL_OFF);

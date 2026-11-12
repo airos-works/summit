@@ -261,7 +261,8 @@ Profile Profile::Load(const std::filesystem::path& path, std::string& error)
         if (auto text = j.find("zoomTextOnly"); text != j.end() && text->is_boolean()) profile.zoomTextOnly = text->get<bool>();
         for (auto [name, field] : { std::pair { "caretBrowsing", &profile.caretBrowsing }, std::pair { "reduceMotion", &profile.reduceMotion },
                 std::pair { "increaseContrast", &profile.increaseContrast }, std::pair { "unloadWhenMemoryIsLow", &profile.unloadWhenMemoryIsLow },
-                std::pair { "overrideColors", &profile.overrideColors } })
+                std::pair { "overrideColors", &profile.overrideColors },
+                std::pair { "backgroundNotifications", &profile.backgroundNotifications } })
             if (auto value = j.find(name); value != j.end() && value->is_boolean()) *field = value->get<bool>();
         if (auto size = j.find("minimumFontSize"); size != j.end() && size->is_number_integer())
             profile.minimumFontSize = std::clamp(size->get<int>(), 0, 72);
@@ -647,6 +648,7 @@ bool Profile::Save(const std::filesystem::path& path, std::string& error, int64_
             {"homeURL", homeURL}, {"showBookmarksBar", showBookmarksBar}, {"zoomTextOnly", zoomTextOnly},
             {"caretBrowsing", caretBrowsing}, {"reduceMotion", reduceMotion}, {"increaseContrast", increaseContrast},
             {"minimumFontSize", minimumFontSize}, {"unloadWhenMemoryIsLow", unloadWhenMemoryIsLow}, {"overrideColors", overrideColors}, {"spellingLanguage", spellingLanguage}, {"restoreSession", restoreSession},
+            {"backgroundNotifications", backgroundNotifications},
             {"savePasswords", savePasswords}, {"passwordNever", passwordNever}, {"spellChecking", spellChecking},
             {"preventCrossSiteTracking", preventCrossSiteTracking}, {"crossSiteCookieSites", crossSiteCookieSites},
             {"httpsFirst", httpsFirst},

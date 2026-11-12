@@ -113,8 +113,12 @@ public:
         // Browser profiles (#157): File › Quit quits every profile's
         // Summit; closing the last window, only this one (ProfilesQuit).
         if (message && message->what == B_QUIT_REQUESTED && !fQuitting && !fDownloadPromptPending)
-            fQuitScope = message->GetBool("summit:last_window", false) ? QuitScope::LastWindow
+            fQuitScope = message->GetBool("summit:background", false) ? QuitScope::Background
+                : message->GetBool("summit:last_window", false) ? QuitScope::LastWindow
                 : message->GetBool("summit:profiles", false) ? QuitScope::OtherProfile : QuitScope::User;
+        // Started again (its icon) while running without windows (#148):
+        // its windows open, then the application comes forward.
+        if (message && message->what == B_SILENT_RELAUNCH && fBackground) LeaveBackground();
 #endif
         BApplication::DispatchMessage(message, handler);
     }
@@ -198,6 +202,10 @@ public:
             if (!fWindows.empty()) OpenInNormalWindow(argument);
             else fURLs.push_back(argument);
         }
+#if SUMMIT_MODERN_WEBKIT
+        // Pages or a window asked for while running without windows (#148).
+        if (fBackground && (!fURLs.empty() || fNewWindowRequested || !fPendingWebApps.empty())) LeaveBackground();
+#endif
     }
     void RefsReceived(BMessage* message) override
     {
@@ -240,6 +248,9 @@ public:
             for (int32 i = 0; message->FindRef("refs", i, &ref) == B_OK; ++i)
                 if (const auto url = summit::RefURL(ref); !url.empty()) fURLs.push_back(url);
         }
+#if SUMMIT_MODERN_WEBKIT
+        if (fBackground && (!fURLs.empty() || !fPendingWebApps.empty())) LeaveBackground();
+#endif
     }
     void ReadyToRun() override
     {
@@ -706,7 +717,8 @@ public:
                 SUMMIT_QUIT_TRACE("window closed, %zu left", fWindows.size());
                 // Quitting keeps every window's tabs for the next start.
                 fClosedWhileQuitting.push_back(key);
-                if (fWindows.empty()) PostMessage(B_QUIT_REQUESTED);
+                if (fWindows.empty() && fQuitScope == QuitScope::Background && !fShutdownRequest) EnterBackground();
+                else if (fWindows.empty()) PostMessage(B_QUIT_REQUESTED);
                 else CloseNextWindow();
             } else if (!fWindows.empty()) {
                 // A window closed on its own: its tabs are not reopened.
@@ -749,6 +761,8 @@ public:
             if (fWindows.size() <= 1) {
                 BMessage quit(B_QUIT_REQUESTED);
                 quit.AddBool("summit:last_window", true);
+                // Push messages (#148): Summit keeps running without windows.
+                if (KeepRunningForNotifications()) quit.AddBool("summit:background", true);
                 PostMessage(&quit);
                 return;
             }
@@ -850,7 +864,8 @@ public:
             std::vector<std::pair<const char*, bool summit::Profile::*>> flags {
                 { "caret_browsing", &summit::Profile::caretBrowsing }, { "reduce_motion", &summit::Profile::reduceMotion },
                 { "increase_contrast", &summit::Profile::increaseContrast }, { "unload_when_memory_is_low", &summit::Profile::unloadWhenMemoryIsLow },
-                { "override_colors", &summit::Profile::overrideColors } };
+                { "override_colors", &summit::Profile::overrideColors },
+                { "background_notifications", &summit::Profile::backgroundNotifications } };
             int32 minimumFontSize = 0;
             const bool hasMinimumFontSize = message->FindInt32("minimum_font_size", &minimumFontSize) == B_OK
                 && minimumFontSize >= 0 && minimumFontSize <= 72;
@@ -1248,7 +1263,8 @@ public:
         SUMMIT_QUIT_TRACE("quit requested (%zu windows%s)", fWindows.size(), fQuitting ? ", already quitting" : "");
         if (!fWindows.empty()) {
             if (fQuitting || fDownloadPromptPending) return false;
-            std::string lost = fDownloadQuitApproved ? std::string() : DownloadsLostOnQuit();
+            // Running on without windows, downloads go on too.
+            std::string lost = fDownloadQuitApproved || fQuitScope == QuitScope::Background ? std::string() : DownloadsLostOnQuit();
             if (!lost.empty()) {
                 // Downloads belong to the application, not to one window.
                 fDownloadPromptPending = true;
@@ -1264,6 +1280,8 @@ public:
             CloseNextWindow();
             return false;
         }
+        // Quitting for good: nothing opens windows again.
+        fBackground = false;
         if (fWebKitContext) {
             fWebKitContext->SetExtensionActionListener({});
             fWebKitContext->SetBrowserCommandListener({});
@@ -2043,6 +2061,7 @@ private:
                 profile.lastUpdateCheck, profile.autoplay, profile.spellChecking, profile.savePasswords };
         });
         state.webKitDirectory = fProfile / "WebKit";
+        state.backgroundNotifications = fShared->Read([](const summit::Profile& profile) { return profile.backgroundNotifications; });
         state.profile = fShared;
         state.userAgent = fShared->Read([](const summit::Profile& profile) { return profile.userAgent; });
         state.spellingLanguage = fShared->Read([](const summit::Profile& profile) { return profile.spellingLanguage; });
@@ -2103,6 +2122,7 @@ private:
             state.AddString("home_url", profile.homeURL.c_str());
             state.AddBool("show_bookmarks_bar", profile.showBookmarksBar);
             state.AddBool("restore_session", profile.restoreSession);
+            state.AddBool("background_notifications", profile.backgroundNotifications);
             state.AddString("interface_style", profile.interfaceStyle.c_str());
             state.AddString("search_engine", profile.searchEngine.c_str());
             state.AddInt32("history_count", static_cast<int32>(profile.history.size()));
@@ -2355,6 +2375,10 @@ private:
         };
         if (fQuitting) { fail("The browser is quitting."); return; }
         const uint32 command = message->GetUInt32("command", 0);
+        // A page to open (a service worker's, from a click on its
+        // notification, #148) while Summit runs without windows: its windows
+        // first.
+        if (fBackground && (command == B_WEBKIT_BROWSER_OPEN_TAB || command == B_WEBKIT_BROWSER_OPEN_WINDOW)) LeaveBackground();
         if (command == B_WEBKIT_BROWSER_DOWNLOADS_UI) {
             // downloads.setUiOptions: the whole browser's, no window needed.
             if (fShared) fShared->SetDownloadUIHidden(message->GetString("extension_identifier", ""), !message->GetBool("enabled", true));
@@ -2721,11 +2745,15 @@ private:
     bool fNativeUIExitReady = false;
     bool fCancellingDownloads = false;
     // Browser profiles (#157, Profiles.h).
-    enum class QuitScope { User, LastWindow, OtherProfile };
+    // Background: the last window closed while sites may send push messages
+    // (#148); Summit runs on without windows (EnterBackground).
+    enum class QuitScope { User, LastWindow, OtherProfile, Background };
     // What started the quit under way: File › Quit (or Deskbar's, or an
     // update) quits every profile's Summit; closing the last window, or a
     // quit that another profile's Summit asked for, only this one.
     QuitScope fQuitScope = QuitScope::User;
+    // Running without windows for push messages (EnterBackground).
+    bool fBackground = false;
     // A start that only asked for a new window (kNewWindowArgument), and
     // notification clicks, for the Summit that has the profile.
     bool fNewWindowRequested = false;
@@ -2741,6 +2769,10 @@ private:
                 const std::string id = message->GetString("id", "");
                 if (fQuitting || id.empty()) return true;
                 if (id == summit::CurrentProfileID()) {
+                    if (fBackground) {
+                        LeaveBackground();
+                        return true;
+                    }
                     summit::BrowserWindowOptions options;
                     options.frame = CascadedFrame();
                     OpenWindow(options);
@@ -2763,12 +2795,74 @@ private:
         }
         return false;
     }
+    // Push messages (#148) arrive only while Summit runs (the network
+    // process keeps the connection to the push service), so closing the last
+    // window leaves it running without windows when a site may notify, unless
+    // Preferences › General says otherwise. It stays in the Deskbar's list of
+    // applications, where it can be quit, and starting it again opens its
+    // windows (LeaveBackground). File › Quit quits as before.
+    bool KeepRunningForNotifications() const
+    {
+        if (!fWebKitContext || fShutdownRequest || !fAutomation.empty()) return false;
+        return fShared->Read([](const summit::Profile& profile) {
+            if (!profile.backgroundNotifications) return false;
+            const auto notifications = profile.sitePermissions.find("notifications");
+            if (notifications == profile.sitePermissions.end()) return false;
+            for (const auto& [origin, allowed] : notifications->second)
+                if (allowed) return true;
+            return false;
+        });
+    }
+    // The last window has closed, its tabs kept as for a quit.
+    void EnterBackground()
+    {
+        SUMMIT_QUIT_TRACE("running on without windows, for notifications");
+        fQuitting = false;
+        fDownloadQuitApproved = false;
+        fBackground = true;
+        fClosedWhileQuitting.clear();
+        fShared->SaveSoon();
+        // What the start asked for was opened then (ReadyToRun keeps it);
+        // what was started while the windows closed opens now.
+        fURLs.clear();
+        fPendingWebApps.clear();
+        fNewWindowRequested = false;
+        for (auto& url : std::exchange(fRelaunchArguments, { })) fURLs.push_back(std::move(url));
+        if (std::exchange(fRelaunch, false) || !fURLs.empty()) LeaveBackground();
+    }
+    // Summit was started again, or a page is to open: the windows that were
+    // open (as a start would: Preferences › General) and what was asked for.
+    void LeaveBackground()
+    {
+        if (!fBackground || fQuitting) return;
+        fBackground = false;
+        SUMMIT_QUIT_TRACE("windows again");
+        auto sessions = fShared->TakeWindowSessions();
+        const bool restore = fShared->Read([](const summit::Profile& profile) { return profile.restoreSession; });
+        if (!fPendingWebApps.empty() && fURLs.empty()) {
+            for (const auto& app : std::exchange(fPendingWebApps, {})) OpenWebApp(app);
+        } else if (restore && !sessions.empty()) {
+            for (auto& session : sessions) {
+                summit::BrowserWindowOptions options;
+                options.session = std::move(session);
+                OpenWindow(options);
+            }
+            for (const auto& url : fURLs) OpenInNormalWindow(url);
+        } else {
+            summit::BrowserWindowOptions options;
+            options.urls = fURLs;
+            OpenWindow(options);
+        }
+        if (fWindows.empty()) OpenWindow(summit::BrowserWindowOptions());
+        fURLs.clear();
+        fNewWindowRequested = false;
+    }
     // As the quit starts, with windows open.
     void ProfilesQuit()
     {
         if (fQuitScope == QuitScope::User && !fShutdownRequest) summit::QuitOtherProfiles();
         // Its windows open again with the default profile's next time.
-        if (fQuitScope != QuitScope::LastWindow) summit::SetReopenProfile(true);
+        if (fQuitScope != QuitScope::LastWindow && fQuitScope != QuitScope::Background) summit::SetReopenProfile(true);
     }
     void ReopenProfiles()
     {

@@ -105,6 +105,10 @@ struct Profile {
     // Whether Summit starts with the windows and tabs open when it last quit
     // (or the system shut down), where they were; otherwise with one window.
     bool restoreSession = true;
+    // Push messages (#148) arrive only while Summit runs: closing the last
+    // window leaves it running without windows while a site may notify.
+    // File › Quit still quits.
+    bool backgroundNotifications = true;
     // "haiku" draws the window like other Haiku applications (real buttons and
     // tabs); "safari" is the flat, Safari-like look.
     std::string interfaceStyle = "haiku";

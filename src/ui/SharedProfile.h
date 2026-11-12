@@ -105,6 +105,10 @@ public:
     // key order. A window closed while Summit keeps running is removed.
     void SetWindowSession(uint64 key, const WindowSession& session);
     void RemoveWindowSession(uint64 key);
+    // The sessions of the windows closed as the last window closed, while
+    // Summit kept running (#148), for its windows to open again; they are
+    // no longer the profile's until those windows publish theirs.
+    std::vector<WindowSession> TakeWindowSessions();
     // The page a new tab opens when an enabled extension overrides it
     // (chrome_url_overrides.newtab); empty for the home page. Not saved.
     void SetNewTabOverride(std::string url)
