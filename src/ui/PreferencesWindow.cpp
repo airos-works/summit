@@ -175,6 +175,11 @@ PreferencesWindow::PreferencesWindow(BMessenger owner, const PreferencesState& s
     auto* sitesIntro = new BStringView("sites-intro", "Sites you have allowed or blocked. Other sites ask first.");
     auto* sitesRemoveHint = new BStringView("sites-remove-hint", "A removed site asks again the next time it wants to.");
     sitesRemoveHint->SetHighUIColor(B_PANEL_TEXT_COLOR, B_DARKEN_2_TINT);
+    // Web Push (#148): a site allowed to notify may subscribe to push
+    // messages, which Mozilla's push service relays.
+    auto* pushHint = new BStringView("push-hint", "Sites allowed to show notifications can send them while their pages "
+        "are closed, through Mozilla's push service. Blocking or removing a site stops them.");
+    pushHint->SetHighUIColor(B_PANEL_TEXT_COLOR, B_DARKEN_2_TINT);
     auto* locationHint = new BStringView("location-hint", HasSystemLocationService()
         ? "Your location comes from the system's location service: the place set in its settings, or one found from "
           "the Wi-Fi networks nearby and your network address."
@@ -271,6 +276,7 @@ PreferencesWindow::PreferencesWindow(BMessenger owner, const PreferencesState& s
             .Add(fSiteBlock)
             .Add(fSiteRemove)
         .End()
+        .Add(pushHint)
         .Add(locationHint);
     fProtocols = new BColumnListView("link-handlers", B_NAVIGABLE, B_FANCY_BORDER, true);
     fProtocols->AddColumn(new BStringColumn("Link scheme", 120, 80, 200, B_TRUNCATE_END), 0);
