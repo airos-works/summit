@@ -7,16 +7,22 @@ build's symbol tables (airos-ci apps/store-symbols.py), served at
 http://192.168.1.200/symbols/: by GNU build ID, which the report's image list
 prints for the engine and Summit, and otherwise (the engine's third-party
 libraries) by the package version in the report's heading. This prints the
-report with each frame named by its function:
+report with each frame named by its function, and where the build kept line
+tables (the engine and Summit since 12 November 2026, for 180 days), the file
+and line, with the calls inlined there (innermost first, as a debugger shows
+them), read with llvm-symbolizer:
 
-  #3 libWebKit.so.1+0x1a2b3c WebCore::RenderBox::layout()+0x12
+  #3 libWebKit.so.1+0x1a2b3c WebCore::RenderBox::nextSiblingBox() const
+       at WebCore/PrivateHeaders/WebCore/RenderBox.h:812
+       inlined into WebCore::RenderBlockFlow::layoutBlockChildren(…)+0x200
+       at Source/WebCore/rendering/RenderBlockFlow.cpp:1229
 
   tools/symbolize-crash-report.py crash-20261111-101500-WebProcess-1234.txt
   tools/symbolize-crash-report.py --store /data2/airos/artifacts/symbols REPORT
 
 A frame names the function that contains its address (return addresses are
-already moved into their call). Symbols are what the binaries carry: no file
-or line (the engine is built without debug information).
+already moved into their call). Line tables are cached decompressed in
+~/.cache/summit-symbols (about 1.2 GB per engine build).
 """
 import argparse
 import bisect
@@ -64,18 +70,61 @@ class Store:
                 return None
             raise
 
-    def symbols(self, relative):
-        """A symbol object (decompressed), cached under ~/.cache/summit-symbols."""
+    def object(self, relative):
+        """A stored object, decompressed into ~/.cache/summit-symbols: its
+        path, or None when the store has no such object."""
         cached = CACHE / relative.removesuffix('.xz')
         if cached.exists():
-            return cached.read_bytes()
-        data = self.fetch(relative)
-        if data is None:
-            return None
-        data = lzma.decompress(data)
+            return cached
         cached.parent.mkdir(parents=True, exist_ok=True)
-        cached.write_bytes(data)
-        return data
+        partial = cached.with_name(cached.name + '.part')
+        if self.remote:
+            try:
+                source = urllib.request.urlopen(f'{self.location}/{relative}', timeout=60)
+            except urllib.error.HTTPError as error:
+                if error.code == 404:
+                    return None
+                raise
+        else:
+            path = pathlib.Path(self.location) / relative
+            if not path.exists():
+                return None
+            source = open(path, 'rb')
+        with source, lzma.open(source) as data, open(partial, 'wb') as out:
+            shutil.copyfileobj(data, out, 1 << 20)
+        partial.replace(cached)
+        return cached
+
+
+def symbolizer():
+    found = shutil.which('llvm-symbolizer')
+    if not found:
+        candidates = sorted(pathlib.Path('/usr/bin').glob('llvm-symbolizer-*')) \
+            + sorted(pathlib.Path('/usr/lib').glob('llvm-*/bin/llvm-symbolizer'))
+        found = str(candidates[-1]) if candidates else None
+    return found
+
+
+def short_path(path):
+    """A source path from the build machine, from the tree's root."""
+    path = re.sub(r'^.*?/(?:src|build)/webkit-[^/]+/', '', path)
+    path = re.sub(r'^.*?/include/c\+\+/', 'c++/', path)
+    return re.sub(r'^.*?/appbuild-[^/]+/[^/]+/src/', '', path)
+
+
+def line_frames(tool, path, addresses):
+    """{address: [(function, file:line), ...] innermost first} from line tables."""
+    if not tool or not addresses:
+        return {}
+    output = subprocess.run([tool, f'--obj={path}', '--output-style=JSON', '--inlines', '--demangle',
+                             *[hex(a) for a in addresses]], capture_output=True, text=True).stdout
+    result = {}
+    for entry in json.loads(output or '[]'):
+        frames = [(f.get('FunctionName', '?'), f'{short_path(f["FileName"])}:{f["Line"]}')
+                  for f in entry.get('Symbol', []) if f.get('FileName') and f.get('Line')]
+        if frames:
+            result[int(entry['Address'], 16)] = frames
+    return result
 
 
 class SymbolTable:
@@ -216,42 +265,69 @@ def main():
     tables = {}
 
     def table_for(image):
+        """(symbol table, path of its line tables or None) of an image."""
         if image in tables:
             return tables[image]
-        table = None
+        table, lines_file = None, None
         path, identity = images.get(image, ('', None))
-        object_path = f'build-id/{identity[:2]}/{identity[2:]}.debug.xz' if identity else None
+        object_path = lines_path = None
+        if identity:
+            base = f'build-id/{identity[:2]}/{identity[2:]}'
+            object_path, lines_path = base + '.debug.xz', base + '.lines.xz'
         package = package_of(path or image)
         if not object_path and package:
             build = build_for(package)
             for entry in (build or {}).get('files', []):
                 if entry['path'].rsplit('/', 1)[-1] == image:
-                    object_path = entry['symbols']
-        data = store.symbols(object_path) if object_path else None
-        if object_path and data is None:
+                    object_path, lines_path = entry['symbols'], entry.get('lines')
+        symbols_file = store.object(object_path) if object_path else None
+        if object_path and symbols_file is None:
             print(f'symbolize: {image}: {object_path} is not in the store', file=sys.stderr)
-        if data:
-            table = SymbolTable(data)
-        tables[image] = table
-        return table
+        if symbols_file:
+            table = SymbolTable(symbols_file.read_bytes())
+            if lines_path and tool:
+                lines_file = store.object(lines_path)
+        tables[image] = (table, lines_file)
+        return tables[image]
 
-    found = []
+    tool = symbolizer()
+    if not tool:
+        print('symbolize: no llvm-symbolizer: functions only, no files or lines', file=sys.stderr)
+    found, wanted = [], {}
+    total = sum(1 for line in lines if FRAME.match(line))
     for index, line in enumerate(lines):
         match = FRAME.match(line)
         if not match:
             continue
-        table = table_for(match['image'])
+        table, lines_file = table_for(match['image'])
         result = table.lookup(int(match['offset'], 16)) if table else None
         if result:
-            found.append((index, match, result))
-    names = demangle(name for _i, _m, (name, _d, _in) in found)
-    for index, match, (name, distance, inside) in found:
+            address = table.text_base + int(match['offset'], 16)
+            found.append((index, match, result, lines_file, address))
+            if lines_file:
+                wanted.setdefault(lines_file, set()).add(address)
+    located = {path: line_frames(tool, path, sorted(addresses)) for path, addresses in wanted.items()}
+    names = demangle(name for _i, _m, (name, _d, _in), _l, _a in found)
+    with_lines = 0
+    for index, match, (name, distance, inside), lines_file, address in found:
         named = f'{names[name]}+0x{distance:x}' + ('' if inside else ' (past its end)')
-        lines[index] = f'{match["lead"]}{match["image"]}+0x{match["offset"]} {named}'
+        head = f'{match["lead"]}{match["image"]}+0x{match["offset"]} '
+        frames = located.get(lines_file, {}).get(address) if lines_file else None
+        if not frames:
+            lines[index] = head + named
+            continue
+        with_lines += 1
+        indent = ' ' * (len(match['lead']) - len(match['lead'].lstrip()) + 5)
+        text = []
+        for depth, (function, where) in enumerate(frames):
+            outer = depth == len(frames) - 1
+            label = named if outer else function
+            text.append((head if depth == 0 else f'{indent}inlined into ') + label)
+            text.append(f'{indent}at {where}')
+        lines[index] = '\n'.join(text)
     sys.stdout.write('\n'.join(lines))
-    named_frames = len(found)
-    total = sum(1 for line in lines if FRAME.match(line))
-    print(f'symbolize: named {named_frames} of {total} frames', file=sys.stderr)
+    print(f'symbolize: named {len(found)} of {total} frames, {with_lines} with files and lines',
+          file=sys.stderr)
     return 0
 
 

@@ -53,21 +53,36 @@ Summit and libWebKitLegacy are linked with `--build-id` since 11 November
 ## Naming the frames
 
 air/OS CI keeps the symbol tables of every build's binaries before stripping
-them (airos-ci `apps/store-symbols.py`, served at
-`http://192.168.1.200/symbols/`). They are stored by build ID, and by the
-package version for the engine's third-party libraries, which have none.
+them, and their line tables: the engine, Summit and libWebKitLegacy are
+built with `-g1` (files, lines and inlined calls, no variables; the init
+cache's `SUMMIT_DEBUG_LINES`, which CI turns on). They are stored by build ID,
+and by the package version for the engine's third-party libraries, which have
+none (airos-ci `apps/store-symbols.py`, served at
+`http://192.168.1.200/symbols/`). Symbol tables are kept; line tables are
+removed 180 days after the last build that has them.
 
     tools/symbolize-crash-report.py crash-20261111-101500-WebProcess-1234.txt
 
 This prints the report with each frame named by the function that contains
-it (`#3 libWebKit.so.1+0x1a2b3c WebCore::RenderBox::layout()+0x12`), local
-functions included. `--store DIR` reads a copy of the store instead, and
-`--sdk` picks the target when a version was built for more than one and
-the report has no build ID to tell them apart. Symbols are cached in
-`~/.cache/summit-symbols`. The engine is a Release build without debug
-information, so there are function names but no files or lines. Reports
-from builds before the store existed (before 11 November 2026) cannot be
-named this way.
+it, local functions included. Where the build has line tables it adds the
+file and line and the calls inlined there, innermost first (read with
+`llvm-symbolizer`, which must be installed):
+
+    #0 libWebKit.so.1+0x2ab63a0 WTF::CanMakeCheckedPtrBase<…>::decrementCheckedPtrCount() const
+         at WTF/Headers/wtf/CheckedRef.h:388
+         inlined into WTF::CheckedPtr<WebCore::RenderBox, …>::~CheckedPtr()
+         at WTF/Headers/wtf/CheckedPtr.h:97
+         inlined into WebCore::RenderBox::nextSiblingBox() const
+         at WebCore/PrivateHeaders/WebCore/RenderBox.h:812
+         inlined into WebCore::RenderBlockFlow::layoutBlockChildren(…)+0x200
+         at Source/WebCore/rendering/RenderBlockFlow.cpp:1229
+
+`--store DIR` reads a copy of the store instead, and `--sdk` picks the target
+when a version was built for more than one and the report has no build ID to
+tell them apart. Objects are cached decompressed in `~/.cache/summit-symbols`
+(about 1.2 GB per engine build with line tables). Reports from builds before
+the store existed (before 11 November 2026) cannot be named this way, and
+line tables start with the first engine built with them.
 
 ## How it works
 
@@ -120,8 +135,8 @@ Summit side (`src/ui/CrashReporter.cpp`):
   crash.
 - A thread that overflows its stack, other than the main thread, has no
   alternate stack, and the kernel ends the team.
-- Frames name functions, not files and lines (no debug information in the
-  engine's build).
+- Line tables do not cover the engine's third-party libraries (ICU, curl and
+  the others from summit/build-deps.sh): those frames name functions only.
 
 ## Tests (X399, 11 November 2026, CI engine tree 70a3f16 + this change)
 

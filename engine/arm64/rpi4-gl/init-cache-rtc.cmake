@@ -4,8 +4,22 @@ set(CMAKE_BUILD_TYPE "Release" CACHE STRING "" FORCE)
 # binds calls between them; -fno-semantic-interposition lifts that, as
 # -Bsymbolic-functions does at link time. (GCC 13 crashed on it only together
 # with -fprofile-use; CI builds without a profile.)
-set(CMAKE_C_FLAGS_RELEASE "-O3 -DNDEBUG -fno-semantic-interposition" CACHE STRING "" FORCE)
-set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG -fno-semantic-interposition" CACHE STRING "" FORCE)
+#
+# SUMMIT_DEBUG_LINES=ON (given before -C, as air/OS CI does): line tables
+# (-g1: files, lines and inlined calls, no variables), which CI keeps per build
+# beside the stripped packages so crash reports can be read to the line
+# (docs/crash-reports.md). The code is the same; the libraries are larger
+# until stripped. -g1 on the link too: JavaScriptCore's code is generated
+# there (LTO).
+set(SUMMIT_DEBUG_LINES "${SUMMIT_DEBUG_LINES}" CACHE BOOL "Build the engine with line tables (-g1)")
+set(_summit_debug "")
+if(SUMMIT_DEBUG_LINES)
+    set(_summit_debug " -g1")
+endif()
+set(CMAKE_C_FLAGS_RELEASE "-O3 -DNDEBUG -fno-semantic-interposition${_summit_debug}" CACHE STRING "" FORCE)
+set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG -fno-semantic-interposition${_summit_debug}" CACHE STRING "" FORCE)
+set(CMAKE_SHARED_LINKER_FLAGS_RELEASE "${_summit_debug}" CACHE STRING "" FORCE)
+set(CMAKE_EXE_LINKER_FLAGS_RELEASE "${_summit_debug}" CACHE STRING "" FORCE)
 set(ENABLE_ACCESSIBILITY_ISOLATED_TREE "OFF" CACHE BOOL "" FORCE)
 set(ENABLE_API_TESTS "OFF" CACHE BOOL "" FORCE)
 set(ENABLE_APPLE_PAY "OFF" CACHE BOOL "" FORCE)
