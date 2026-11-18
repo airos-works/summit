@@ -55443,10 +55443,10 @@ index 0000000000000000000000000000000000000000..ff582f23094174fff0cf70369a24713f
 +} // namespace WebCore
 diff --git a/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaiku.cpp b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..5c4c369de995ba8c0441708d2760c18c0eb0203c
+index 0000000000000000000000000000000000000000..bdf069199a03dcc6b49affd5259fc7275a98ffb6
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaiku.cpp
-@@ -0,0 +1,2260 @@
+@@ -0,0 +1,2308 @@
 +/*
 + * Copyright (C) 2014-2016 Haiku, Inc.
 + *
@@ -55840,14 +55840,10 @@ index 0000000000000000000000000000000000000000..5c4c369de995ba8c0441708d2760c18c
 +    // The blocking form sleeps for the output latency even after playback has
 +    // stopped. Destruction below releases the node after the threads have exited.
 +    hadSoundPlayer = m_soundPlayer;
-+    if (m_soundPlayer)
-+        m_soundPlayer->Stop(false);
++    releaseAudioOutput();
 +    bigtime_t audioStoppedAt = traceLifecycle ? system_time() : 0;
 +
 +    m_mediaLock.Lock();
-+    delete m_soundPlayer;
-+    m_soundPlayer = nullptr;
-+
 +    m_substituteVideo = nullptr;
 +    delete m_mediaFile;
 +    m_mediaFile = nullptr;
@@ -55862,6 +55858,10 @@ index 0000000000000000000000000000000000000000..5c4c369de995ba8c0441708d2760c18c
 +    m_videoTrackFile = nullptr;
 +    m_videoTrackIndex = -1;
 +    m_audioFormat = { };
++    m_audioBlock.clear();
++    m_audioBlockOffset = m_audioBlockEnd = 0;
++    m_audioTargetFrame = m_audioNextFrame = 0;
++    m_audioClockOffset.reset();
 +    m_audioAtEnd = false;
 +    m_videoAtEnd = false;
 +    m_prerollTarget = -1;
@@ -55912,63 +55912,101 @@ index 0000000000000000000000000000000000000000..5c4c369de995ba8c0441708d2760c18c
 +    m_preloadNone = preload == MediaPlayer::Preload::None;
 +}
 +
-+static bigtime_t audioTrackTime(BMediaTrack& track, const media_raw_audio_format& format)
++status_t MediaPlayerPrivate::seekAudioLocked(bigtime_t target)
 +{
-+    // Some Media Kit FFmpeg decoders return packet timestamps in their stream
-+    // time base, not microseconds: AAC in MP4 appears too slow, and ADTS AAC
-+    // leaps past its duration. CurrentFrame counts decoded PCM samples and is
-+    // repositioned by SeekToTime, so it works for both containers.
-+    if (format.frame_rate > 0 && std::isfinite(format.frame_rate))
-+        return static_cast<bigtime_t>(track.CurrentFrame() * 1000000.0 / format.frame_rate);
-+    return track.CurrentTime();
++    bigtime_t landed = target;
++    status_t status = m_audioTrack->SeekToTime(&landed, B_MEDIA_SEEK_CLOSEST_BACKWARD);
++    if (status == B_OK) {
++        // SeekToTime returns the actual packet position. Count decoded PCM
++        // from there: some decoders report later timestamps in stream ticks.
++        m_audioNextFrame = std::llround(landed * (m_audioFormat.frame_rate / 1000000.0));
++        m_audioBlockOffset = m_audioBlockEnd = 0;
++        m_audioTargetFrame = std::llround(target * (m_audioFormat.frame_rate / 1000000.0));
++        m_audioClockOffset.reset();
++        m_audioAtEnd = false;
++    }
++    return status;
++}
++
++bool MediaPlayerPrivate::audioOutputDrainedLocked(bigtime_t now) const
++{
++    return m_audioAtEnd && (!m_audioClockOffset || now + *m_audioClockOffset >= m_audioSubmittedUntil);
++}
++
++bigtime_t MediaPlayerPrivate::audioPresentationTimeLocked(bigtime_t now) const
++{
++    bigtime_t position = static_cast<bigtime_t>(m_currentTime.load() * 1000000.0);
++    if (!m_audioClockOffset)
++        return position;
++    return std::max(position, std::min(m_audioSubmittedUntil, now + *m_audioClockOffset));
 +}
 +
 +void MediaPlayerPrivate::playCallback(void* cookie, void* buffer,
 +    size_t size, const media_raw_audio_format& format)
 +{
-+    MediaPlayerPrivate* player = (MediaPlayerPrivate*)cookie;
++    auto& player = *static_cast<MediaPlayerPrivate*>(cookie);
++    bigtime_t now = system_time();
++    std::memset(buffer, format.format == media_raw_audio_format::B_AUDIO_UCHAR ? 0x80 : 0, size);
++    BAutolock lock(player.m_mediaLock);
++    if (lock.IsLocked() && player.m_audioClockActive && !player.m_ended && !player.m_paused && !player.m_abort)
++        player.fillAudioBufferLocked(buffer, size, now);
++}
 +
-+    // The sound player keeps running to the end of the track and past it, on
-+    // silence: BSoundPlayer::Stop() does not reliably Start() again, which a
-+    // looping element needs at every rewind.
-+    auto silence = [&] {
-+        std::memset(buffer, format.format == media_raw_audio_format::B_AUDIO_UCHAR ? 0x80 : 0, size);
-+    };
-+
-+    if (!player->m_mediaLock.Lock()) {
-+        silence();
-+        return;
-+    }
-+
-+    if (!player->m_audioTrack || player->m_audioAtEnd)
-+        silence();
-+    else {
-+        // The video thread supplies the presentation clock when there is video.
-+        if (!player->m_hasVideo)
-+            player->m_currentTime = audioTrackTime(*player->m_audioTrack, player->m_audioFormat) / 1000000.f;
-+
-+        int64 size64;
-+        if (player->m_audioTrack->ReadFrames(buffer, &size64) != B_OK)
-+        {
-+            silence();
-+            if (!player->m_hasVideo)
-+                player->m_currentTime = player->m_audioTrack->Duration() / 1000000.f;
-+
-+            player->m_audioAtEnd = true;
-+            if ((!player->m_videoTrack || player->m_videoAtEnd) && !player->m_ended.exchange(true)) {
-+                player->m_currentTime = player->m_duration.load();
-+                callOnMainThread([p = WeakPtr(player)] {
-+                    if (p && p->m_ended) {
-+                        if (!p->m_player.isLooping())
-+                            p->pause();
-+                        p->m_player.timeChanged();
-+                        p->m_player.playbackStateChanged();
-+                    }
-+                });
++void MediaPlayerPrivate::fillAudioBufferLocked(void* buffer, size_t size, bigtime_t now)
++{
++    size_t frameSize = m_audioFormat.channel_count * (m_audioFormat.format & media_raw_audio_format::B_AUDIO_SIZE_MASK);
++    double frameDuration = 1000000.0 / m_audioFormat.frame_rate;
++    size_t written = 0;
++    // Limit seek preroll on the sound thread to one callback period at a time.
++    bigtime_t deadline = now + static_cast<bigtime_t>((size / frameSize) * frameDuration);
++    while (!m_audioAtEnd && written + frameSize <= size) {
++        if (m_audioBlockOffset == m_audioBlockEnd) {
++            int64 frames = 0;
++            if (m_audioTrack->ReadFrames(m_audioBlock.mutableSpan().data(), &frames) != B_OK || frames <= 0) {
++                m_audioAtEnd = true;
++                break;
 +            }
++            m_audioBlockOffset = 0;
++            m_audioBlockEnd = frames * frameSize;
 +        }
++
++        size_t available = (m_audioBlockEnd - m_audioBlockOffset) / frameSize;
++        if (m_audioNextFrame < m_audioTargetFrame) {
++            size_t skip = std::min<int64>(available, m_audioTargetFrame - m_audioNextFrame);
++            m_audioNextFrame += skip;
++            m_audioBlockOffset += skip * frameSize;
++            if (system_time() >= deadline)
++                break;
++            continue;
++        }
++
++        size_t frames = std::min(available, (size - written) / frameSize);
++        if (!written) {
++            // The callback fills a future output buffer. Anchor its first
++            // sample to the device latency, including on the first callback
++            // after startup or seek, when no audio is audible yet.
++            m_audioClockOffset = static_cast<bigtime_t>(m_audioNextFrame * frameDuration) - (now + m_audioLatency);
++        }
++        std::memcpy(static_cast<uint8_t*>(buffer) + written, m_audioBlock.span().data() + m_audioBlockOffset, frames * frameSize);
++        written += frames * frameSize;
++        m_audioBlockOffset += frames * frameSize;
++        m_audioNextFrame += frames;
++        m_audioSubmittedUntil = static_cast<bigtime_t>(m_audioNextFrame * frameDuration);
 +    }
-+    player->m_mediaLock.Unlock();
++
++    if (!m_hasVideo || m_videoAtEnd)
++        m_currentTime = audioPresentationTimeLocked(now) / 1000000.f;
++    if ((!m_hasVideo || m_videoAtEnd) && audioOutputDrainedLocked(now) && !m_ended.exchange(true)) {
++        m_currentTime = m_duration.load();
++        callOnMainThread([p = WeakPtr(this)] {
++            if (p && p->m_ended) {
++                if (!p->m_player.isLooping())
++                    p->pause();
++                p->m_player.timeChanged();
++                p->m_player.playbackStateChanged();
++            }
++        });
++    }
 +}
 +
 +
@@ -56209,7 +56247,14 @@ index 0000000000000000000000000000000000000000..5c4c369de995ba8c0441708d2760c18c
 +            }
 +
 +            bigtime_t videoTime = decodedVideoTime();
-+            bigtime_t playbackTime = startMediaTime + (system_time() - startTime);
++            bigtime_t now = system_time();
++            if (player->m_audioClockActive && !player->audioOutputDrainedLocked(now)) {
++                // Rebase the wall clock too, so muted playback or a longer
++                // video track continues from the last audible position.
++                startMediaTime = player->audioPresentationTimeLocked(now);
++                startTime = now;
++            }
++            bigtime_t playbackTime = startMediaTime + (now - startTime);
 +
 +            player->m_currentTime = playbackTime / 1000000.f;
 +            lastObservedTime = player->m_currentTime;
@@ -56250,7 +56295,7 @@ index 0000000000000000000000000000000000000000..5c4c369de995ba8c0441708d2760c18c
 +                    player->m_videoAtEnd = true;
 +                    // Audio that is not playing (muted, or no output) does not
 +                    // advance and would never end: the video's end is the end.
-+                    bool audioDone = !player->m_audioTrack || player->m_audioAtEnd || !player->m_soundPlayer;
++                    bool audioDone = !player->m_audioClockActive || player->audioOutputDrainedLocked(now);
 +                    if (audioDone && !player->m_ended.exchange(true)) {
 +                        player->m_currentTime = player->m_duration.load();
 +                        callOnMainThread([player = WeakPtr(player)] {
@@ -56686,32 +56731,35 @@ index 0000000000000000000000000000000000000000..5c4c369de995ba8c0441708d2760c18c
 +
 +void MediaPlayerPrivate::startAudioPlaybackIfNeeded()
 +{
-+    if (m_paused || m_muted || !m_mediaTracksReady || !m_audioTrack)
++    if (m_paused || m_muted || !m_mediaTracksReady || !m_audioTrack || m_soundPlayer)
 +        return;
-+    if (!m_soundPlayer) {
-+        // A muted or paused clip does not advance its audio track. Match the
-+        // video's clock when sound is enabled later in the playback.
-+        if (m_mediaLock.Lock()) {
-+            bigtime_t audioTime = audioTrackTime(*m_audioTrack, m_audioFormat);
-+            bigtime_t playbackTime = (bigtime_t)(m_currentTime.load() * 1000000);
-+            if (std::abs(audioTime - playbackTime) > 100000)
-+                m_audioTrack->SeekToTime(&playbackTime);
-+            m_mediaLock.Unlock();
++    {
++        BAutolock lock(m_mediaLock);
++        // Hold the picture while the output node connects and starts.
++        m_audioClockActive = true;
++        m_audioClockOffset.reset();
++        bigtime_t target = std::llround(m_currentTime.load() * 1000000.0);
++        int64 targetFrame = std::llround(target * (m_audioFormat.frame_rate / 1000000.0));
++        if (targetFrame != std::max(m_audioNextFrame, m_audioTargetFrame)) {
++            // If this input cannot seek, discard forward from its current PCM.
++            if (seekAudioLocked(target) != B_OK)
++                m_audioTargetFrame = targetFrame;
 +        }
-+        m_soundPlayer = new BSoundPlayer(&m_audioFormat, "HTML5 Audio", playCallback, NULL, this);
-+        status_t status = m_soundPlayer->InitCheck();
-+        if (mediaPlaybackTraceEnabled())
-+            std::fprintf(stderr, "Summit media playback: player=%p audioOutput=create status=%ld\n", this, long(status));
-+        if (status != B_OK) {
-+            delete m_soundPlayer;
-+            m_soundPlayer = nullptr;
-+            return;
-+        }
-+        m_soundPlayer->SetVolume(m_volume);
-+        // Started once and left running (Start() on a running player stops
-+        // the card asking it for sound); pause() deletes it.
-+        m_soundPlayer->Start();
++        m_audioBlock.resize(m_audioFormat.buffer_size);
 +    }
++
++    m_soundPlayer = new BSoundPlayer(&m_audioFormat, "HTML5 Audio", playCallback, nullptr, this);
++    status_t status = m_soundPlayer->InitCheck();
++    if (status == B_OK) {
++        m_audioLatency = std::max<bigtime_t>(0, m_soundPlayer->Latency());
++        m_soundPlayer->SetVolume(m_volume);
++        status = m_soundPlayer->Start();
++    }
++    if (mediaPlaybackTraceEnabled())
++        std::fprintf(stderr, "Summit media playback: player=%p audioOutput=create status=%ld latency=%lld\n",
++            this, long(status), static_cast<long long>(m_audioLatency));
++    if (status != B_OK)
++        releaseAudioOutput();
 +}
 +
 +void MediaPlayerPrivate::releaseAudioOutput()
@@ -56721,6 +56769,7 @@ index 0000000000000000000000000000000000000000..5c4c369de995ba8c0441708d2760c18c
 +        soundPlayer->Stop(false);
 +        m_mediaLock.Lock();
 +        m_soundPlayer = nullptr;
++        m_audioClockActive = false;
 +        m_mediaLock.Unlock();
 +        delete soundPlayer;
 +        if (mediaPlaybackTraceEnabled())
@@ -56799,21 +56848,19 @@ index 0000000000000000000000000000000000000000..5c4c369de995ba8c0441708d2760c18c
 +        return MediaTimePromise::createAndReject(PlatformMediaError::NotReady);
 +    }
 +    bigtime_t requestedTime = (bigtime_t)(time.time.toDouble() * 1000000);
++    bool restartAudio = m_audioAtEnd && !m_paused;
 +    bigtime_t videoTime = requestedTime;
 +    status_t status = B_OK;
 +    if (m_videoTrack)
 +        status = m_substituteVideo ? m_substituteVideo->seekToTime(&videoTime) : m_videoTrack->SeekToTime(&videoTime);
-+    if (m_audioTrack && status == B_OK) {
-+        bigtime_t audioTime = requestedTime;
-+        status = m_audioTrack->SeekToTime(&audioTime);
-+    }
++    if (m_audioTrack && status == B_OK)
++        status = seekAudioLocked(requestedTime);
 +    if (status != B_OK) {
 +        m_videoSeekStarting = false;
 +        m_mediaLock.Unlock();
 +        return MediaTimePromise::createAndReject(PlatformMediaError::NotSupportedError);
 +    }
 +
-+    bool restartAudio = m_audioAtEnd && !m_paused;
 +    m_audioAtEnd = false;
 +    m_videoAtEnd = false;
 +    m_currentTime = requestedTime / 1000000.f;
@@ -56945,7 +56992,8 @@ index 0000000000000000000000000000000000000000..5c4c369de995ba8c0441708d2760c18c
 +
 +static bool canPlayAudio(const media_raw_audio_format& format)
 +{
-+    if (!(format.frame_rate > 0) || !format.channel_count || format.channel_count > 32 || !format.format)
++    if (!(format.frame_rate > 0) || !std::isfinite(format.frame_rate) || !format.channel_count || format.channel_count > 32
++        || !(format.format & media_raw_audio_format::B_AUDIO_SIZE_MASK) || !format.buffer_size)
 +        return false;
 +    // An audio output node exists only when the system has a sound device.
 +    BMediaRoster* roster = BMediaRoster::Roster();
@@ -57709,10 +57757,10 @@ index 0000000000000000000000000000000000000000..5c4c369de995ba8c0441708d2760c18c
 +#endif
 diff --git a/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaiku.h b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..697a5429ec08d45368e96da133c8a0ae6c6fe63a
+index 0000000000000000000000000000000000000000..976621f9ad3fa0e29c170d78ca6b7ee0e4a3fd01
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaiku.h
-@@ -0,0 +1,313 @@
+@@ -0,0 +1,327 @@
 +/*
 + * Copyright (C) 2014 Haiku, Inc.
 + *
@@ -57872,6 +57920,10 @@ index 0000000000000000000000000000000000000000..697a5429ec08d45368e96da133c8a0ae
 +        void startVideoPlaybackIfNeeded(bool forSeek = false);
 +        void startAudioPlaybackIfNeeded();
 +        void releaseAudioOutput();
++        status_t seekAudioLocked(bigtime_t);
++        void fillAudioBufferLocked(void*, size_t, bigtime_t);
++        bool audioOutputDrainedLocked(bigtime_t now) const;
++        bigtime_t audioPresentationTimeLocked(bigtime_t now) const;
 +        static status_t loadingThread(void* cookie);
 +        static status_t videoThread(void* cookie);
 +        void queueVideoFrameRepaint();
@@ -57947,6 +57999,16 @@ index 0000000000000000000000000000000000000000..697a5429ec08d45368e96da133c8a0ae
 +        BMediaFile* m_videoTrackFile { nullptr };
 +        int m_videoTrackIndex { -1 };
 +        media_raw_audio_format m_audioFormat { };
++        // File audio, under m_mediaLock. A decoder block can span output buffers.
++        Vector<uint8_t> m_audioBlock;
++        size_t m_audioBlockOffset { 0 };
++        size_t m_audioBlockEnd { 0 };
++        int64 m_audioNextFrame { 0 };
++        int64 m_audioTargetFrame { 0 };
++        bool m_audioClockActive { false };
++        bigtime_t m_audioLatency { 0 };
++        std::optional<bigtime_t> m_audioClockOffset;
++        bigtime_t m_audioSubmittedUntil { 0 };
 +        bool m_mediaTracksReady { false };
 +        bool m_audioAtEnd { false };
 +        bool m_videoAtEnd { false };
