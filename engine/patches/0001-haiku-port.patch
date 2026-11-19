@@ -98962,6 +98962,141 @@ index 6b21156853e18241520555e20e5808e79eadb6b2..75cb194046833b975dc9d082cfa7b22e
      // Outline bounds are not used if we're doing a full repaint.
      auto newRects = m_renderer->rectsForRepaintingAfterLayout(m_repaintContainer, (requiresFullRepaint == RequiresFullRepaint::Yes) ? RepaintOutlineBounds::No : m_repaintOutlineBounds);
      return m_renderer->repaintAfterLayoutIfNeeded(m_repaintContainer, requiresFullRepaint, m_oldRects, newRects);
+diff --git a/Source/WebCore/rendering/PositionedLayoutConstraints.cpp b/Source/WebCore/rendering/PositionedLayoutConstraints.cpp
+index 286040000a3ca3005c94846d778a7377a843bdae..cf5f0d1e03e9878c8113449b71a99323661ca729 100644
+--- a/Source/WebCore/rendering/PositionedLayoutConstraints.cpp
++++ b/Source/WebCore/rendering/PositionedLayoutConstraints.cpp
+@@ -334,64 +334,28 @@ LayoutRange PositionedLayoutConstraints::adjustForPositionArea(const LayoutRange
+ 
+ // MARK: - Resolving margins and alignment (after sizing).
+ 
+-std::optional<LayoutUnit> PositionedLayoutConstraints::remainingSpaceForStaticAlignment(LayoutUnit itemSize) const
++std::optional<LayoutUnit> PositionedLayoutConstraints::staticGridAlignmentOffset(LayoutUnit outerSize) const
+ {
+-    if (!m_useStaticPosition || m_containingAxis == LogicalBoxAxis::Inline)
++    if (!m_useStaticPosition)
++        return { };
++    auto* grid = dynamicDowncast<RenderGrid>(m_renderer->parent());
++    if (!grid || grid == m_container.get())
+         return { };
+ 
+-    if (auto* parent = dynamicDowncast<RenderGrid>(m_renderer->parent())) {
+-        auto& itemStyle = m_renderer->style();
+-        auto itemResolvedAlignSelf = itemStyle.alignSelf().resolve(&parent->style());
+-
+-        switch (itemResolvedAlignSelf.position()) {
+-        case ItemPosition::Center:
+-        case ItemPosition::FlexEnd:
+-        case ItemPosition::SelfEnd:
+-        case ItemPosition::End: {
+-            if (m_container.get() == parent)
+-                return { };
+-
+-            // FIXME: This is probably not the correct set of writing mode checks.
+-
+-            auto& containingBlockStyle = m_container->style();
+-            if (!containingBlockStyle.writingMode().isHorizontal())
+-                return { };
+-
+-            if (!containingBlockStyle.writingMode().isBidiLTR())
+-                return { };
+-
+-            auto& parentStyle = parent->style();
+-            if (!parentStyle.writingMode().isHorizontal())
+-                return { };
+-
+-            if (!parentStyle.writingMode().isBidiLTR())
+-                return { };
+-
+-            if (!itemStyle.writingMode().isHorizontal())
+-                return { };
+-
+-            if (!itemStyle.writingMode().isBidiLTR())
+-                return { };
+-
+-            if (itemResolvedAlignSelf.positionType() != ItemPositionType::NonLegacy)
+-                return { };
++    // An out-of-flow child's static-position rectangle is the grid's content box,
++    // even when another ancestor establishes the positioning containing block.
++    bool isInline = m_physicalAxis == m_parentWritingMode.inlineAxis();
++    auto alignment = isInline ? m_style.justifySelf().resolve(&grid->style()) : m_style.alignSelf().resolve(&grid->style());
++    if (alignment.isNormalStretchOrLegacy() || alignment.position() == ItemPosition::AnchorCenter)
++        return { };
+ 
+-            if (itemResolvedAlignSelf.overflow() != OverflowAlignment::Default)
+-                return { };
++    // Safe alignment of overflowing boxes also depends on the outer containing block.
++    auto space = (isInline ? grid->contentBoxLogicalWidth() : grid->contentBoxLogicalHeight()) - outerSize;
++    if (space < 0_lu && alignment.overflow() == OverflowAlignment::Safe)
++        return { };
+ 
+-            auto remainingSpace = parent->contentBoxLogicalHeight() - itemSize;
+-#if ASSERT_ENABLED
+-            m_isEligibleForStaticRangeAlignment = remainingSpace >= 0_lu;
+-#endif
+-            if (remainingSpace >= 0_lu)
+-                return remainingSpace;
+-            return { };
+-        }
+-        default:
+-            return { };
+-        }
+-    }
+-    return { };
++    auto axis = isInline ? LogicalBoxAxis::Inline : LogicalBoxAxis::Block;
++    return StyleSelfAlignmentData::adjustmentFromStartEdge(space, alignment.position(), axis, m_parentWritingMode, m_writingMode);
+ }
+ 
+ bool PositionedLayoutConstraints::shouldAlignStaticPositionInInlineAxis() const
+@@ -458,8 +422,8 @@ void PositionedLayoutConstraints::resolvePosition(RenderBox::LogicalExtentComput
+         else if (hasAutoAfterMargin)
+             usedMarginAfter = remainingSpace;
+     } else {
+-        if (auto staticRemainingSpace = remainingSpaceForStaticAlignment(outerSize))
+-            alignmentShift = resolveAlignmentShift(*staticRemainingSpace, outerSize);
++        if (auto offset = staticGridAlignmentOffset(outerSize))
++            alignmentShift = hasAutoAfterInset ? *offset : remainingSpace - *offset;
+         else if (shouldAlignStaticPositionInInlineAxis()) {
+             // Both insets were auto (static position) and an explicit justify-self was specified:
+             // align the box's margin box within its static-position rectangle.
+@@ -575,12 +539,8 @@ ItemPosition PositionedLayoutConstraints::resolveAlignmentValue() const
+         // At the static position an explicit justify-self aligns the box within its
+         // static-position rectangle, resolving against the parent (the static-position
+         // containing block); auto resolves to the parent's justify-items.
+-        if (shouldAlignStaticPositionInInlineAxis())
+-            return m_style.justifySelf().resolve(m_renderer->parentStyle()).position();
+-#if ASSERT_ENABLED
+-        ASSERT(m_isEligibleForStaticRangeAlignment);
+-#endif
+-        return m_style.alignSelf().resolve(m_renderer->parentStyle()).position();
++        ASSERT(shouldAlignStaticPositionInInlineAxis());
++        return m_style.justifySelf().resolve(m_renderer->parentStyle()).position();
+     }
+ 
+     auto alignmentPosition = [&] {
+diff --git a/Source/WebCore/rendering/PositionedLayoutConstraints.h b/Source/WebCore/rendering/PositionedLayoutConstraints.h
+index 455aef736779facc0f165ddf7495622cc59b6160..c0a99de127da8efd90265687d52a1c375cb8f2cf 100644
+--- a/Source/WebCore/rendering/PositionedLayoutConstraints.h
++++ b/Source/WebCore/rendering/PositionedLayoutConstraints.h
+@@ -110,7 +110,7 @@ private:
+     std::pair<bool, bool> containerAllowsInfiniteOverflow() const;
+ 
+     bool NODELETE needsGridAreaAdjustmentBeforeStaticPositioning() const;
+-    std::optional<LayoutUnit> remainingSpaceForStaticAlignment(LayoutUnit itemSize) const;
++    std::optional<LayoutUnit> staticGridAlignmentOffset(LayoutUnit outerSize) const;
+     bool shouldAlignStaticPositionInInlineAxis() const;
+     void computeStaticPosition();
+     LayoutUnit computedBlockStaticDistance() const;
+@@ -139,9 +139,6 @@ private:
+     Style::InsetEdge m_insetBefore;
+     Style::InsetEdge m_insetAfter;
+     bool m_useStaticPosition { false };
+-#if ASSERT_ENABLED
+-    mutable bool m_isEligibleForStaticRangeAlignment { false };
+-#endif
+ };
+ 
+ inline bool PositionedLayoutConstraints::isOpposing() const
 diff --git a/Source/WebCore/rendering/RenderBlock.cpp b/Source/WebCore/rendering/RenderBlock.cpp
 index 0ff11fddb608c1b65d17189a08c8ffa40c284e90..a4d6e90c3f2cc51ed933ae7cb06618071733a041 100644
 --- a/Source/WebCore/rendering/RenderBlock.cpp
