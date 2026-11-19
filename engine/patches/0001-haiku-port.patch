@@ -102336,6 +102336,37 @@ index 5a90dd68672464ece91671bee69e2598510a2ebb..fc069a89103a084e9466658ad1806068
      repaintUsingContainer(repaintContainer.get(), repaintRect, clipRepaintToLayer);
  }
  
+diff --git a/Source/WebCore/rendering/RenderTableSection.cpp b/Source/WebCore/rendering/RenderTableSection.cpp
+index e4269cf949d7fb1911da1d710b04d6d1a7cabe84..1a96a2feb99008b4e45e8474bcaf0961c56bd183 100644
+--- a/Source/WebCore/rendering/RenderTableSection.cpp
++++ b/Source/WebCore/rendering/RenderTableSection.cpp
+@@ -972,17 +972,16 @@ std::optional<LayoutUnit> RenderTableSection::lastLineBaseline() const
+ std::optional<LayoutUnit> RenderTableSection::baselineFromCellContentEdges(ItemPosition alignment) const
+ {
+     ASSERT(alignment == ItemPosition::Baseline || alignment == ItemPosition::LastBaseline);
+-    auto row = alignment == ItemPosition::Baseline ? m_grid[0].row : m_grid[m_grid.size() - 1].row;
+-    
++    auto& row = alignment == ItemPosition::Baseline ? m_grid.first().row : m_grid.last().row;
+     std::optional<LayoutUnit> result;
+-    for (size_t i = 0; i < row.size(); ++i) {
+-        const CellStruct& cs = row.at(i);
+-        const RenderTableCell* cell = cs.primaryCell();
+-        // Only cells with content have a baseline
+-        if (cell && cell->contentBoxLogicalHeight()) {
+-            LayoutUnit candidate = m_rowPos[cell->rowIndex()] + cell->borderAndPaddingBefore() + cell->contentBoxLogicalHeight();
+-            result = std::max(result.value_or(candidate), candidate);
+-        }
++    for (auto& slot : row) {
++        auto* cell = slot.primaryCell();
++        if (!cell || slot.inColSpan)
++            continue;
++        // Intrinsic padding positions the cell's children within the row.
++        // Only its CSS padding and border separate the content edge from the row edge.
++        auto contentEnd = m_rowPos[cell->rowIndex()] + cell->logicalHeight() - cell->borderAfter() - cell->computedCSSPaddingAfter();
++        result = std::max(result.value_or(contentEnd), contentEnd);
+     }
+     return result;
+ }
 diff --git a/Source/WebCore/rendering/RenderText.cpp b/Source/WebCore/rendering/RenderText.cpp
 index a52a008e494939c3874a83a8ae10bfc16a5b7025..6f95ca9039d04a06c247bdc942c75b037da6ff2e 100644
 --- a/Source/WebCore/rendering/RenderText.cpp
