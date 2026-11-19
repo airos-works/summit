@@ -104734,7 +104734,7 @@ index 646d58b5af8331ab3b7eedba6ab713a536467c16..1f41900bb39710676bc7a4fa568a33b9
      }
  
 diff --git a/Source/WebCore/rendering/adwaita/RenderThemeAdwaita.cpp b/Source/WebCore/rendering/adwaita/RenderThemeAdwaita.cpp
-index a6fb2e3ceb842891f2529697f12dd0d6780f3bdb..f98847b989dfac85057c8d7edf5b4ec2a3cf6ef6 100644
+index a6fb2e3ceb842891f2529697f12dd0d6780f3bdb..448e0ce20f3793907cb9b989279b3fdb5deb3dcb 100644
 --- a/Source/WebCore/rendering/adwaita/RenderThemeAdwaita.cpp
 +++ b/Source/WebCore/rendering/adwaita/RenderThemeAdwaita.cpp
 @@ -64,6 +64,12 @@
@@ -104750,15 +104750,31 @@ index a6fb2e3ceb842891f2529697f12dd0d6780f3bdb..f98847b989dfac85057c8d7edf5b4ec2
  namespace WebCore {
  using namespace CSS::Literals;
  using namespace WebCore::Adwaita;
-@@ -94,6 +100,7 @@ bool RenderThemeAdwaita::canCreateControlPartForRenderer(const RenderElement& re
+@@ -94,6 +100,12 @@ bool RenderThemeAdwaita::canCreateControlPartForRenderer(const RenderElement& re
      case StyleAppearance::SliderHorizontal:
      case StyleAppearance::SliderVertical:
      case StyleAppearance::SquareButton:
++#if PLATFORM(HAIKU) && USE(SKIA)
++    // BControlLook paints both the border and the background of native text controls.
++    case StyleAppearance::TextField:
++    case StyleAppearance::TextArea:
++#endif
 +    case StyleAppearance::Switch: // ToggleButtonAdwaita::drawSwitch (Summit #147)
          return true;
      default:
          break;
-@@ -237,6 +244,11 @@ RefPtr<FragmentedSharedBuffer> RenderThemeAdwaita::mediaControlsImageDataForIcon
+@@ -105,8 +117,10 @@ bool RenderThemeAdwaita::canCreateControlPartForBorderOnly(const RenderElement&
+ {
+     switch (renderer.style().usedAppearance()) {
+     case StyleAppearance::Listbox:
++#if !(PLATFORM(HAIKU) && USE(SKIA))
+     case StyleAppearance::TextArea:
+     case StyleAppearance::TextField:
++#endif
+         return true;
+     default:
+         break;
+@@ -237,6 +251,11 @@ RefPtr<FragmentedSharedBuffer> RenderThemeAdwaita::mediaControlsImageDataForIcon
      if (!data)
          return nullptr;
      return SharedBuffer::create(WTF::move(*data));
@@ -104770,7 +104786,7 @@ index a6fb2e3ceb842891f2529697f12dd0d6780f3bdb..f98847b989dfac85057c8d7edf5b4ec2
  #else
      return nullptr;
  #endif
-@@ -256,6 +268,11 @@ String RenderThemeAdwaita::mediaControlsBase64StringForIconNameAndType(const Str
+@@ -256,6 +275,11 @@ String RenderThemeAdwaita::mediaControlsBase64StringForIconNameAndType(const Str
      if (!data)
          return { };
      return base64EncodeToString(data->span());
@@ -104782,7 +104798,7 @@ index a6fb2e3ceb842891f2529697f12dd0d6780f3bdb..f98847b989dfac85057c8d7edf5b4ec2
  #else
      return { };
  #endif
-@@ -263,8 +280,35 @@ String RenderThemeAdwaita::mediaControlsBase64StringForIconNameAndType(const Str
+@@ -263,8 +287,35 @@ String RenderThemeAdwaita::mediaControlsBase64StringForIconNameAndType(const Str
  
  String RenderThemeAdwaita::mediaControlsFormattedStringForDuration(double durationInSeconds)
  {
@@ -104818,7 +104834,22 @@ index a6fb2e3ceb842891f2529697f12dd0d6780f3bdb..f98847b989dfac85057c8d7edf5b4ec2
  }
  #endif // ENABLE(VIDEO)
  
-@@ -421,6 +465,17 @@ Style::PreferredSizePair RenderThemeAdwaita::controlSize(StyleAppearance appeara
+@@ -326,8 +377,14 @@ bool RenderThemeAdwaita::isControlStyled(const Style::ComputedStyle& style) cons
+ 
+ void RenderThemeAdwaita::adjustTextFieldStyle(Style::ComputedStyle& style, const Element*) const
+ {
++#if PLATFORM(HAIKU) && USE(SKIA)
++    // BControlLook paints the native field border. Keep the CSS radius from the cascade
++    // so switching to CSS-painted controls preserves the author's corner values.
++    UNUSED_PARAM(style);
++#else
+     if (!style.hasExplicitlySetBorderRadius())
+         style.setBorderRadius({ 5_css_px, 5_css_px });
++#endif
+ }
+ 
+ void RenderThemeAdwaita::adjustTextAreaStyle(Style::ComputedStyle& style, const Element* element) const
+@@ -421,6 +478,17 @@ Style::PreferredSizePair RenderThemeAdwaita::controlSize(StyleAppearance appeara
              buttonSizeHeight = 12_css_px * zoomFactor;
          return { WTF::move(buttonSizeWidth), WTF::move(buttonSizeHeight) };
      }
