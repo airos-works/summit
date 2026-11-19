@@ -29585,10 +29585,35 @@ index ae292e47510d5537fe8023a85931e8c869bcaca1..098925628465e0b6b775b1697970f0e0
      }
  
 diff --git a/Source/WebCore/layout/formattingContexts/flex/FlexFormattingContext.cpp b/Source/WebCore/layout/formattingContexts/flex/FlexFormattingContext.cpp
-index dab814297af116724ee60e23c50b6427be64ed12..b5b1e6eba7c9468a45548df4451c7403e3979978 100644
+index dab814297af116724ee60e23c50b6427be64ed12..e8c04c78884ff94064fc8d14ae465f94d42e5277 100644
 --- a/Source/WebCore/layout/formattingContexts/flex/FlexFormattingContext.cpp
 +++ b/Source/WebCore/layout/formattingContexts/flex/FlexFormattingContext.cpp
-@@ -953,6 +953,13 @@ LayoutUnit FlexFormattingContext::computeContentBasedMinMainSize(const FlexLayou
+@@ -716,8 +716,7 @@ void FlexFormattingContext::computeFlexItemRects(const FlexLines& flexLines, Fle
+ LayoutUnit FlexFormattingContext::mainAxisFlippedOffsetForRow(const FlexLayoutItem& flexLayoutItem, LayoutUnit flowRelativeOffset) const
+ {
+     ASSERT(!m_constraints.isColumnFlow);
+-    auto leadingScrollbarSize = m_constraints.style->writingMode().isInlineFlipped() && m_constraints.style->writingMode().isVertical() ? m_constraints.mainAxisScrollbarExtent : LayoutUnit();
+-    return m_constraints.mainAxisBorderBoxExtent - flowRelativeOffset - flexFormattingUtils().mainAxisExtentForFlexItem(flexLayoutItem) - leadingScrollbarSize;
++    return m_constraints.mainAxisBorderBoxExtent - flowRelativeOffset - flexFormattingUtils().mainAxisExtentForFlexItem(flexLayoutItem);
+ }
+ 
+ LayoutUnit FlexFormattingContext::placeFlexItems(LayoutUnit crossAxisOffset, std::span<FlexLayoutItem> flexLayoutItems, std::span<LayoutPoint> positions, LayoutUnit availableFreeSpace)
+@@ -727,8 +726,12 @@ LayoutUnit FlexFormattingContext::placeFlexItems(LayoutUnit crossAxisOffset, std
+     LayoutUnit autoMarginOffset = autoMarginOffsetInMainAxis(flexLayoutItems, availableFreeSpace);
+     LayoutUnit mainAxisOffset = m_constraints.flowAwareBorderInline.first + m_constraints.flowAwarePaddingInline.first;
+     mainAxisOffset += FlexFormattingUtils::initialJustifyContentOffset(m_constraints.style, availableFreeSpace, flexLayoutItems.size(), m_constraints.isColumnOrRowReverse);
+-    if (m_constraints.style->flexDirection() == FlexDirection::RowReverse)
+-        mainAxisOffset += m_constraints.mainAxisScrollbarExtent;
++    if (!m_constraints.isColumnFlow) {
++        // A row starts on a physical edge. Reserve the scrollbar only when it occupies that edge.
++        bool scrollbarOnLeftOrTop = m_constraints.isHorizontalFlow && m_flexBox->shouldPlaceVerticalScrollbarOnLeft();
++        if (m_constraints.isLeftToRightFlow == scrollbarOnLeftOrTop)
++            mainAxisOffset += m_constraints.mainAxisScrollbarExtent;
++    }
+ 
+     if (availableFreeSpace < 0) {
+         auto resolvedJustifyContent = m_constraints.style->justifyContent().resolve(FlexFormattingUtils::contentAlignmentNormalBehavior());
+@@ -953,6 +956,13 @@ LayoutUnit FlexFormattingContext::computeContentBasedMinMainSize(const FlexLayou
      ASSERT(contentSize >= 0);
      contentSize = std::min(contentSize, maxExtent.value_or(contentSize));
  
@@ -29602,7 +29627,7 @@ index dab814297af116724ee60e23c50b6427be64ed12..b5b1e6eba7c9468a45548df4451c7403
      // Specified size suggestion: if the item's preferred main size is definite, cap the result by that size.
      auto mainSize = flexFormattingUtils().preferredMainSizeLengthForFlexItem(flexLayoutItem);
      if (integrationUtils().flexItemMainSizeIsDefinite(flexLayoutItem, mainSize)) {
-@@ -962,13 +969,6 @@ LayoutUnit FlexFormattingContext::computeContentBasedMinMainSize(const FlexLayou
+@@ -962,13 +972,6 @@ LayoutUnit FlexFormattingContext::computeContentBasedMinMainSize(const FlexLayou
          return std::min(specifiedSize, contentSize);
      }
  
@@ -29616,7 +29641,7 @@ index dab814297af116724ee60e23c50b6427be64ed12..b5b1e6eba7c9468a45548df4451c7403
      return contentSize;
  }
  
-@@ -981,6 +981,8 @@ LayoutUnit FlexFormattingContext::computeMainSizeFromAspectRatioUsing(const Flex
+@@ -981,6 +984,8 @@ LayoutUnit FlexFormattingContext::computeMainSizeFromAspectRatioUsing(const Flex
      ASSERT(FlexFormattingUtils::flexItemHasAspectRatio(flexLayoutItem));
      auto flexItemCrossAxisBorderAndPadding = flexLayoutItem.crossAxisBorderAndPadding;
  
@@ -29625,7 +29650,7 @@ index dab814297af116724ee60e23c50b6427be64ed12..b5b1e6eba7c9468a45548df4451c7403
      // All paths return border-box cross size.
      auto crossSizeOptional = WTF::switchOn(crossSizeLength,
          [&](const SizeType::Fixed& fixedCrossSizeLength) -> std::optional<LayoutUnit> {
-@@ -991,17 +993,17 @@ LayoutUnit FlexFormattingContext::computeMainSizeFromAspectRatioUsing(const Flex
+@@ -991,17 +996,17 @@ LayoutUnit FlexFormattingContext::computeMainSizeFromAspectRatioUsing(const Flex
          },
          [&](const SizeType::Percentage& percentageCrossSizeLength) -> std::optional<LayoutUnit> {
              return flexLayoutItem.mainAxisIsInlineAxis
@@ -100400,7 +100425,7 @@ index 455aef736779facc0f165ddf7495622cc59b6160..c0a99de127da8efd90265687d52a1c37
  
  inline bool PositionedLayoutConstraints::isOpposing() const
 diff --git a/Source/WebCore/rendering/RenderBlock.cpp b/Source/WebCore/rendering/RenderBlock.cpp
-index 0ff11fddb608c1b65d17189a08c8ffa40c284e90..69c6a3a9d4b580b57d2dc9ae92e25d227b11a597 100644
+index 0ff11fddb608c1b65d17189a08c8ffa40c284e90..24b1443fdfe1b52555cb8622653c15927c9b01ba 100644
 --- a/Source/WebCore/rendering/RenderBlock.cpp
 +++ b/Source/WebCore/rendering/RenderBlock.cpp
 @@ -93,6 +93,11 @@
@@ -100424,7 +100449,34 @@ index 0ff11fddb608c1b65d17189a08c8ffa40c284e90..69c6a3a9d4b580b57d2dc9ae92e25d22
  };
  
  std::optional<ScrollbarUpdateScope> RenderBlock::updateScrollInfoAfterLayout()
-@@ -583,9 +588,955 @@ static bool canContainDescendantScrollbarChanges(const RenderBlock& renderBlock,
+@@ -535,11 +540,21 @@ std::optional<ScrollbarUpdateScope> RenderBlock::updateScrollInfoAfterLayout()
+ 
+ void RenderBlock::relayoutRenderBlockForScrollbarChange(RenderBlock& block)
+ {
+-    if (block.sizesLogicalWidthToFitContent())
+-        block.invalidateContentLogicalWidths();
+-    block.setNeedsLayout(MarkingBehavior::MarkOnlyThis);
+-    auto scope = LayoutScope { block, InOverflowRelayout::Yes };
+-    block.layoutBlock(RelayoutChildren::Yes);
++    auto relayout = [&] {
++        if (block.sizesLogicalWidthToFitContent())
++            block.invalidateContentLogicalWidths();
++        block.setNeedsLayout(MarkingBehavior::MarkOnlyThis);
++        auto scope = LayoutScope { block, InOverflowRelayout::Yes };
++        block.layoutBlock(RelayoutChildren::Yes);
++    };
++
++    auto scrollbarSpace = [&] { return LayoutSize { block.verticalScrollbarWidth(), block.horizontalScrollbarHeight() }; };
++    auto spaceBeforeLayout = scrollbarSpace();
++    relayout();
++    // The first scrollbar can reduce the scrollport enough to introduce a scrollbar
++    // on the other axis. Lay out with the final scrollport before returning.
++    if (scrollbarSpace() != spaceBeforeLayout)
++        relayout();
+ }
+ 
+ static EnumSet<LogicalBoxAxis> sizesAffectedByScrollbarsForSubtreeRoot(const RenderBlock& renderBlock, const LocalFrameViewLayoutContext& layoutContext)
+@@ -583,9 +598,955 @@ static bool canContainDescendantScrollbarChanges(const RenderBlock& renderBlock,
      return layoutContext.subtreeScrollbarChangesState().has_value() && renderBlock.style().logicalWidth().isFixed();
  }
  
@@ -101380,7 +101432,7 @@ index 0ff11fddb608c1b65d17189a08c8ffa40c284e90..69c6a3a9d4b580b57d2dc9ae92e25d22
  
      auto& layoutContext = this->layoutContext();
  
-@@ -609,6 +1560,29 @@ void RenderBlock::layout()
+@@ -609,6 +1570,29 @@ void RenderBlock::layout()
          clearLayoutOverflow();
  
      invalidateBackgroundObscurationStatus();
@@ -101410,7 +101462,7 @@ index 0ff11fddb608c1b65d17189a08c8ffa40c284e90..69c6a3a9d4b580b57d2dc9ae92e25d22
  }
  
  RenderBlockRareData* RenderBlock::blockRareData() const
-@@ -1380,8 +2354,7 @@ bool RenderBlock::establishesIndependentFormattingContextIgnoringDisplayType(con
+@@ -1380,8 +2364,7 @@ bool RenderBlock::establishesIndependentFormattingContextIgnoringDisplayType(con
          return style.display().isBlockType()
              && style.display().doesGenerateBlockContainer()
              && hasNonVisibleOverflow()
@@ -101420,7 +101472,7 @@ index 0ff11fddb608c1b65d17189a08c8ffa40c284e90..69c6a3a9d4b580b57d2dc9ae92e25d22
      };
  
      return style.floating() != Float::None
-@@ -2394,6 +3367,12 @@ void RenderBlock::computeIntrinsicLogicalWidthContributions()
+@@ -2394,6 +3377,12 @@ void RenderBlock::computeIntrinsicLogicalWidthContributions()
          applyAutomaticContentBasedMinimumSize(m_minContentLogicalWidthContribution, m_maxContentLogicalWidthContribution);
      } else {
          auto [minContentLogicalWidth, maxContentLogicalWidth] = computeIntrinsicLogicalWidths();
@@ -101433,7 +101485,7 @@ index 0ff11fddb608c1b65d17189a08c8ffa40c284e90..69c6a3a9d4b580b57d2dc9ae92e25d22
  
          if (overridingLogicalWidthForFlexBasisComputation() && logicalWidth.isCalcSize() && logicalWidth.isAuto()) {
              // A flex-basis used as the main size, where `auto` means the width property rather than the width this box would otherwise take.
-@@ -2558,7 +3537,7 @@ std::optional<LayoutUnit> RenderBlock::firstLineBaseline() const
+@@ -2558,7 +3547,7 @@ std::optional<LayoutUnit> RenderBlock::firstLineBaseline() const
  
      auto firstInFlowBaseline = [&] -> std::optional<LayoutUnit> {
          for (CheckedPtr child = firstInFlowChildBox(); child; child = child->nextInFlowSiblingBox()) {
@@ -101442,7 +101494,7 @@ index 0ff11fddb608c1b65d17189a08c8ffa40c284e90..69c6a3a9d4b580b57d2dc9ae92e25d22
                  continue;
              if (auto baseline = child->firstLineBaseline())
                  return child->logicalTop() + *baseline;
-@@ -2578,7 +3557,7 @@ std::optional<LayoutUnit> RenderBlock::lastLineBaseline() const
+@@ -2578,7 +3567,7 @@ std::optional<LayoutUnit> RenderBlock::lastLineBaseline() const
  
      auto lastInFlowBaseline = [&] -> std::optional<LayoutUnit> {
          for (CheckedPtr child = lastInFlowChildBox(); child; child = child->previousInFlowSiblingBox()) {
