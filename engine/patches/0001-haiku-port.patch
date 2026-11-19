@@ -34428,7 +34428,7 @@ index 961f5caacd9cf17b85b5195b7a142bc937a7f7b9..ad7f6f7a0e01238775eee553661c61c8
      HWND m_owner;
      COMPtr<IDataObject> m_dataObject;
 diff --git a/Source/WebCore/platform/PlatformKeyboardEvent.h b/Source/WebCore/platform/PlatformKeyboardEvent.h
-index 071f9fa0e6cfaa84d9b077e39a64bec9361ead9a..53b3545ab62d968c28ee53b7a93b68ecb22deaaf 100644
+index 071f9fa0e6cfaa84d9b077e39a64bec9361ead9a..1a6ce89b2b3a7803f7b87c0688257e45a066856f 100644
 --- a/Source/WebCore/platform/PlatformKeyboardEvent.h
 +++ b/Source/WebCore/platform/PlatformKeyboardEvent.h
 @@ -43,6 +43,10 @@ OBJC_CLASS NSEvent;
@@ -34442,13 +34442,14 @@ index 071f9fa0e6cfaa84d9b077e39a64bec9361ead9a..53b3545ab62d968c28ee53b7a93b68ec
  namespace WebCore {
  
      class PlatformKeyboardEvent : public PlatformEvent {
-@@ -129,6 +133,16 @@ namespace WebCore {
+@@ -129,6 +133,17 @@ namespace WebCore {
  #endif
  #endif
  
 +#if PLATFORM(HAIKU)
 +        PlatformKeyboardEvent(const BMessage*);
 +
++        static String textForHaikuKeyEvent(const BString&);
 +        static String KeyValueForKeyEvent(BString bytes, int keyCode);
 +        static String KeyCodeForKeyEvent(BString bytes, int keyCode);
 +        static String keyIdentifierForHaikuKeyCode(char singleByte, int keyCode);
@@ -76990,10 +76991,10 @@ index 0000000000000000000000000000000000000000..b606303606bb233d9adc4ed665a50640
 +
 diff --git a/Source/WebCore/platform/haiku/PlatformKeyboardEventHaiku.cpp b/Source/WebCore/platform/haiku/PlatformKeyboardEventHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..648086eb4dad24ea544e2ff95df11fbaa7faf6cb
+index 0000000000000000000000000000000000000000..85f8c3ab7872f556607c5403ce1267a520d903e4
 --- /dev/null
 +++ b/Source/WebCore/platform/haiku/PlatformKeyboardEventHaiku.cpp
-@@ -0,0 +1,714 @@
+@@ -0,0 +1,722 @@
 +/*
 + * Copyright (C) 2007 Ryan Leavengood <leavengood@gmail.com>
 + * Copyright (C) 2008 Andrea Anzani <andrea.anzani@gmail.com>
@@ -77041,6 +77042,14 @@ index 0000000000000000000000000000000000000000..648086eb4dad24ea544e2ff95df11fba
 +
 +
 +namespace WebCore {
++
++String PlatformKeyboardEvent::textForHaikuKeyEvent(const BString& bytes)
++{
++    // Haiku sends a line feed for Enter. WebCore uses a carriage return for its keypress.
++    if (bytes.Length() == 1 && bytes.ByteAt(0) == B_ENTER)
++        return "\r"_s;
++    return String::fromUTF8(std::span<const char> { bytes.String(), static_cast<size_t>(bytes.Length()) });
++}
 +
 +String PlatformKeyboardEvent::keyIdentifierForHaikuKeyCode(char singleByte, int keyCode)
 +{
@@ -77112,7 +77121,7 @@ index 0000000000000000000000000000000000000000..648086eb4dad24ea544e2ff95df11fba
 +    }
 +
 +    // FIXME will not work for non-ASCII characters
-+    return makeString("U+"_s, hex(toASCIIUpper(singleByte)));
++    return makeString("U+"_s, hex(toASCIIUpper(singleByte), 4));
 +}
 +
 +int PlatformKeyboardEvent::windowsKeyCodeForKeyEvent(char singleByte, int keyCode)
@@ -77645,7 +77654,7 @@ index 0000000000000000000000000000000000000000..648086eb4dad24ea544e2ff95df11fba
 +
 +    int32 nativeVirtualKeyCode = message->FindInt32("key");
 +
-+    m_text = String::fromUTF8(std::span<const char>(bytes.String(), bytes.Length()));
++    m_text = textForHaikuKeyEvent(bytes);
 +    m_unmodifiedText = m_text;
 +    m_keyIdentifier = keyIdentifierForHaikuKeyCode(bytes.ByteAt(0), nativeVirtualKeyCode);
 +
@@ -120985,7 +120994,7 @@ index 0000000000000000000000000000000000000000..daa3355f836f4975b9d3ee80b65ecf4e
 +#endif // PLATFORM(HAIKU)
 diff --git a/Source/WebKit/Shared/haiku/NativeWebEventsHaiku.cpp b/Source/WebKit/Shared/haiku/NativeWebEventsHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..6289df88ab146ff395cac4d34d37543514b4a95d
+index 0000000000000000000000000000000000000000..a3d30aea62454302d7d85418d835e22f227a7ec5
 --- /dev/null
 +++ b/Source/WebKit/Shared/haiku/NativeWebEventsHaiku.cpp
 @@ -0,0 +1,216 @@
@@ -121054,7 +121063,7 @@ index 0000000000000000000000000000000000000000..6289df88ab146ff395cac4d34d375435
 +    BString bytes = message.FindString("bytes");
 +    auto keyCode = message.FindInt32("key");
 +    WebKeyboardEventData keyboard;
-+    keyboard.text = String::fromUTF8(std::span<const char> { bytes.String(), static_cast<size_t>(bytes.Length()) });
++    keyboard.text = PlatformKeyboardEvent::textForHaikuKeyEvent(bytes);
 +    if (keyboard.text.isNull() && bytes.Length())
 +        return nullptr;
 +    keyboard.unmodifiedText = keyboard.text;
