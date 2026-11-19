@@ -30306,7 +30306,7 @@ index 0767e8c6ac89de2e79bcf9e6279a242d2a44b543..ac14c1c86718156ec1893f25d06bbb31
  }
 -
 diff --git a/Source/WebCore/layout/integration/flex/FlexIntegrationUtils.cpp b/Source/WebCore/layout/integration/flex/FlexIntegrationUtils.cpp
-index c13a0e3bb1faf7b85e398e990867c4407b752256..b0fc56e32152285a5c8874e861196d2fbbdac441 100644
+index c13a0e3bb1faf7b85e398e990867c4407b752256..06c5801739a51a772aa7ad6ad18f1194c9849655 100644
 --- a/Source/WebCore/layout/integration/flex/FlexIntegrationUtils.cpp
 +++ b/Source/WebCore/layout/integration/flex/FlexIntegrationUtils.cpp
 @@ -26,6 +26,12 @@
@@ -30441,6 +30441,23 @@ index c13a0e3bb1faf7b85e398e990867c4407b752256..b0fc56e32152285a5c8874e861196d2f
  
  std::optional<bool> FlexIntegrationUtils::isFlexBoxBlockSizeDefiniteForFlexItem(const FlexLayoutItem& flexLayoutItem) const
  {
+@@ -733,6 +798,16 @@ FlexItemDefiniteCrossSizeScope::FlexItemDefiniteCrossSizeScope(RenderBox& flexIt
+     if (FlexFormattingUtils::mainAxisIsFlexItemInlineAxis(flexItem)) {
+         saveAndSetInlineSize({ });
+         saveAndSetBlockSize(crossSize);
++        // A percentage-height descendant can transfer this height back into the
++        // item's intrinsic width through its ratio, before the next child layout.
++        if (auto* block = dynamicDowncast<RenderBlock>(flexItem); block && flexItem.logicalHeight() != crossSize) {
++            if (auto* descendants = block->percentHeightDescendants()) {
++                for (CheckedRef descendant : *descendants) {
++                    if (descendant->hasIntrinsicAspectRatio() || descendant->style().aspectRatio().hasRatio())
++                        descendant->invalidateContentLogicalWidths(MarkingBehavior::MarkContainingBlockChain, block);
++                }
++            }
++        }
+     } else {
+         saveAndSetInlineSize(crossSize);
+         saveAndSetBlockSize({ });
 diff --git a/Source/WebCore/layout/integration/flex/LayoutIntegrationFlexLayout.cpp b/Source/WebCore/layout/integration/flex/LayoutIntegrationFlexLayout.cpp
 index 485864a524831cf3db5cd34b2b542bfd101954d3..16342f5f3ce683c21a58c151da3b39f820c5f38c 100644
 --- a/Source/WebCore/layout/integration/flex/LayoutIntegrationFlexLayout.cpp
