@@ -25195,7 +25195,7 @@ index 25d1a39c50333e9d5c5f48936cf1d9bad22d09d8..6025a0f1ed9ea0e138b59a0c6a8870b4
      }
  
 diff --git a/Source/WebCore/dom/Document.cpp b/Source/WebCore/dom/Document.cpp
-index 79f2bcbc106c7c43e8a971816c183dcc00610b83..2a26dd5a0384384a75e2019e6edacb571c6c39c1 100644
+index 79f2bcbc106c7c43e8a971816c183dcc00610b83..16bd94d0dec69b9581249394a66341ef487017ab 100644
 --- a/Source/WebCore/dom/Document.cpp
 +++ b/Source/WebCore/dom/Document.cpp
 @@ -384,6 +384,7 @@
@@ -25621,7 +25621,16 @@ index 79f2bcbc106c7c43e8a971816c183dcc00610b83..2a26dd5a0384384a75e2019e6edacb57
  }
  
  void Document::flushDeferredScrollEvents()
-@@ -10669,21 +10905,54 @@ void Document::removeIntersectionObserver(IntersectionObserver& observer)
+@@ -9181,6 +9417,8 @@ void Document::dispatchPageswapEvent(CanTriggerCrossDocumentViewTransition canTr
+     // The navigation cannot wait, so capture now.
+     if (oldViewTransition && oldViewTransition->phase() != ViewTransitionPhase::Done) {
+         oldViewTransition->setupViewTransition();
++        if (oldViewTransition->phase() == ViewTransitionPhase::Done)
++            return;
+ 
+         // FIXME: This should set the params on the new Document, but it doesn't exist yet.
+         // Store it on the old, and we'll call transferViewTransitionParams soon.
+@@ -10669,21 +10907,54 @@ void Document::removeIntersectionObserver(IntersectionObserver& observer)
  static void updateAndNotifyIntersectionObservers(const Vector<WeakPtr<IntersectionObserver>>& intersectionObservers, const Frame& hostFrame)
  {
      Vector<WeakPtr<IntersectionObserver>> intersectionObserversWithPendingNotifications;
@@ -25676,6 +25685,15 @@ index 79f2bcbc106c7c43e8a971816c183dcc00610b83..2a26dd5a0384384a75e2019e6edacb57
  }
  
  void Document::updateRemoteIntersectionObservers()
+@@ -12487,7 +12758,7 @@ void Document::performPendingViewTransitions()
+     else if (activeViewTransition->phase() == ViewTransitionPhase::Animating)
+         activeViewTransition->handleTransitionFrame();
+ 
+-    if (m_activeViewTransition)
++    if (m_activeViewTransition && m_activeViewTransition->phase() != ViewTransitionPhase::PendingDone)
+         scheduleRenderingUpdate(RenderingUpdateStep::PerformPendingViewTransitions);
+ }
+ 
 diff --git a/Source/WebCore/dom/Element.cpp b/Source/WebCore/dom/Element.cpp
 index 387e5c0ad9a258b7e70fb47b58f7492c3cb111b1..61d7143ac4c3e6c2ab3776dac69d84b8e3e1941e 100644
 --- a/Source/WebCore/dom/Element.cpp
@@ -26137,7 +26155,7 @@ index b7cc6b07caf172c2c167a081bd963c0c0a894842..1303442c7820d596d0253cd46eba6b70
  }
  
 diff --git a/Source/WebCore/dom/ViewTransition.cpp b/Source/WebCore/dom/ViewTransition.cpp
-index 0d080489846058c7981fd45c760edca8e7fb4880..17907e497a74ec99d7e7a795698a32e6a4b193a2 100644
+index 0d080489846058c7981fd45c760edca8e7fb4880..3c4b4ecc281a80cbc9fe1b4963b33282551f4f39 100644
 --- a/Source/WebCore/dom/ViewTransition.cpp
 +++ b/Source/WebCore/dom/ViewTransition.cpp
 @@ -72,6 +72,14 @@
@@ -26155,7 +26173,112 @@ index 0d080489846058c7981fd45c760edca8e7fb4880..17907e497a74ec99d7e7a795698a32e6
  namespace WebCore {
  
  WTF_MAKE_TZONE_ALLOCATED_IMPL(CapturedElement);
-@@ -467,8 +475,24 @@ static LayoutPoint layerToLayoutOffset(const RenderLayerModelObject& renderer)
+@@ -183,6 +191,35 @@ DOMPromise& ViewTransition::finished()
+     return m_finished.first.get();
+ }
+ 
++// A skipped update callback can run from its queued task or before the next capture.
++struct SkippedViewTransitionCallbacks final : Supplement<Document> {
++    WTF_MAKE_TZONE_ALLOCATED(SkippedViewTransitionCallbacks);
++public:
++    static constexpr auto supplementName = "SkippedViewTransitionCallbacks"_s;
++
++    static SkippedViewTransitionCallbacks* from(Document& document)
++    {
++        return static_cast<SkippedViewTransitionCallbacks*>(document.requireSupplement(supplementName));
++    }
++
++    Vector<Ref<ViewTransition>> transitions;
++};
++
++WTF_MAKE_TZONE_ALLOCATED_IMPL(SkippedViewTransitionCallbacks);
++
++void ViewTransition::flushSkippedUpdateCallbacks(Document& document)
++{
++    auto* queue = SkippedViewTransitionCallbacks::from(document);
++    if (!queue)
++        return;
++
++    for (auto& transition : std::exchange(queue->transitions, { })) {
++        if (!document.globalObject() || transition->isContextStopped())
++            return;
++        transition->callUpdateCallback();
++    }
++}
++
+ // https://drafts.csswg.org/css-view-transitions/#skip-the-view-transition
+ void ViewTransition::skipViewTransition(ExceptionOr<JSC::JSValue>&& reason)
+ {
+@@ -203,14 +240,23 @@ void ViewTransition::skipViewTransition(ExceptionOr<JSC::JSValue>&& reason)
+ 
+     Ref document = *this->document();
+     if (m_phase < ViewTransitionPhase::UpdateCallbackCalled) {
+-        protect(document->eventLoop())->queueTask(TaskSource::DOMManipulation, [weakThis = WeakPtr { *this }] {
+-            RefPtr protectedThis = weakThis.get();
+-            if (protectedThis && protect(protectedThis->document())->globalObject())
+-                protectedThis->callUpdateCallback();
+-        });
+-
+         if (m_isCrossDocument)
+             protect(m_updateCallbackDone.second)->resolve();
++        else {
++            auto* queue = SkippedViewTransitionCallbacks::from(document);
++            if (!queue) {
++                auto newQueue = makeUnique<SkippedViewTransitionCallbacks>();
++                queue = newQueue.get();
++                document->provideSupplement(SkippedViewTransitionCallbacks::supplementName, WTF::move(newQueue));
++            }
++            if (queue->transitions.isEmpty()) {
++                document->eventLoop().queueTask(TaskSource::DOMManipulation, [weakDocument = WeakPtr { document.get() }] {
++                    if (RefPtr document = weakDocument.get())
++                        flushSkippedUpdateCallbacks(*document);
++                });
++            }
++            queue->transitions.append(*this);
++        }
+     }
+ 
+     document->clearRenderingIsSuppressedForViewTransition();
+@@ -302,7 +348,7 @@ void ViewTransition::callUpdateCallback()
+         RefPtr protectedThis = weakThis.get();
+         if (!protectedThis)
+             return;
+-        protectedThis->m_updateCallbackTimeout = nullptr;
++        protectedThis->m_phaseTimer = nullptr;
+         if (isFulfilled) {
+             protect(protectedThis->m_updateCallbackDone.second)->resolve();
+             protectedThis->activateViewTransition();
+@@ -318,7 +364,7 @@ void ViewTransition::callUpdateCallback()
+         protectedThis->skipViewTransition(WTF::move(result));
+     });
+ 
+-    m_updateCallbackTimeout = protect(document->eventLoop())->scheduleTask(defaultTimeout, TaskSource::DOMManipulation, [weakThis = WeakPtr { *this }] {
++    m_phaseTimer = protect(document->eventLoop())->scheduleTask(defaultTimeout, TaskSource::DOMManipulation, [weakThis = WeakPtr { *this }] {
+         RefPtr protectedThis = weakThis.get();
+         LOG_WITH_STREAM(ViewTransitions, stream << "ViewTransition " << protectedThis.get() << " update callback timed out");
+         if (!protectedThis)
+@@ -337,6 +383,12 @@ void ViewTransition::setupViewTransition()
+ 
+     ASSERT(m_phase == ViewTransitionPhase::PendingCapture);
+ 
++    Ref document = *this->document();
++    flushSkippedUpdateCallbacks(document);
++    // A callback can skip this transition, start another one, or detach its document.
++    if (m_phase != ViewTransitionPhase::PendingCapture || document->activeViewTransition() != this)
++        return;
++
+     m_phase = ViewTransitionPhase::CapturingOldState;
+ 
+     auto checkFailure = captureOldState();
+@@ -345,7 +397,6 @@ void ViewTransition::setupViewTransition()
+         return;
+     }
+ 
+-    Ref document = *this->document();
+     if (m_outboundPostCaptureSteps) {
+         document->setRenderingIsSuppressedForViewTransitionImmediately();
+         runOutboundPostCaptureSteps();
+@@ -467,8 +518,24 @@ static LayoutPoint layerToLayoutOffset(const RenderLayerModelObject& renderer)
      return { };
  }
  
@@ -26180,7 +26303,7 @@ index 0d080489846058c7981fd45c760edca8e7fb4880..17907e497a74ec99d7e7a795698a32e6
      ASSERT(renderer.hasLayer());
      CheckedRef layerRenderer = renderer;
  
-@@ -496,7 +520,23 @@ static RefPtr<ImageBuffer> snapshotElementVisualOverflowClippedToViewport(LocalF
+@@ -496,7 +563,23 @@ static RefPtr<ImageBuffer> snapshotElementVisualOverflowClippedToViewport(LocalF
      colorSpace = ColorSpace::SRGB(); // FIXME: We should use the screen colorspace on iOS too, but that has blending issues: webkit.org/b/318764.
  #endif
  
@@ -26205,7 +26328,7 @@ index 0d080489846058c7981fd45c760edca8e7fb4880..17907e497a74ec99d7e7a795698a32e6
      if (!buffer)
          return nullptr;
  
-@@ -510,8 +550,23 @@ static RefPtr<ImageBuffer> snapshotElementVisualOverflowClippedToViewport(LocalF
+@@ -510,8 +593,23 @@ static RefPtr<ImageBuffer> snapshotElementVisualOverflowClippedToViewport(LocalF
      paintFlags.add(RenderLayer::PaintLayerFlag::AppliedTransform);
      paintFlags.add(RenderLayer::PaintLayerFlag::PaintingSkipDescendantViewTransition);
      layerRenderer->layer()->paint(buffer->context(), paintRect, subpixelOffset, frameView->paintBehavior(), nullptr, paintFlags);
@@ -26229,7 +26352,30 @@ index 0d080489846058c7981fd45c760edca8e7fb4880..17907e497a74ec99d7e7a795698a32e6
      return buffer;
  }
  
-@@ -1118,8 +1173,19 @@ void ViewTransition::visibilityStateChanged()
+@@ -864,9 +962,19 @@ void ViewTransition::handleTransitionFrame()
+     }
+ 
+     if (!hasActiveAnimations) {
+-        m_phase = ViewTransitionPhase::Done;
+-        clearViewTransition();
+-        protect(m_finished.second)->resolve();
++        // Keep the pseudo-elements for the final paint. Clear them together with
++        // the active transition before finished reactions observe the document.
++        m_phase = ViewTransitionPhase::PendingDone;
++        // Schedule a fresh task so timers from this frame can observe its final state.
++        m_phaseTimer = document()->eventLoop().scheduleTask(0_s, TaskSource::DOMManipulation, [weakThis = WeakPtr { *this }] {
++            RefPtr protectedThis = weakThis.get();
++            if (!protectedThis || protectedThis->m_phase != ViewTransitionPhase::PendingDone)
++                return;
++            protectedThis->m_phaseTimer = nullptr;
++            protectedThis->m_phase = ViewTransitionPhase::Done;
++            protectedThis->clearViewTransition();
++            protect(protectedThis->m_finished.second)->resolve();
++        });
+         return;
+     }
+ 
+@@ -1118,8 +1226,19 @@ void ViewTransition::visibilityStateChanged()
  
      Ref document = *this->document();
      if (document->hidden()) {
@@ -26249,6 +26395,44 @@ index 0d080489846058c7981fd45c760edca8e7fb4880..17907e497a74ec99d7e7a795698a32e6
      } else
          ASSERT(!document->activeViewTransition());
  }
+@@ -1190,6 +1309,7 @@ TextStream& operator<<(TextStream& ts, ViewTransitionPhase phase)
+     case ViewTransitionPhase::CapturingOldState: ts << "CapturingOldState"_s; break;
+     case ViewTransitionPhase::UpdateCallbackCalled: ts << "UpdateCallbackCalled"_s; break;
+     case ViewTransitionPhase::Animating: ts << "Animating"_s; break;
++    case ViewTransitionPhase::PendingDone: ts << "PendingDone"_s; break;
+     case ViewTransitionPhase::Done: ts << "Done"_s; break;
+     }
+     return ts;
+diff --git a/Source/WebCore/dom/ViewTransition.h b/Source/WebCore/dom/ViewTransition.h
+index 7343de611c685b18a4c283f0930787054cd725be..15480aa30de2c0d77709680d1e4f2fc10c5ba7fc 100644
+--- a/Source/WebCore/dom/ViewTransition.h
++++ b/Source/WebCore/dom/ViewTransition.h
+@@ -63,6 +63,7 @@ enum class ViewTransitionPhase : uint8_t {
+     CapturingOldState, // Not part of the spec.
+     UpdateCallbackCalled,
+     Animating,
++    PendingDone,
+     Done
+ };
+ 
+@@ -231,6 +232,7 @@ private:
+     void setupTransitionPseudoElements();
+     void setupDynamicStyleSheet(const AtomString&, const CapturedElement&);
+ 
++    static void flushSkippedUpdateCallbacks(Document&);
+     void callUpdateCallback();
+ 
+     ExceptionOr<void> updatePseudoElementStylesRead();
+@@ -263,7 +265,8 @@ private:
+     PromiseAndWrapper m_ready;
+     PromiseAndWrapper m_updateCallbackDone;
+     PromiseAndWrapper m_finished;
+-    EventLoopTimerHandle m_updateCallbackTimeout;
++    // The callback timeout and the deferred finish run in disjoint phases.
++    EventLoopTimerHandle m_phaseTimer;
+ 
+     // Set on the old document's transition while a cross-document navigation waits for it to capture.
+     OutboundPostCaptureSteps m_outboundPostCaptureSteps;
 diff --git a/Source/WebCore/dom/make_names.pl b/Source/WebCore/dom/make_names.pl
 index 7f18cb986d1972948b04893b511de16598d7f103..68525703b1263997f5100c89a1c31dd939c8245f 100755
 --- a/Source/WebCore/dom/make_names.pl
