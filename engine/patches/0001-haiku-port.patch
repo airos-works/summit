@@ -30314,7 +30314,7 @@ index 4555034d8312449920f8f16e8a9c252277d25003..fc2cb658f2f8ee869eaa6a7750ae834b
  
      if (event.ctrlKey() || event.metaKey() || event.altKey() || event.shiftKey())
 diff --git a/Source/WebCore/page/LargestContentfulPaintData.cpp b/Source/WebCore/page/LargestContentfulPaintData.cpp
-index bbb54b89194cc6399eba94d1f9ea11ad625d5285..08e92ffa83c9725e66daad755fb153c97ea76453 100644
+index bbb54b89194cc6399eba94d1f9ea11ad625d5285..f9883c5c58f83ff0c429d302aab104b0566d91f8 100644
 --- a/Source/WebCore/page/LargestContentfulPaintData.cpp
 +++ b/Source/WebCore/page/LargestContentfulPaintData.cpp
 @@ -54,13 +54,97 @@
@@ -30441,7 +30441,18 @@ index bbb54b89194cc6399eba94d1f9ea11ad625d5285..08e92ffa83c9725e66daad755fb153c9
      Ref pendingEntry = LargestContentfulPaint::create(0);
      pendingEntry->setElement(&element);
      pendingEntry->setSize(std::round<unsigned>(m_largestPaintArea));
-@@ -223,6 +326,26 @@ void LargestContentfulPaintData::potentiallyAddLargestContentfulPaintEntry(Eleme
+@@ -206,7 +309,9 @@ void LargestContentfulPaintData::potentiallyAddLargestContentfulPaintEntry(Eleme
+ 
+         // https://w3c.github.io/largest-contentful-paint/#sec-report-largest-contentful-paint coarsens renderTime to 4ms for images.
+         static constexpr auto renderTimeSecondsResolution = 4_ms;
+-        pendingEntry->setRenderTime(reduceResolution(Seconds::fromMilliseconds(paintTimestamp), renderTimeSecondsResolution).milliseconds());
++        auto coarseRenderTimestamp = reduceResolution(Seconds::fromMilliseconds(paintTimestamp), renderTimeSecondsResolution).milliseconds();
++        // Rounding down can place the paint before the already exposed image load time.
++        pendingEntry->setRenderTime(std::max(loadTimestamp, coarseRenderTimestamp));
+     } else
+         pendingEntry->setRenderTime(paintTimestamp);
+ 
+@@ -223,6 +328,26 @@ void LargestContentfulPaintData::potentiallyAddLargestContentfulPaintEntry(Eleme
  RefPtr<LargestContentfulPaint> LargestContentfulPaintData::generateLargestContentfulPaintEntry(DOMHighResTimeStamp paintTimestamp)
  {
      std::optional<FloatSize> viewportSize;
@@ -30468,7 +30479,7 @@ index bbb54b89194cc6399eba94d1f9ea11ad625d5285..08e92ffa83c9725e66daad755fb153c9
  
      auto imageRecords = std::exchange(m_pendingImageRecords, { });
      for (auto [weakElement, imageList] : imageRecords) {
-@@ -393,6 +516,9 @@ void LargestContentfulPaintData::didPaintImage(Element& element, CachedImage* im
+@@ -393,6 +518,9 @@ void LargestContentfulPaintData::didPaintImage(Element& element, CachedImage* im
      m_pendingImageRecords.ensure(element, [] {
          return Vector<WeakPtr<CachedImage>> { };
      }).iterator->value.append(*image);
@@ -30478,7 +30489,7 @@ index bbb54b89194cc6399eba94d1f9ea11ad625d5285..08e92ffa83c9725e66daad755fb153c9
  
      scheduleRenderingUpdateIfNecessary(element);
  }
-@@ -435,6 +561,9 @@ void LargestContentfulPaintData::didPaintText(const RenderBlockFlow& formattingC
+@@ -435,6 +563,9 @@ void LargestContentfulPaintData::didPaintText(const RenderBlockFlow& formattingC
      element->ensureLargestContentfulPaintData().accumulatedTextRect.unite(localRect);
  
      m_paintedTextRecords.add(*element);
