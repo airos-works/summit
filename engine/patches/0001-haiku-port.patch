@@ -36949,7 +36949,7 @@ index fbe73cf3679059de2b1a1e695f53bb4aa9bfce8a..4f31606dfaf7d1a0bc0ae8a238e5008c
      void scrollingTreeNodeScrollUpdated(ScrollingTreeScrollingNode&, ScrollUpdateType);
  
 diff --git a/Source/WebCore/page/scrolling/coordinated/ScrollerCoordinated.cpp b/Source/WebCore/page/scrolling/coordinated/ScrollerCoordinated.cpp
-index 286d09b121f073a0cc755c138ba0c9ae53ae4ef4..77b1469c7a0ac7617aeaadb446df7a3fe6a719c0 100644
+index 286d09b121f073a0cc755c138ba0c9ae53ae4ef4..16d29a6619dccd0ab36c3d8612fee23927432030 100644
 --- a/Source/WebCore/page/scrolling/coordinated/ScrollerCoordinated.cpp
 +++ b/Source/WebCore/page/scrolling/coordinated/ScrollerCoordinated.cpp
 @@ -31,6 +31,10 @@
@@ -36996,7 +36996,32 @@ index 286d09b121f073a0cc755c138ba0c9ae53ae4ef4..77b1469c7a0ac7617aeaadb446df7a3f
          // Custom scrollbars are painted by RenderScrollbar
          Locker layerLocker { hostLayer->lock() };
          hostLayer->setContentsBuffer(nullptr);
-@@ -143,7 +159,48 @@ void ScrollerCoordinated::updateValues()
+@@ -117,7 +133,14 @@ void ScrollerCoordinated::updateValues()
+         state = m_state;
+     }
+ 
+-    int width = AdwaitaScrollbarPainter::scrollbarSize;
++    int width;
++    float contentsScale;
++    {
++        Locker layerLocker { hostLayer->lock() };
++        auto size = hostLayer->size();
++        width = std::lround(m_orientation == ScrollbarOrientation::Vertical ? size.width() : size.height());
++        contentsScale = hostLayer->contentsScale();
++    }
+     IntRect rect { 0, 0, width, int(values.visibleSize) };
+ 
+     if (rect.isEmpty())
+@@ -134,16 +157,51 @@ void ScrollerCoordinated::updateValues()
+     state.thumbPosition = (values.visibleSize - state.thumbLength) * values.value;
+     state.frameRect = rect;
+ 
+-    float contentsScale;
+-    {
+-        Locker layerLocker { hostLayer->lock() };
+-        contentsScale = hostLayer->contentsScale();
+-    }
+-
      auto frameRect = enclosingIntRect(FloatRect(state.frameRect.x() * contentsScale, state.frameRect.y() * contentsScale,
          state.frameRect.width() * contentsScale, state.frameRect.height() * contentsScale));
  
@@ -37045,7 +37070,7 @@ index 286d09b121f073a0cc755c138ba0c9ae53ae4ef4..77b1469c7a0ac7617aeaadb446df7a3f
      auto& display = PlatformDisplay::sharedDisplay();
      auto* glContext = display.skiaGLContext();
      if (!glContext)
-@@ -170,6 +227,7 @@ void ScrollerCoordinated::updateValues()
+@@ -170,6 +228,7 @@ void ScrollerCoordinated::updateValues()
  
      grContext->flushAndSubmit(surface.get(), GLFence::isSupported(display.glDisplay()) ? GrSyncCpu::kNo : GrSyncCpu::kYes);
      auto buffer = CoordinatedPlatformLayerBufferRGB::create(WTF::move(texture), { TextureMapperFlags::ShouldBlend }, GLFence::create(display.glDisplay()));
@@ -38767,11 +38792,84 @@ index ce4e0d940167703a010a3d14f8a51ee98b93fc47..194ed6288d965f9734f7d39afbc80efd
      IntRect m_frame; // Not used when a native widget exists.
  };
  
+diff --git a/Source/WebCore/platform/adwaita/AdwaitaScrollbarPainter.cpp b/Source/WebCore/platform/adwaita/AdwaitaScrollbarPainter.cpp
+index fb108ceaaf42ca33ad326ca57d03642c1bdb6769..bfa6995c2d10933dc871bff75010ca7e167c05cb 100644
+--- a/Source/WebCore/platform/adwaita/AdwaitaScrollbarPainter.cpp
++++ b/Source/WebCore/platform/adwaita/AdwaitaScrollbarPainter.cpp
+@@ -96,7 +96,9 @@ void paint(GraphicsContext& graphicsContext, const IntRect& damageRect, const St
+         graphicsContext.beginTransparencyLayer(opacity);
+     }
+ 
+-    int thumbSize = scrollbarSize - scrollbarBorderSize - horizThumbMargin * 2;
++    int trackThickness = scrollbar.orientation == ScrollbarOrientation::Vertical ? rect.width() : rect.height();
++    int thumbSize = std::min<int>(scrollbarSize - scrollbarBorderSize - horizThumbMargin * 2, std::max(1, trackThickness - 2));
++    int thumbInset = (trackThickness - thumbSize + 1) / 2;
+ 
+     if (!scrollbar.usesOverlayScrollbars) {
+         graphicsContext.fillRect(rect, scrollbarBackgroundColor);
+@@ -117,13 +119,13 @@ void paint(GraphicsContext& graphicsContext, const IntRect& damageRect, const St
+         IntRect trough = rect;
+         if (scrollbar.orientation == ScrollbarOrientation::Vertical) {
+             if (scrollbar.shouldPlaceVerticalScrollbarOnLeft)
+-                trough.move(scrollbarSize - (scrollbarSize / 2 + thumbSize / 2) - scrollbarBorderSize, vertThumbMargin);
++                trough.move(thumbInset - scrollbarBorderSize, vertThumbMargin);
+             else
+-                trough.move(scrollbarSize - (scrollbarSize / 2 + thumbSize / 2), vertThumbMargin);
++                trough.move(thumbInset, vertThumbMargin);
+             trough.setWidth(thumbSize);
+             trough.setHeight(rect.height() - vertThumbMargin * 2);
+         } else {
+-            trough.move(vertThumbMargin, scrollbarSize - (scrollbarSize / 2 + thumbSize / 2));
++            trough.move(vertThumbMargin, thumbInset);
+             trough.setWidth(rect.width() - vertThumbMargin * 2);
+             trough.setHeight(thumbSize);
+         }
+@@ -156,11 +158,11 @@ void paint(GraphicsContext& graphicsContext, const IntRect& damageRect, const St
+             if (scrollbar.shouldPlaceVerticalScrollbarOnLeft)
+                 thumb.move(horizOverlayThumbMargin, thumbPos + vertThumbMargin);
+             else
+-                thumb.move(scrollbarSize - overlayThumbSize - horizOverlayThumbMargin, thumbPos + vertThumbMargin);
++                thumb.move(trackThickness - overlayThumbSize - horizOverlayThumbMargin, thumbPos + vertThumbMargin);
+             thumb.setWidth(overlayThumbSize);
+             thumb.setHeight(thumbLen - vertThumbMargin * 2);
+         } else {
+-            thumb.move(thumbPos + vertThumbMargin, scrollbarSize - overlayThumbSize - horizOverlayThumbMargin);
++            thumb.move(thumbPos + vertThumbMargin, trackThickness - overlayThumbSize - horizOverlayThumbMargin);
+             thumb.setWidth(thumbLen - vertThumbMargin * 2);
+             thumb.setHeight(overlayThumbSize);
+         }
+@@ -169,13 +171,13 @@ void paint(GraphicsContext& graphicsContext, const IntRect& damageRect, const St
+ 
+         if (scrollbar.orientation == ScrollbarOrientation::Vertical) {
+             if (scrollbar.shouldPlaceVerticalScrollbarOnLeft)
+-                thumb.move(scrollbarSize - (scrollbarSize / 2 + thumbSize / 2) - scrollbarBorderSize, thumbPos + vertThumbMargin);
++                thumb.move(thumbInset - scrollbarBorderSize, thumbPos + vertThumbMargin);
+             else
+-                thumb.move(scrollbarSize - (scrollbarSize / 2 + thumbSize / 2), thumbPos + vertThumbMargin);
++                thumb.move(thumbInset, thumbPos + vertThumbMargin);
+             thumb.setWidth(thumbSize);
+             thumb.setHeight(thumbLen - vertThumbMargin * 2);
+         } else {
+-            thumb.move(thumbPos + vertThumbMargin, scrollbarSize - (scrollbarSize / 2 + thumbSize / 2));
++            thumb.move(thumbPos + vertThumbMargin, thumbInset);
+             thumb.setWidth(thumbLen - vertThumbMargin * 2);
+             thumb.setHeight(thumbSize);
+         }
 diff --git a/Source/WebCore/platform/adwaita/ScrollbarThemeAdwaita.cpp b/Source/WebCore/platform/adwaita/ScrollbarThemeAdwaita.cpp
-index dd4409073c1db7e0fad87272d1d4f883fd60e350..0c17d6c814507f4c042f0f02324c257163153fbc 100644
+index dd4409073c1db7e0fad87272d1d4f883fd60e350..aa55140bbefba622d11b04319d923784f32b4754 100644
 --- a/Source/WebCore/platform/adwaita/ScrollbarThemeAdwaita.cpp
 +++ b/Source/WebCore/platform/adwaita/ScrollbarThemeAdwaita.cpp
-@@ -62,7 +62,16 @@ bool ScrollbarThemeAdwaita::usesOverlayScrollbars() const
+@@ -29,6 +29,9 @@
+ #if USE(THEME_ADWAITA)
+ 
+ #include "AdwaitaScrollbarPainter.h"
++#if PLATFORM(HAIKU) && USE(SKIA)
++#include "ControlLookHaiku.h"
++#endif
+ #include "Color.h"
+ #include "FloatRoundedRect.h"
+ #include "GraphicsContext.h"
+@@ -62,7 +65,16 @@ bool ScrollbarThemeAdwaita::usesOverlayScrollbars() const
      if (!g_strcmp0(g_getenv("GTK_OVERLAY_SCROLLING"), "0"))
          return false;
  #endif
@@ -38789,7 +38887,18 @@ index dd4409073c1db7e0fad87272d1d4f883fd60e350..0c17d6c814507f4c042f0f02324c2571
      return SystemSettings::singleton().overlayScrolling().value_or(true);
  #else
      return true;
-@@ -110,7 +119,13 @@ bool ScrollbarThemeAdwaita::paint(Scrollbar& scrollbar, GraphicsContext& graphic
+@@ -73,6 +85,10 @@ int ScrollbarThemeAdwaita::scrollbarThickness(ScrollbarWidth scrollbarWidth, Ove
+ {
+     if (scrollbarWidth == ScrollbarWidth::None || (usesOverlayScrollbars() && overlayRelevancy == OverlayScrollbarSizeRelevancy::IgnoreOverlayScrollbarSize))
+         return 0;
++#if PLATFORM(HAIKU) && USE(SKIA)
++    if (!usesOverlayScrollbars())
++        return classicScrollbarThicknessHaiku(scrollbarSize);
++#endif
+     return scrollbarSize;
+ }
+ 
+@@ -110,7 +126,13 @@ bool ScrollbarThemeAdwaita::paint(Scrollbar& scrollbar, GraphicsContext& graphic
  {
  #if USE(COORDINATED_GRAPHICS_ASYNC_SCROLLBAR)
      if (auto scrollableArea = protect(scrollbar.scrollableArea())) {
@@ -38804,7 +38913,7 @@ index dd4409073c1db7e0fad87272d1d4f883fd60e350..0c17d6c814507f4c042f0f02324c2571
              // Painting is done by ScrollerCoordinated in the scrolling thread.
              return true;
          }
-@@ -143,7 +158,11 @@ bool ScrollbarThemeAdwaita::paint(Scrollbar& scrollbar, GraphicsContext& graphic
+@@ -143,7 +165,11 @@ bool ScrollbarThemeAdwaita::paint(Scrollbar& scrollbar, GraphicsContext& graphic
  
  void ScrollbarThemeAdwaita::paintScrollCorner(ScrollableArea& scrollableArea, GraphicsContext& graphicsContext, const IntRect& cornerRect)
  {
@@ -49172,10 +49281,10 @@ index 0000000000000000000000000000000000000000..7d495c04b64af928f0525ca51be51686
 +}
 diff --git a/Source/WebCore/platform/graphics/haiku/ControlLookHaiku.cpp b/Source/WebCore/platform/graphics/haiku/ControlLookHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..2b2bf0dcac51c3dd0182aee68a6004fd5ef3af12
+index 0000000000000000000000000000000000000000..997c8f52bfea4b1cf6d2c5e0979b3912611e8eea
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/ControlLookHaiku.cpp
-@@ -0,0 +1,342 @@
+@@ -0,0 +1,351 @@
 +/*
 + * Copyright (C) 2026 Haiku, Inc.
 + *
@@ -49243,6 +49352,15 @@ index 0000000000000000000000000000000000000000..2b2bf0dcac51c3dd0182aee68a6004fd
 +        return !value || strcmp(value, "0");
 +    }();
 +    return enabled && be_app && be_control_look;
++}
++
++int classicScrollbarThicknessHaiku(int fallback)
++{
++    if (!controlLookEnabled())
++        return fallback;
++    // BControlLook reports the BRect width of the bar. Its right edge is inclusive.
++    auto width = be_control_look->GetScrollBarWidth();
++    return width > 0 ? static_cast<int>(std::ceil(width)) + 1 : fallback;
 +}
 +
 +static rgb_color systemColor(color_which which, bool dark)
@@ -49520,10 +49638,10 @@ index 0000000000000000000000000000000000000000..2b2bf0dcac51c3dd0182aee68a6004fd
 +#endif
 diff --git a/Source/WebCore/platform/graphics/haiku/ControlLookHaiku.h b/Source/WebCore/platform/graphics/haiku/ControlLookHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..971a983ebbd1995de9822a95bf3ae16cbec9927a
+index 0000000000000000000000000000000000000000..77289f74b34c5d6b8502f739b918054d6642efac
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/ControlLookHaiku.h
-@@ -0,0 +1,78 @@
+@@ -0,0 +1,81 @@
 +/*
 + * Copyright (C) 2026 Haiku, Inc.
 + *
@@ -49593,6 +49711,9 @@ index 0000000000000000000000000000000000000000..971a983ebbd1995de9822a95bf3ae16c
 +// drawing depends on but the size). False as paintControlLookHaiku.
 +bool paintWithControlLookHaiku(GraphicsContext&, const FloatRect&, float deviceScaleFactor, const String& look,
 +    const Function<void(BView&, BRect, rgb_color background)>& draw);
++
++// The native scroll bar width, including the last pixel of the Haiku view.
++int classicScrollbarThicknessHaiku(int fallback);
 +
 +// A system colour as a page with this colour scheme should have it: the dark
 +// variant for a page that asks for dark colours on a light system, and the
