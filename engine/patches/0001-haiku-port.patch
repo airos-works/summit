@@ -74494,7 +74494,7 @@ index 57adb06b0d3bf385a76bae2729c5e04dd5e7b268..cf25d7f33b561e652d9d051e47cf9fba
  
      size_t m_size;
 diff --git a/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.cpp b/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.cpp
-index 112d19b1676c297b0168941b1db5b619cd535a29..77d8a1f16e547541e5555be320b12b050c8b41f6 100644
+index 112d19b1676c297b0168941b1db5b619cd535a29..ec5086142703085fb041f2c01bd61e839d34f058 100644
 --- a/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.cpp
 +++ b/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.cpp
 @@ -21,6 +21,17 @@
@@ -75024,17 +75024,23 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..77d8a1f16e547541e5555be320b12b05
  WTF_MAKE_TZONE_ALLOCATED_IMPL(TextureMapperLayer);
  
  static constexpr auto s_opacityVisibilityThreshold = 0.01;
-@@ -55,6 +562,9 @@ public:
+@@ -55,6 +562,15 @@ public:
      IntSize offset;
      TextureMapperLayer* backdropLayer { nullptr };
      TextureMapperLayer* replicaLayer { nullptr };
 +#if PLATFORM(HAIKU)
 +    bool reachedBackdropTarget { false };
++    struct PaintedBackdropTile {
++        Ref<BitmapTexture> texture;
++        IntRect rect;
++    };
++    // These surfaces live for one paint traversal, including its backdrop replays.
++    HashMap<const TextureMapperLayer*, Vector<PaintedBackdropTile, 1>> paintedBackdrops;
 +#endif
  };
  
  struct TextureMapperLayer::ComputeTransformData {
-@@ -363,14 +873,44 @@ void TextureMapperLayer::prepareForPainting(TextureMapper& textureMapper)
+@@ -363,14 +879,44 @@ void TextureMapperLayer::prepareForPainting(TextureMapper& textureMapper)
  
  void TextureMapperLayer::paint(TextureMapper& textureMapper)
  {
@@ -75079,7 +75085,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..77d8a1f16e547541e5555be320b12b05
  }
  
  #if ENABLE(DAMAGE_TRACKING)
-@@ -390,24 +930,121 @@ void TextureMapperLayer::setDamage(Damage&& damage)
+@@ -390,24 +936,121 @@ void TextureMapperLayer::setDamage(Damage&& damage)
          m_damageInLayerCoordinateSpace = WTF::move(damage);
  }
  
@@ -75201,7 +75207,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..77d8a1f16e547541e5555be320b12b05
      if (!isVisible()) {
          if (m_collectDamageDespiteBeingInvisible)
              m_collectDamageDespiteBeingInvisible = false;
-@@ -415,6 +1052,11 @@ void TextureMapperLayer::collectDamageRecursive(TextureMapperPaintOptions& optio
+@@ -415,6 +1058,11 @@ void TextureMapperLayer::collectDamageRecursive(TextureMapperPaintOptions& optio
              return;
      }
  
@@ -75213,7 +75219,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..77d8a1f16e547541e5555be320b12b05
      SetForScope scopedOpacity(options.opacity, options.opacity * m_currentOpacity);
  
      if (preserves3D() || isFlattened() || shouldBlend())
-@@ -490,11 +1132,26 @@ void TextureMapperLayer::collectDamageSelf(TextureMapperPaintOptions& options, D
+@@ -490,11 +1138,26 @@ void TextureMapperLayer::collectDamageSelf(TextureMapperPaintOptions& options, D
          return;
      }
  
@@ -75240,7 +75246,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..77d8a1f16e547541e5555be320b12b05
  
      TransformationMatrix transform;
      transform.translate(options.offset.width(), options.offset.height());
-@@ -507,6 +1164,20 @@ void TextureMapperLayer::collectDamageSelf(TextureMapperPaintOptions& options, D
+@@ -507,6 +1170,20 @@ void TextureMapperLayer::collectDamageSelf(TextureMapperPaintOptions& options, D
      // layer-level operations such as resizes, transformations, etc.
      const auto& clipBounds = options.textureMapper.clipBounds();
      if (m_damageInLayerCoordinateSpace) {
@@ -75261,7 +75267,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..77d8a1f16e547541e5555be320b12b05
          for (const auto& rect : *m_damageInLayerCoordinateSpace)
              damage.add(intersection(transformRectFromLayerToGlobalCoordinateSpace(rect, transform, options), clipBounds));
      }
-@@ -533,6 +1204,28 @@ void TextureMapperLayer::collectDamageSelfChildrenReplicaFilterAndMask(TextureMa
+@@ -533,6 +1210,28 @@ void TextureMapperLayer::collectDamageSelfChildrenReplicaFilterAndMask(TextureMa
  
  void TextureMapperLayer::collectDamageSelfChildrenFilterAndMask(TextureMapperPaintOptions& options, Damage& damage)
  {
@@ -75290,7 +75296,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..77d8a1f16e547541e5555be320b12b05
      const IntSize maxTextureSize = options.textureMapper.maxTextureSize();
      for (auto& rect : computeConsolidatedOverlapRegionRects(options)) {
          for (int x = rect.x(); x < rect.maxX(); x += maxTextureSize.width()) {
-@@ -545,8 +1238,31 @@ void TextureMapperLayer::collectDamageSelfChildrenFilterAndMask(TextureMapperPai
+@@ -545,8 +1244,31 @@ void TextureMapperLayer::collectDamageSelfChildrenFilterAndMask(TextureMapperPai
          }
      }
  
@@ -75323,7 +75329,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..77d8a1f16e547541e5555be320b12b05
  }
  
  void TextureMapperLayer::damageWholeLayer()
-@@ -557,6 +1273,19 @@ void TextureMapperLayer::damageWholeLayer()
+@@ -557,6 +1279,19 @@ void TextureMapperLayer::damageWholeLayer()
      ensureDamageInLayerCoordinateSpace().makeFull();
  }
  
@@ -75343,7 +75349,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..77d8a1f16e547541e5555be320b12b05
  void TextureMapperLayer::damageWholeLayerIncludingItsRectFromPreviousFrame()
  {
      damageWholeLayer();
-@@ -578,12 +1307,39 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
+@@ -578,12 +1313,39 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
      auto targetRect = layerRect();
      if (targetRect.isEmpty())
          return;
@@ -75383,7 +75389,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..77d8a1f16e547541e5555be320b12b05
  
      if (isFlattened() && !m_flattenedLayer->needsUpdate()) {
          m_flattenedLayer->paintToTextureMapper(options.textureMapper, m_flattenedLayer->layerRect(), transform, options.opacity);
-@@ -592,6 +1348,26 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
+@@ -592,6 +1354,26 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
  
      TextureMapperSolidColorLayer solidColorLayer;
      TextureMapperBackingStore* backingStore = m_backingStore;
@@ -75410,7 +75416,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..77d8a1f16e547541e5555be320b12b05
      if (m_state.backgroundColor.isValid()) {
          solidColorLayer.setColor(m_state.backgroundColor);
          backingStore = &solidColorLayer;
-@@ -599,7 +1375,21 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
+@@ -599,7 +1381,21 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
  
      options.textureMapper.setWrapMode(TextureMapper::WrapMode::Stretch);
      options.textureMapper.setPatternTransform(TransformationMatrix());
@@ -75432,7 +75438,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..77d8a1f16e547541e5555be320b12b05
      if (backingStore) {
          backingStore->paintToTextureMapper(options.textureMapper, targetRect, transform, options.opacity);
          if (m_state.showDebugBorders)
-@@ -608,6 +1398,10 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
+@@ -608,6 +1404,10 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
          if (m_state.showRepaintCounter)
              backingStore->drawRepaintCounter(options.textureMapper, m_state.repaintCount, m_state.debugBorderColor, targetRect, transform);
      }
@@ -75443,7 +75449,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..77d8a1f16e547541e5555be320b12b05
  
      TextureMapperPlatformLayer* contentsLayer = m_contentsLayer;
      if (m_state.solidColor.isValid() && m_state.solidColor.isVisible()) {
-@@ -617,6 +1411,18 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
+@@ -617,6 +1417,18 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
  
      if (!contentsLayer)
          return;
@@ -75462,7 +75468,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..77d8a1f16e547541e5555be320b12b05
  
      if (!m_state.contentsTileSize.isEmpty()) {
          options.textureMapper.setWrapMode(TextureMapper::WrapMode::Repeat);
-@@ -638,6 +1444,10 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
+@@ -638,7 +1450,48 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
  
      if (m_state.showDebugBorders)
          contentsLayer->drawBorder(options.textureMapper, m_state.debugBorderColor, m_state.debugBorderWidth, m_state.contentsRect, transform);
@@ -75470,10 +75476,64 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..77d8a1f16e547541e5555be320b12b05
 +    if (tracePaint)
 +        contentsPaintedAt = system_time();
 +#endif
++}
++
++#if PLATFORM(HAIKU)
++static void commitSurface(TextureMapperPaintOptions&, BitmapTexture&, const IntRect&, float, bool additive);
++
++static void paintRecordedBackdrop(TextureMapperPaintOptions& options, TextureMapperLayer& layer)
++{
++    auto it = options.paintedBackdrops.find(&layer);
++    if (it == options.paintedBackdrops.end() || options.replicaLayer || !options.transform.isIdentity())
++        return;
++
++    auto& tiles = it->value;
++    if (tiles.size() == 1) {
++        auto& tile = tiles.first();
++        commitSurface(options, tile.texture.get(), tile.rect, options.opacity, false);
++        return;
++    }
++
++    // Different ancestor surfaces can visit overlapping parts of a layer.
++    // Draw each pixel once, including at the boundary between two tiles.
++    auto clip = options.textureMapper.clipBounds();
++    clip.move(-options.offset);
++    Region remaining(clip);
++    for (auto& tile : tiles) {
++        auto visible = remaining;
++        visible.intersect(tile.rect);
++        for (auto rect : visible.rects()) {
++            rect.move(options.offset);
++            options.textureMapper.beginClip({ }, FloatRoundedRect { FloatRect { rect } });
++            commitSurface(options, tile.texture.get(), tile.rect, options.opacity, false);
++            options.textureMapper.endClip();
++        }
++        remaining.subtract(tile.rect);
++        if (remaining.isEmpty())
++            break;
++    }
  }
++#endif
  
  void TextureMapperLayer::paintBackdrop(TextureMapperPaintOptions& options)
-@@ -653,8 +1463,18 @@ void TextureMapperLayer::paintBackdrop(TextureMapperPaintOptions& options)
+ {
+@@ -647,16 +1500,39 @@ void TextureMapperLayer::paintBackdrop(TextureMapperPaintOptions& options)
+     clipTransform.multiply(options.transform);
+     clipTransform.multiply(m_layerTransforms.combined);
+     options.textureMapper.beginClip(clipTransform, m_state.backdropFiltersRect);
+-    m_state.backdropLayer->paintRecursive(options);
++#if PLATFORM(HAIKU)
++    if (options.backdropLayer) {
++        // A later sibling sees each earlier filter's composited output. Reuse
++        // the tiles already painted in this frame, with the current clip.
++        // A descendant starts a new backdrop at its own backdrop root.
++        if (this != &options.backdropLayer->backdropRootLayer())
++            paintRecordedBackdrop(options, *m_state.backdropLayer);
++    } else
++#endif
++        m_state.backdropLayer->paintRecursive(options);
+     options.textureMapper.endClip();
+ }
  
  void TextureMapperLayer::paintSelfAndChildren(TextureMapperPaintOptions& options)
  {
@@ -75491,9 +75551,15 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..77d8a1f16e547541e5555be320b12b05
 +        return;
 +    }
  
++#if PLATFORM(HAIKU)
++    if (m_state.backdropLayer)
++#else
      if (m_state.backdropLayer && !options.backdropLayer)
++#endif
          paintBackdrop(options);
-@@ -687,8 +1507,13 @@ void TextureMapperLayer::paintSelfAndChildren(TextureMapperPaintOptions& options
+ 
+     paintSelf(options);
+@@ -687,8 +1563,13 @@ void TextureMapperLayer::paintSelfAndChildren(TextureMapperPaintOptions& options
      }
  
      if (!isFlattened() || m_flattenedLayer->needsUpdate()) {
@@ -75508,7 +75574,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..77d8a1f16e547541e5555be320b12b05
      }
  
      if (shouldClip)
-@@ -700,6 +1525,16 @@ bool TextureMapperLayer::shouldBlend() const
+@@ -700,6 +1581,16 @@ bool TextureMapperLayer::shouldBlend() const
      if (m_state.preserves3D)
          return false;
  
@@ -75525,7 +75591,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..77d8a1f16e547541e5555be320b12b05
      return m_currentOpacity < 1;
  }
  
-@@ -930,14 +1765,44 @@ IntRect transformedBoundingBox(const TransformationMatrix& transform, FloatRect
+@@ -930,14 +1821,44 @@ IntRect transformedBoundingBox(const TransformationMatrix& transform, FloatRect
      return { };
  }
  
@@ -75570,7 +75636,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..77d8a1f16e547541e5555be320b12b05
      else if (m_backingStore || m_state.masksToBounds || m_state.maskLayer || hasFilters() || hasBackdrop())
          localBoundingRect = layerRect();
      else if (m_contentsLayer || m_state.solidColor.isVisible())
-@@ -970,14 +1835,77 @@ void TextureMapperLayer::computeOverlapRegions(ComputeOverlapRegionData& data, c
+@@ -970,14 +1891,77 @@ void TextureMapperLayer::computeOverlapRegions(ComputeOverlapRegionData& data, c
          computeOverlapRegions(data, newReplicaTransform, false);
      }
  
@@ -75648,7 +75714,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..77d8a1f16e547541e5555be320b12b05
      Region overlapRegion;
      Region nonOverlapRegion;
      auto mode = ComputeOverlapRegionMode::Intersection;
-@@ -1047,6 +1975,54 @@ Vector<IntRect, 1> TextureMapperLayer::computeConsolidatedOverlapRegionRects(Tex
+@@ -1047,6 +2031,54 @@ Vector<IntRect, 1> TextureMapperLayer::computeConsolidatedOverlapRegionRects(Tex
      computeOverlapRegions(data, options.transform, false);
      ASSERT(nonOverlapRegion.isEmpty());
  
@@ -75703,7 +75769,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..77d8a1f16e547541e5555be320b12b05
      auto rects = overlapRegion.rects();
      static const size_t OverlapRegionConsolidationThreshold = 4;
      if (rects.size() > OverlapRegionConsolidationThreshold) {
-@@ -1057,8 +2033,265 @@ Vector<IntRect, 1> TextureMapperLayer::computeConsolidatedOverlapRegionRects(Tex
+@@ -1057,8 +2089,279 @@ Vector<IntRect, 1> TextureMapperLayer::computeConsolidatedOverlapRegionRects(Tex
      return rects;
  }
  
@@ -75870,6 +75936,18 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..77d8a1f16e547541e5555be320b12b05
 +
 +static Ref<BitmapTexture> acquireSurfaceHaiku(const IntSize&);
 +
++static void recordBackdropTile(TextureMapperPaintOptions& options, TextureMapperLayer& layer, BitmapTexture& texture, const IntRect& rect)
++{
++    if (options.backdropLayer || options.replicaLayer || !options.transform.isIdentity())
++        return;
++    auto& tiles = options.paintedBackdrops.ensure(&layer, [] { return Vector<TextureMapperPaintOptions::PaintedBackdropTile, 1> { }; }).iterator->value;
++    // Discard redundant tiles from repeated visits under parent surfaces.
++    tiles.removeAllMatching([&](const auto& tile) { return rect.contains(tile.rect); });
++    if (!tiles.containsIf([&](const auto& tile) { return tile.rect.contains(rect); }))
++        tiles.append({ texture, rect });
++}
++
++
 +bool TextureMapperLayer::paintBackdropFromCacheHaiku(TextureMapperPaintOptions& options)
 +{
 +    static const bool enabled = [] {
@@ -75929,6 +76007,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..77d8a1f16e547541e5555be320b12b05
 +        std::fprintf(stderr, "Summit draw trace: backdrop cache layer=%u again=%s rect=%d,%d %dx%d\n", traceIdHaiku(this), reason, rect.x(), rect.y(), rect.width(), rect.height());
 +    }
 +    if (reusable) {
++        recordBackdropTile(options, *this, *cache->texture, cache->rect);
 +        commitSurface(options, *cache->texture, cache->rect, options.opacity, PLUS_LIGHTER_HAIKU);
 +        return true;
 +    }
@@ -75953,6 +76032,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..77d8a1f16e547541e5555be320b12b05
 +    cache->maskVersion = mask && mask->m_backingStore ? mask->m_backingStore->contentVersionHaiku() : 0;
 +    cache->maskTransform = mask ? mask->m_layerTransforms.combined : TransformationMatrix();
 +    cache->maskSize = mask ? mask->m_state.size : FloatSize();
++    recordBackdropTile(options, *this, surface.get(), rect);
 +    commitSurface(options, surface.get(), rect, options.opacity, PLUS_LIGHTER_HAIKU);
 +    return true;
 +}
@@ -75969,7 +76049,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..77d8a1f16e547541e5555be320b12b05
      IntSize maxTextureSize = options.textureMapper.maxTextureSize();
      for (auto& rect : computeConsolidatedOverlapRegionRects(options)) {
          for (int x = rect.x(); x < rect.maxX(); x += maxTextureSize.width()) {
-@@ -1079,6 +2312,33 @@ void TextureMapperLayer::applyMask(TextureMapperPaintOptions& options)
+@@ -1079,6 +2382,33 @@ void TextureMapperLayer::applyMask(TextureMapperPaintOptions& options)
      options.textureMapper.setMaskMode(false);
  }
  
@@ -76003,7 +76083,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..77d8a1f16e547541e5555be320b12b05
  void TextureMapperLayer::paintIntoSurface(TextureMapperPaintOptions& options)
  {
      options.textureMapper.bindSurface(options.surface.get());
-@@ -1086,6 +2346,9 @@ void TextureMapperLayer::paintIntoSurface(TextureMapperPaintOptions& options)
+@@ -1086,6 +2416,9 @@ void TextureMapperLayer::paintIntoSurface(TextureMapperPaintOptions& options)
          SetForScope scopedTransform(options.transform, TransformationMatrix());
          SetForScope scopedReplicaLayer(options.replicaLayer, nullptr);
          SetForScope scopedBackdropLayer(options.backdropLayer, this);
@@ -76013,7 +76093,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..77d8a1f16e547541e5555be320b12b05
          backdropRootLayer().paintSelfAndChildren(options);
      } else
          paintSelfAndChildren(options);
-@@ -1093,7 +2356,11 @@ void TextureMapperLayer::paintIntoSurface(TextureMapperPaintOptions& options)
+@@ -1093,7 +2426,11 @@ void TextureMapperLayer::paintIntoSurface(TextureMapperPaintOptions& options)
      bool hasMask = !!m_state.maskLayer;
      bool hasReplicaMask = options.replicaLayer == this && m_state.replicaLayer->m_state.maskLayer;
      bool defersLastFilterPass = !hasMask && !hasReplicaMask;
@@ -76026,7 +76106,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..77d8a1f16e547541e5555be320b12b05
      options.textureMapper.bindSurface(options.surface.get());
      if (hasMask)
          m_state.maskLayer->applyMask(options);
-@@ -1101,17 +2368,42 @@ void TextureMapperLayer::paintIntoSurface(TextureMapperPaintOptions& options)
+@@ -1101,17 +2438,42 @@ void TextureMapperLayer::paintIntoSurface(TextureMapperPaintOptions& options)
          m_state.replicaLayer->m_state.maskLayer->applyMask(options);
  }
  
@@ -76070,7 +76150,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..77d8a1f16e547541e5555be320b12b05
      {
          SetForScope scopedSurface(options.surface, surface.ptr());
          SetForScope scopedOffset(options.offset, -toIntSize(rect.location()));
-@@ -1122,12 +2414,16 @@ void TextureMapperLayer::paintWithIntermediateSurface(TextureMapperPaintOptions&
+@@ -1122,12 +2484,16 @@ void TextureMapperLayer::paintWithIntermediateSurface(TextureMapperPaintOptions&
          paintSelfChildrenReplicaFilterAndMask(options);
      }
  
@@ -76088,11 +76168,15 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..77d8a1f16e547541e5555be320b12b05
      {
          SetForScope scopedSurface(options.surface, surface.ptr());
          SetForScope scopedOffset(options.offset, -toIntSize(rect.location()));
-@@ -1137,11 +2433,15 @@ void TextureMapperLayer::paintSelfAndChildrenWithIntermediateSurface(TextureMapp
+@@ -1137,11 +2503,19 @@ void TextureMapperLayer::paintSelfAndChildrenWithIntermediateSurface(TextureMapp
          surface = Ref { *options.surface };
      }
  
 -    commitSurface(options, surface.get(), rect, options.opacity);
++#if PLATFORM(HAIKU)
++    if (m_isBackdrop)
++        recordBackdropTile(options, *this, surface.get(), rect);
++#endif
 +    commitSurface(options, surface.get(), rect, options.opacity, PLUS_LIGHTER_HAIKU);
  }
  
@@ -76105,7 +76189,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..77d8a1f16e547541e5555be320b12b05
      bool hasFilterOrMask = [&] {
          if (hasFilters())
              return true;
-@@ -1163,10 +2463,55 @@ void TextureMapperLayer::paintSelfChildrenReplicaFilterAndMask(TextureMapperPain
+@@ -1163,10 +2537,55 @@ void TextureMapperLayer::paintSelfChildrenReplicaFilterAndMask(TextureMapperPain
          paintSelfAndChildrenWithReplica(options);
  }
  
@@ -76161,7 +76245,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..77d8a1f16e547541e5555be320b12b05
  
      SetForScope scopedOpacity(options.opacity, options.opacity * m_currentOpacity);
  
-@@ -1184,8 +2529,12 @@ void TextureMapperLayer::paintFlattened(TextureMapperPaintOptions& options)
+@@ -1184,10 +2603,18 @@ void TextureMapperLayer::paintFlattened(TextureMapperPaintOptions& options)
  {
      // If painting a backdrop for a flattened layer, processing should stop here.
      // Only the elements up to the flattened layer need to be painted into the backdrop buffer.
@@ -76173,9 +76257,15 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..77d8a1f16e547541e5555be320b12b05
          return;
 +    }
  
++#if PLATFORM(HAIKU)
++    if (m_state.backdropLayer)
++#else
      if (m_state.backdropLayer && !options.backdropLayer)
++#endif
          paintBackdrop(options);
-@@ -1247,9 +2596,27 @@ void TextureMapperLayer::collect3DRenderingContextLayers(Vector<TextureMapperLay
+ 
+     if (m_flattenedLayer->needsUpdate()) {
+@@ -1247,9 +2674,27 @@ void TextureMapperLayer::collect3DRenderingContextLayers(Vector<TextureMapperLay
  
  void TextureMapperLayer::setChildren(const Vector<TextureMapperLayer*>& newChildren)
  {
@@ -76203,7 +76293,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..77d8a1f16e547541e5555be320b12b05
  }
  
  void TextureMapperLayer::addChild(TextureMapperLayer* childLayer)
-@@ -1427,12 +2794,28 @@ void TextureMapperLayer::setBackfaceVisibility(bool backfaceVisibility)
+@@ -1427,12 +2872,28 @@ void TextureMapperLayer::setBackfaceVisibility(bool backfaceVisibility)
  void TextureMapperLayer::setOpacity(float opacity)
  {
  #if ENABLE(DAMAGE_TRACKING)
@@ -76233,7 +76323,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..77d8a1f16e547541e5555be320b12b05
  void TextureMapperLayer::setShowDebugBorder(bool showDebugBorder)
  {
  #if ENABLE(DAMAGE_TRACKING)
-@@ -1495,6 +2878,11 @@ void TextureMapperLayer::setBackgroundColor(const Color& color)
+@@ -1495,6 +2956,11 @@ void TextureMapperLayer::setBackgroundColor(const Color& color)
  void TextureMapperLayer::setFilters(const FilterOperations& filters)
  {
      m_state.filters = filters;
@@ -76245,7 +76335,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..77d8a1f16e547541e5555be320b12b05
  }
  
  void TextureMapperLayer::setContentsLayer(TextureMapperPlatformLayer* platformLayer)
-@@ -1550,7 +2938,11 @@ bool TextureMapperLayer::syncAnimations(MonotonicTime time)
+@@ -1550,7 +3016,11 @@ bool TextureMapperLayer::syncAnimations(MonotonicTime time)
      m_layerTransforms.localTransform = applicationResults.transform.value_or(m_state.transform);
  #if ENABLE(DAMAGE_TRACKING)
      if (m_damagePropagationEnabled && m_currentOpacity != applicationResults.opacity.value_or(m_state.opacity)) {
