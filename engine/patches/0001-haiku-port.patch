@@ -31718,10 +31718,57 @@ index 20fa89dbac43fca28edabb48235e4a35ac61b8f2..e285f6f84746eccd908c89ee80b846d9
      virtual unsigned remoteImagesCountForTesting() const { return 0; }
  
 diff --git a/Source/WebCore/page/EventHandler.cpp b/Source/WebCore/page/EventHandler.cpp
-index 4555034d8312449920f8f16e8a9c252277d25003..fc2cb658f2f8ee869eaa6a7750ae834b53014a53 100644
+index 4555034d8312449920f8f16e8a9c252277d25003..65f28b06cdc20feebc1514c94cfed0c2fc43cba8 100644
 --- a/Source/WebCore/page/EventHandler.cpp
 +++ b/Source/WebCore/page/EventHandler.cpp
-@@ -5177,7 +5177,9 @@ bool EventHandler::defaultKeyboardScrollEventHandler(KeyboardEvent& event, Scrol
+@@ -2568,10 +2568,9 @@ bool EventHandler::swallowAnyClickEvent(const PlatformMouseEvent& platformMouseE
+ 
+     bool swallowed = false;
+     RefPtr clickCaptureElement = std::exchange(m_clickCaptureElement, nullptr);
+-    if (clickCaptureElement) {
+-        updateMouseEventTargetNode(eventName, nodeToClick.get(), platformMouseEvent, FireMouseOverOut::Yes);
++    if (clickCaptureElement)
+         swallowed = !dispatchAnyClickEvent(eventName, clickCaptureElement.get(), m_clickCount, platformMouseEvent);
+-    } else if (nodeToClick)
++    else if (nodeToClick)
+         swallowed = !dispatchMouseEvent(eventName, nodeToClick.get(), m_clickCount, platformMouseEvent, FireMouseOverOut::No);
+ 
+     // Prefer nodeToClick for didDispatchClickEvent since it represents the actual click location.
+@@ -3104,10 +3103,8 @@ void EventHandler::pointerCaptureElementDidChange(Element* element)
+     if (element && m_clickNode)
+         m_clickCaptureElement = element;
+ 
+-    // Since `updateMouseEventTargetNode` will dispatch boundary events, call it only when
+-    // pointer capture is received. When capture is released, the PointerCaptureController
+-    // already handles the appropriate boundary events (pointerout and pointerleave from
+-    // the captured element).
++    // On acquisition, send boundary events before gotpointercapture. On release,
++    // the mouse event in progress restores the hit-tested target.
+     if (element)
+         updateMouseEventTargetNode(eventNames().gotpointercaptureEvent, element, m_lastPlatformMouseEvent, FireMouseOverOut::Yes);
+ }
+@@ -3466,6 +3463,7 @@ bool EventHandler::dispatchMouseEvent(const AtomString& eventType, Node* targetN
+ 
+     if (elementUnderMouse) {
+         auto shouldDispatchPointerEvent = didRetargetToMouseMoveTargetOverride ? Element::ShouldDispatchPointerEvent::No : Element::ShouldDispatchPointerEvent::Yes;
++        bool hadMouseCapture = eventType == eventNames().mouseupEvent && m_capturingMouseEventsElement;
+         auto [eventIsDispatched, eventIsDefaultPrevented] = elementUnderMouse->dispatchMouseEvent(platformMouseEvent, eventType, clickCount, nullptr, IsSyntheticClick::No, shouldDispatchPointerEvent);
+         m_mouseMoveTargetOverride = nullptr;
+         m_capturesDragging = CapturesDragging::InabilityReason::Unknown;
+@@ -3475,6 +3473,12 @@ bool EventHandler::dispatchMouseEvent(const AtomString& eventType, Node* targetN
+             else if (eventType == eventNames().mousemoveEvent)
+                 m_capturesDragging = CapturesDragging::InabilityReason::MouseMoveIsCancelled;
+         }
++        // A pointerup listener can change what lies under the pointer. Restore hover after
++        // implicit release even when the button sequence does not generate a click.
++        if (hadMouseCapture && !m_capturingMouseEventsElement && frame->document() && frame->view()) {
++            auto releasedMouseEvent = prepareMouseEvent(hoverTimerHitType, platformMouseEvent);
++            updateMouseEventTargetNode(eventNames().mousemoveEvent, protect(releasedMouseEvent.targetNode()).get(), platformMouseEvent, FireMouseOverOut::Yes);
++        }
+         if (eventIsDispatched == Element::EventIsDispatched::No)
+             return false;
+     }
+@@ -5177,7 +5181,9 @@ bool EventHandler::defaultKeyboardScrollEventHandler(KeyboardEvent& event, Scrol
  
  void EventHandler::defaultPageUpDownEventHandler(KeyboardEvent& event)
  {
@@ -31732,7 +31779,7 @@ index 4555034d8312449920f8f16e8a9c252277d25003..fc2cb658f2f8ee869eaa6a7750ae834b
      ASSERT(event.type() == eventNames().keydownEvent);
  
      if (event.ctrlKey() || event.metaKey() || event.altKey() || event.shiftKey())
-@@ -5193,7 +5195,9 @@ void EventHandler::defaultPageUpDownEventHandler(KeyboardEvent& event)
+@@ -5193,7 +5199,9 @@ void EventHandler::defaultPageUpDownEventHandler(KeyboardEvent& event)
  
  void EventHandler::defaultHomeEndEventHandler(KeyboardEvent& event)
  {
