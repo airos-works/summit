@@ -99584,28 +99584,125 @@ index f5ee0f9e3eb648511c17a30fd82846e3fb0fb96d..6c47213b070607acb00097b78d8aea08
      static WritingMode usedWritingModeForBaselineAlignment(LogicalBoxAxis alignmentContextAxis, WritingMode alignmentContainerWritingMode, WritingMode alignmentSubjectWritingMode);
      static LayoutUnit synthesizedBaseline(const RenderBox&, FontBaseline baselineType, WritingMode writingModeForSynthesis, LineDirection, BaselineSynthesisEdge);
 diff --git a/Source/WebCore/rendering/GridBaselineAlignment.cpp b/Source/WebCore/rendering/GridBaselineAlignment.cpp
-index 5304b89173ccf53c17f575fbfe4c051e5bd634a9..adfa77b46da82d162cc2a5e8f97b80f344ae6cad 100644
+index 5304b89173ccf53c17f575fbfe4c051e5bd634a9..0169561bb37946e7b6e040b1cb82abf8b0f3f5ac 100644
 --- a/Source/WebCore/rendering/GridBaselineAlignment.cpp
 +++ b/Source/WebCore/rendering/GridBaselineAlignment.cpp
-@@ -74,7 +74,7 @@ LayoutUnit GridBaselineAlignment::ascentForGridItem(const RenderBox& gridItem, S
-             return gridItemMargin + BaselineAlignment::synthesizedBaseline(gridItem, BaselineAlignment::dominantBaseline(gridWritingMode),
-                 gridWritingMode, alignmentContextDirection(), BaselineSynthesisEdge::BorderBox);
-         }
--        auto ascent = position == ItemPosition::Baseline ? gridItem.firstLineBaseline() : gridItem.lastLineBaseline();
-+        auto ascent = BaselineAlignment::lineBaselineForAlignment(gridItem, position);
-         if (!ascent) {
-             auto gridWritingMode = gridStyle->writingMode();
-             return gridItemMargin + BaselineAlignment::synthesizedBaseline(gridItem, BaselineAlignment::dominantBaseline(gridWritingMode),
-@@ -84,7 +84,7 @@ LayoutUnit GridBaselineAlignment::ascentForGridItem(const RenderBox& gridItem, S
-     } else {
-         auto firstOrLastLineBaseline = std::optional<LayoutUnit> { };
-         if (isParallelToAlignmentAxisForGridItem(gridItem, alignmentContextType))
--            firstOrLastLineBaseline = position == ItemPosition::Baseline ? gridItem.firstLineBaseline() : gridItem.lastLineBaseline();
-+            firstOrLastLineBaseline = BaselineAlignment::lineBaselineForAlignment(gridItem, position);
+@@ -31,7 +31,6 @@
+ #include "config.h"
+ #include "GridBaselineAlignment.h"
  
-         // We take border-box's under edge if no valid baseline.
-         if (!firstOrLastLineBaseline) {
-@@ -153,7 +153,7 @@ void GridBaselineAlignment::updateBaselineAlignmentContext(ItemPosition preferen
+-#include "AncestorSubgridIterator.h"
+ #include "BaselineAlignmentInlines.h"
+ #include "RenderBoxInlines.h"
+ #include "RenderGrid.h"
+@@ -41,72 +40,45 @@ namespace WebCore {
+ 
+ LayoutUnit GridBaselineAlignment::logicalAscentForGridItem(const RenderBox& gridItem, Style::GridTrackSizingDirection alignmentContextType, ItemPosition position) const
+ {
+-    auto hasOrthogonalAncestorSubgrids = [&] {
+-        for (CheckedRef currentAncestorSubgrid : ancestorSubgridsOfGridItem(gridItem, Style::GridTrackSizingDirection::Rows)) {
+-            if (currentAncestorSubgrid->isHorizontalWritingMode() != currentAncestorSubgrid->parent()->isHorizontalWritingMode())
+-                return true;
+-        }
+-        return false;
+-    };
+-
+-    ExtraMarginsFromSubgrids extraMarginsFromAncestorSubgrids;
+-    if (alignmentContextType == Style::GridTrackSizingDirection::Rows && !hasOrthogonalAncestorSubgrids())
+-        extraMarginsFromAncestorSubgrids = GridLayoutFunctions::extraMarginForSubgridAncestors(Style::GridTrackSizingDirection::Rows, gridItem);
+-
+-    LayoutUnit ascent = ascentForGridItem(gridItem, alignmentContextType, position) + extraMarginsFromAncestorSubgrids.extraTrackStartMargin();
+-    return (isDescentBaselineForGridItem(gridItem, alignmentContextType) || position == ItemPosition::LastBaseline) ? descentForGridItem(gridItem, ascent, alignmentContextType, extraMarginsFromAncestorSubgrids) : ascent;
+-}
+-
+-LayoutUnit GridBaselineAlignment::ascentForGridItem(const RenderBox& gridItem, Style::GridTrackSizingDirection alignmentContextType, ItemPosition position) const
+-{
+-    ASSERT(position == ItemPosition::Baseline || position == ItemPosition::LastBaseline);
+-    auto gridItemMargin = alignmentContextType == Style::GridTrackSizingDirection::Rows ? gridItem.marginBefore(m_writingMode) : gridItem.marginStart(m_writingMode);
+-    CheckedRef gridStyle = gridItem.parent()->style();
+-
+-    auto baseline = 0_lu;
+-    if (alignmentContextType == Style::GridTrackSizingDirection::Rows) {
+-        auto alignmentContextDirection = [&] {
+-            return gridStyle->writingMode().isHorizontal() ? LineDirection::Horizontal : LineDirection::Vertical;
+-        };
+-
+-        if (!isParallelToAlignmentAxisForGridItem(gridItem, alignmentContextType)) {
+-            auto gridWritingMode = gridStyle->writingMode();
+-            return gridItemMargin + BaselineAlignment::synthesizedBaseline(gridItem, BaselineAlignment::dominantBaseline(gridWritingMode),
+-                gridWritingMode, alignmentContextDirection(), BaselineSynthesisEdge::BorderBox);
+-        }
+-        auto ascent = position == ItemPosition::Baseline ? gridItem.firstLineBaseline() : gridItem.lastLineBaseline();
+-        if (!ascent) {
+-            auto gridWritingMode = gridStyle->writingMode();
+-            return gridItemMargin + BaselineAlignment::synthesizedBaseline(gridItem, BaselineAlignment::dominantBaseline(gridWritingMode),
+-                gridWritingMode, alignmentContextDirection(), BaselineSynthesisEdge::BorderBox);
+-        }
+-        baseline = *ascent;
+-    } else {
+-        auto firstOrLastLineBaseline = std::optional<LayoutUnit> { };
+-        if (isParallelToAlignmentAxisForGridItem(gridItem, alignmentContextType))
+-            firstOrLastLineBaseline = position == ItemPosition::Baseline ? gridItem.firstLineBaseline() : gridItem.lastLineBaseline();
+-
+-        // We take border-box's under edge if no valid baseline.
+-        if (!firstOrLastLineBaseline) {
+-            ASSERT(!gridItem.needsLayout());
+-            if (isVerticalAlignmentContext(alignmentContextType))
+-                return m_writingMode.isBlockFlipped() ? gridItemMargin + gridItem.borderBoxSize().width().toInt() : gridItemMargin;
+-            auto gridWritingMode = gridStyle->writingMode();
+-            return gridItemMargin + BaselineAlignment::synthesizedBaseline(gridItem, BaselineAlignment::dominantBaseline(gridWritingMode),
+-                gridWritingMode, LineDirection::Horizontal, BaselineSynthesisEdge::BorderBox);
+-        }
+-        baseline = *firstOrLastLineBaseline;
++    auto parentMode = gridItem.parent()->writingMode();
++    auto parentAxis = parentMode.isOrthogonal(m_writingMode) ? orthogonalDirection(alignmentContextType) : alignmentContextType;
++    auto extraMarginsFromAncestorSubgrids = GridLayoutFunctions::extraMarginForSubgridAncestors(parentAxis, gridItem);
++    auto trackDirection = alignmentContextType == Style::GridTrackSizingDirection::Rows ? m_writingMode.blockDirection() : m_writingMode.inlineDirection();
++    auto parentTrackDirection = parentAxis == Style::GridTrackSizingDirection::Rows ? parentMode.blockDirection() : parentMode.inlineDirection();
++    if (parentTrackDirection != trackDirection)
++        extraMarginsFromAncestorSubgrids.reverse();
++
++    if (isParallelToAlignmentAxisForGridItem(gridItem, alignmentContextType)) {
++        // A line baseline is measured from the item's block-start. Measure each
++        // participant from the margin edge facing the shared baseline track.
++        auto itemMode = gridItem.writingMode();
++        auto baseline = BaselineAlignment::lineBaselineForAlignment(gridItem, position);
++        if (!baseline)
++            baseline = BaselineAlignment::synthesizedBaseline(gridItem, BaselineAlignment::dominantBaseline(m_writingMode), itemMode,
++                itemMode.isHorizontal() ? LineDirection::Horizontal : LineDirection::Vertical, BaselineSynthesisEdge::BorderBox);
++        bool firstBaseline = position == ItemPosition::Baseline;
++        bool onTrackStart = firstBaseline == (itemMode.blockDirection() == trackDirection);
++        auto extraMargin = onTrackStart ? extraMarginsFromAncestorSubgrids.extraTrackStartMargin() : extraMarginsFromAncestorSubgrids.extraTrackEndMargin();
++        if (firstBaseline)
++            return extraMargin + gridItem.marginBefore(itemMode) + *baseline;
++        return extraMargin + gridItem.marginAfter(itemMode) + gridItem.logicalHeight() - *baseline;
+     }
+ 
+-    return gridItemMargin + baseline;
++    LayoutUnit ascent = synthesizedAscentForGridItem(gridItem, alignmentContextType) + extraMarginsFromAncestorSubgrids.extraTrackStartMargin();
++    if (isDescentBaselineForGridItem(gridItem, alignmentContextType) || position == ItemPosition::LastBaseline)
++        return gridItem.marginLogicalWidth() + gridItem.logicalWidth() - ascent;
++    return ascent;
+ }
+ 
+-LayoutUnit GridBaselineAlignment::descentForGridItem(const RenderBox& gridItem, LayoutUnit ascent, Style::GridTrackSizingDirection alignmentContextType, ExtraMarginsFromSubgrids extraMarginsFromAncestorSubgrids) const
++LayoutUnit GridBaselineAlignment::synthesizedAscentForGridItem(const RenderBox& gridItem, Style::GridTrackSizingDirection alignmentContextType) const
+ {
+-    ASSERT(!gridItem.needsLayout());
+-    if (isParallelToAlignmentAxisForGridItem(gridItem, alignmentContextType))
+-        return extraMarginsFromAncestorSubgrids.extraTotalMargin() + gridItem.marginLogicalHeight() + gridItem.logicalHeight() - ascent;
+-    return gridItem.marginLogicalWidth() + gridItem.logicalWidth() - ascent;
++    auto gridItemMargin = alignmentContextType == Style::GridTrackSizingDirection::Rows ? gridItem.marginBefore(m_writingMode) : gridItem.marginStart(m_writingMode);
++    if (alignmentContextType == Style::GridTrackSizingDirection::Columns && isVerticalAlignmentContext(alignmentContextType))
++        return m_writingMode.isBlockFlipped() ? gridItemMargin + gridItem.borderBoxSize().width().toInt() : gridItemMargin;
++
++    auto gridWritingMode = gridItem.parent()->writingMode();
++    auto lineDirection = alignmentContextType == Style::GridTrackSizingDirection::Rows && !gridWritingMode.isHorizontal() ? LineDirection::Vertical : LineDirection::Horizontal;
++    return gridItemMargin + BaselineAlignment::synthesizedBaseline(gridItem, BaselineAlignment::dominantBaseline(gridWritingMode), gridWritingMode, lineDirection, BaselineSynthesisEdge::BorderBox);
+ }
+ 
+ bool GridBaselineAlignment::isDescentBaselineForGridItem(const RenderBox& gridItem, Style::GridTrackSizingDirection alignmentContextType) const
+@@ -153,7 +125,7 @@ void GridBaselineAlignment::updateBaselineAlignmentContext(ItemPosition preferen
      alignment.maxAscent = std::max(alignment.maxAscent, ascent);
  }
  
@@ -99615,7 +99712,7 @@ index 5304b89173ccf53c17f575fbfe4c051e5bd634a9..adfa77b46da82d162cc2a5e8f97b80f3
      ASSERT(isBaselinePosition(preference));
      auto& contextMap = alignmentContextType == Style::GridTrackSizingDirection::Rows ? m_rowAlignmentContextStates : m_columnAlignmentContextStates;
 diff --git a/Source/WebCore/rendering/GridBaselineAlignment.h b/Source/WebCore/rendering/GridBaselineAlignment.h
-index a35d4f393b4dd4c82a58a78943f7466e3a25a396..eedc30f319899800121955362a691d09d5276123 100644
+index a35d4f393b4dd4c82a58a78943f7466e3a25a396..407db05faea6f865d6781e2bc3431e476537f5c1 100644
 --- a/Source/WebCore/rendering/GridBaselineAlignment.h
 +++ b/Source/WebCore/rendering/GridBaselineAlignment.h
 @@ -53,7 +53,8 @@ public:
@@ -99628,8 +99725,90 @@ index a35d4f393b4dd4c82a58a78943f7466e3a25a396..eedc30f319899800121955362a691d09
  
      // Sets the Grid Container's writing mode so that we can avoid the dependecy of the LayoutGrid class for
      // determining whether a grid item is orthogonal or not.
+@@ -66,8 +67,7 @@ private:
+     LayoutUnit marginOverForGridItem(const RenderBox&, Style::GridTrackSizingDirection alignmentContextType) const;
+     LayoutUnit marginUnderForGridItem(const RenderBox&, Style::GridTrackSizingDirection alignmentContextType) const;
+     LayoutUnit logicalAscentForGridItem(const RenderBox&, Style::GridTrackSizingDirection alignmentContextType, ItemPosition) const;
+-    LayoutUnit ascentForGridItem(const RenderBox&, Style::GridTrackSizingDirection alignmentContextType, ItemPosition) const;
+-    LayoutUnit descentForGridItem(const RenderBox&, LayoutUnit, Style::GridTrackSizingDirection alignmentContextType, ExtraMarginsFromSubgrids) const;
++    LayoutUnit synthesizedAscentForGridItem(const RenderBox&, Style::GridTrackSizingDirection alignmentContextType) const;
+     bool NODELETE isDescentBaselineForGridItem(const RenderBox&, Style::GridTrackSizingDirection alignmentContextType) const;
+     bool NODELETE isVerticalAlignmentContext(Style::GridTrackSizingDirection alignmentContextType) const;
+     bool NODELETE isOrthogonalGridItemForBaseline(const RenderBox&) const;
+diff --git a/Source/WebCore/rendering/GridLayoutFunctions.cpp b/Source/WebCore/rendering/GridLayoutFunctions.cpp
+index 7bc3e80657e6a25ca0a3eba597e548e8f356c35c..8b225757d71881da70872e25346f39fc3a09f54f 100644
+--- a/Source/WebCore/rendering/GridLayoutFunctions.cpp
++++ b/Source/WebCore/rendering/GridLayoutFunctions.cpp
+@@ -98,12 +98,12 @@ static ExtraMarginsFromSubgrids extraMarginForSubgrid(const RenderGrid& parent,
+     if (!startLine)
+         extraMargins.addTrackStartMargin((direction == Style::GridTrackSizingDirection::Columns) ? parent.marginAndBorderAndPaddingStart() : parent.marginAndBorderAndPaddingBefore());
+     else
+-        extraMargins.addTrackStartMargin((parent.gridGap(direction, availableSpace) - grandParent.gridGap(direction)) / 2);
++        extraMargins.addTrackStartMargin((parent.gridGap(direction, availableSpace) - grandParent.gridGap(flowAwareDirectionForGridItem(parent, grandParent, direction))) / 2);
+ 
+     if (endLine == numTracks)
+         extraMargins.addTrackEndMargin((direction == Style::GridTrackSizingDirection::Columns) ? parent.marginAndBorderAndPaddingEnd() : parent.marginAndBorderAndPaddingAfter());
+     else
+-        extraMargins.addTrackEndMargin((parent.gridGap(direction, availableSpace) - grandParent.gridGap(direction)) / 2);
++        extraMargins.addTrackEndMargin((parent.gridGap(direction, availableSpace) - grandParent.gridGap(flowAwareDirectionForGridItem(parent, grandParent, direction))) / 2);
+ 
+     return extraMargins;
+ }
+@@ -111,9 +111,14 @@ static ExtraMarginsFromSubgrids extraMarginForSubgrid(const RenderGrid& parent,
+ ExtraMarginsFromSubgrids extraMarginForSubgridAncestors(Style::GridTrackSizingDirection direction, const RenderBox& gridItem)
+ {
+     ExtraMarginsFromSubgrids extraMargins;
++    auto& itemParent = downcast<RenderGrid>(*gridItem.parent());
+     for (auto& currentAncestorSubgrid : ancestorSubgridsOfGridItem(gridItem, direction)) {
+-        GridSpan span = currentAncestorSubgrid.gridSpanForGridItem(gridItem, direction);
+-        extraMargins += extraMarginForSubgrid(currentAncestorSubgrid, span.startLine(), span.endLine(), direction);
++        auto ancestorDirection = flowAwareDirectionForGridItem(itemParent, currentAncestorSubgrid, direction);
++        auto span = currentAncestorSubgrid.gridSpanForGridItem(gridItem, ancestorDirection);
++        auto margins = extraMarginForSubgrid(currentAncestorSubgrid, span.startLine(), span.endLine(), ancestorDirection);
++        if (isSubgridReversedDirection(itemParent, direction, currentAncestorSubgrid))
++            margins.reverse();
++        extraMargins += margins;
+     }
+     return extraMargins;
+ }
+@@ -211,14 +216,6 @@ bool isSubgridReversedDirection(const RenderGrid& grid, Style::GridTrackSizingDi
+     return isFlippedDirection(grid, outerDirection) != isFlippedDirection(subgrid, subgridDirection);
+ }
+ 
+-unsigned alignmentContextForBaselineAlignment(const GridSpan& span, const ItemPosition& alignment)
+-{
+-    ASSERT(alignment == ItemPosition::Baseline || alignment == ItemPosition::LastBaseline);
+-    if (alignment == ItemPosition::Baseline)
+-        return span.startLine();
+-    return span.endLine() - 1;
+-}
+-
+ void setOverridingContentSizeForGridItem(const RenderGrid& renderGrid, RenderBox& gridItem, LayoutUnit logicalSize, Style::GridTrackSizingDirection direction)
+ {
+     if (!isOrthogonalGridItem(renderGrid, gridItem))
+diff --git a/Source/WebCore/rendering/GridLayoutFunctions.h b/Source/WebCore/rendering/GridLayoutFunctions.h
+index 9f59456b209a8efee7ac61a0cf9104df138dc6fe..8de2232fac46c87a7f910d62e30bf37ca08bae4c 100644
+--- a/Source/WebCore/rendering/GridLayoutFunctions.h
++++ b/Source/WebCore/rendering/GridLayoutFunctions.h
+@@ -59,6 +59,8 @@ struct ExtraMarginsFromSubgrids {
+         return *this;
+     }
+ 
++    void reverse() { std::swap(m_extraMargins.first, m_extraMargins.second); }
++
+     void addTrackStartMargin(LayoutUnit extraMargin) { m_extraMargins.first += extraMargin; }
+     void addTrackEndMargin(LayoutUnit extraMargin) { m_extraMargins.second += extraMargin; }
+ 
+@@ -84,7 +86,6 @@ bool NODELETE isFlippedDirection(const RenderGrid&, Style::GridTrackSizingDirect
+ bool NODELETE isSubgridReversedDirection(const RenderGrid&, Style::GridTrackSizingDirection outerDirection, const RenderGrid& subgrid);
+ ExtraMarginsFromSubgrids extraMarginForSubgridAncestors(Style::GridTrackSizingDirection, const RenderBox& gridItem);
+ 
+-unsigned NODELETE alignmentContextForBaselineAlignment(const GridSpan&, const ItemPosition& alignment);
+ 
+ bool NODELETE hasAutoMarginsInColumnAxis(const RenderBox&, WritingMode parentWritingMode);
+ bool NODELETE hasAutoMarginsInRowAxis(const RenderBox&, WritingMode parentWritingMode);
 diff --git a/Source/WebCore/rendering/GridTrackSizingAlgorithm.cpp b/Source/WebCore/rendering/GridTrackSizingAlgorithm.cpp
-index 8004ec61378fe96a582562ae1a9a6253f8a9c198..93e7cd758fed82afd96fbea703b7dd11ae889f20 100644
+index 8004ec61378fe96a582562ae1a9a6253f8a9c198..554e604cda65b8d3c9f0d6413b63f0922802db39 100644
 --- a/Source/WebCore/rendering/GridTrackSizingAlgorithm.cpp
 +++ b/Source/WebCore/rendering/GridTrackSizingAlgorithm.cpp
 @@ -40,6 +40,10 @@
@@ -99741,7 +99920,14 @@ index 8004ec61378fe96a582562ae1a9a6253f8a9c198..93e7cd758fed82afd96fbea703b7dd11
  
      if (gridItemMinSize.isAuto()) {
          if (!computedOverflowIsNotScrollable())
-@@ -1322,15 +1361,15 @@ void GridTrackSizingAlgorithm::updateBaselineAlignmentContext(const RenderBox& g
+@@ -1316,26 +1355,22 @@ void GridTrackSizingAlgorithm::updateBaselineAlignmentContext(const RenderBox& g
+     ASSERT(wasSetup());
+     ASSERT(canParticipateInBaselineAlignment(gridItem, alignmentContextType));
+ 
+-    auto align = m_renderGrid->selfAlignmentForGridItem(gridItem, Style::logicalAxis(alignmentContextType)).position();
+-    const auto& span = m_renderGrid->gridSpanForGridItem(gridItem, alignmentContextType);
+-    auto alignmentContext = GridLayoutFunctions::alignmentContextForBaselineAlignment(span, align);
++    auto [align, alignmentContext] = m_renderGrid->baselineAlignmentContextForGridItem(gridItem, alignmentContextType);
      m_baselineAlignment.updateBaselineAlignmentContext(align, alignmentContext, gridItem, alignmentContextType);
  }
  
@@ -99759,8 +99945,14 @@ index 8004ec61378fe96a582562ae1a9a6253f8a9c198..93e7cd758fed82afd96fbea703b7dd11
 +        return std::nullopt;
  
      ASSERT_IMPLIES(alignmentContextType == Style::GridTrackSizingDirection::Rows, !m_renderGrid->isSubgridRows());
-     auto align = m_renderGrid->selfAlignmentForGridItem(gridItem, Style::logicalAxis(alignmentContextType)).position();
-@@ -1460,7 +1499,11 @@ private:
+-    auto align = m_renderGrid->selfAlignmentForGridItem(gridItem, Style::logicalAxis(alignmentContextType)).position();
+-    const auto& span = m_renderGrid->gridSpanForGridItem(gridItem, alignmentContextType);
+-    auto alignmentContext = GridLayoutFunctions::alignmentContextForBaselineAlignment(span, align);
++    auto [align, alignmentContext] = m_renderGrid->baselineAlignmentContextForGridItem(gridItem, alignmentContextType);
+     return m_baselineAlignment.baselineOffsetForGridItem(align, alignmentContext, gridItem, alignmentContextType);
+ }
+ 
+@@ -1460,7 +1495,11 @@ private:
  void IndefiniteSizeStrategy::layoutGridItemForMinSizeComputation(RenderBox& gridItem, bool overrideSizeHasChanged) const
  {
      if (overrideSizeHasChanged && direction() != Style::GridTrackSizingDirection::Columns)
@@ -99772,7 +99964,7 @@ index 8004ec61378fe96a582562ae1a9a6253f8a9c198..93e7cd758fed82afd96fbea703b7dd11
      gridItem.layoutIfNeeded();
  }
  
-@@ -1666,7 +1709,11 @@ void DefiniteSizeStrategy::maximizeTracks(Vector<UniqueRef<GridTrack>>& tracks,
+@@ -1666,7 +1705,11 @@ void DefiniteSizeStrategy::maximizeTracks(Vector<UniqueRef<GridTrack>>& tracks,
  void DefiniteSizeStrategy::layoutGridItemForMinSizeComputation(RenderBox& gridItem, bool overrideSizeHasChanged) const
  {
      if (overrideSizeHasChanged)
@@ -102097,7 +102289,7 @@ index 4fcb18c274244e25bf227cffde32fff4b80dc15a..62cd236ac0264fce597f1f8cd38e75c7
              flexItem.repaintDuringLayoutIfMoved(oldFlexItemRects[index]);
          ++index;
 diff --git a/Source/WebCore/rendering/RenderGrid.cpp b/Source/WebCore/rendering/RenderGrid.cpp
-index e4016aa11263c14ff1ece803b6abdb2d697c2f75..9bf1666ece23ed52c20c02f71f4c9598180ee29a 100644
+index e4016aa11263c14ff1ece803b6abdb2d697c2f75..8531b45126d9b22d52f4e6f937c78765395a173a 100644
 --- a/Source/WebCore/rendering/RenderGrid.cpp
 +++ b/Source/WebCore/rendering/RenderGrid.cpp
 @@ -48,12 +48,24 @@
@@ -102227,7 +102419,38 @@ index e4016aa11263c14ff1ece803b6abdb2d697c2f75..9bf1666ece23ed52c20c02f71f4c9598
  
      if (!baseline) {
          auto direction = isHorizontalWritingMode() ? LineDirection::Horizontal : LineDirection::Vertical;
-@@ -2051,12 +2099,12 @@ const RenderBox* RenderGrid::baselineGridItem(ItemPosition alignment) const
+@@ -2025,6 +2073,20 @@ std::optional<LayoutUnit> RenderGrid::lastLineBaseline() const
+     return logicalTopForChild(*baselineGridItem) + *baseline;
+ }
+ 
++std::pair<ItemPosition, unsigned> RenderGrid::baselineAlignmentContextForGridItem(const RenderBox& gridItem, Style::GridTrackSizingDirection direction) const
++{
++    auto& parentGrid = downcast<RenderGrid>(*gridItem.parent());
++    auto parentAxis = GridLayoutFunctions::flowAwareDirectionForGridItem(*this, parentGrid, direction);
++    auto preference = parentGrid.selfAlignmentForGridItem(gridItem, Style::logicalAxis(parentAxis)).position();
++    ASSERT(isBaselinePosition(preference));
++    auto position = parentAxis == Style::GridTrackSizingDirection::Rows ? parentGrid.columnAxisPositionForGridItem(gridItem) : parentGrid.rowAxisPositionForGridItem(gridItem);
++    auto trackAtStart = position == GridAxisPosition::GridAxisStart;
++    if (GridLayoutFunctions::isFlippedDirection(*this, direction) != GridLayoutFunctions::isFlippedDirection(parentGrid, parentAxis))
++        trackAtStart = !trackAtStart;
++    auto span = gridSpanForGridItem(gridItem, direction);
++    return { preference, trackAtStart ? span.startLine() : span.endLine() - 1 };
++}
++
+ const RenderBox* RenderGrid::baselineGridItem(ItemPosition alignment) const
+ {
+     ASSERT(alignment == ItemPosition::Baseline || alignment == ItemPosition::LastBaseline);
+@@ -2038,8 +2100,7 @@ const RenderBox* RenderGrid::baselineGridItem(ItemPosition alignment) const
+             ASSERT(gridItem.get());
+             // If an item participates in baseline alignment, we select such item.
+             if (isBaselineAlignmentForGridItem(*gridItem, Style::GridTrackSizingDirection::Rows)) {
+-                auto gridItemAlignment = selfAlignmentForGridItem(*gridItem, LogicalBoxAxis::Block).position();
+-                if (rowIndexDeterminingBaseline == GridLayoutFunctions::alignmentContextForBaselineAlignment(gridSpanForGridItem(*gridItem, Style::GridTrackSizingDirection::Rows), gridItemAlignment)) {
++                if (rowIndexDeterminingBaseline == baselineAlignmentContextForGridItem(*gridItem, Style::GridTrackSizingDirection::Rows).second) {
+                     // FIXME: self-baseline and content-baseline alignment not implemented yet.
+                     return gridItem.get();
+                 }
+@@ -2051,12 +2112,12 @@ const RenderBox* RenderGrid::baselineGridItem(ItemPosition alignment) const
      return baselineGridItem;
  }
  
@@ -102242,7 +102465,7 @@ index e4016aa11263c14ff1ece803b6abdb2d697c2f75..9bf1666ece23ed52c20c02f71f4c9598
  
      if (isSubgridRows()) {
          RenderGrid* outer = downcast<RenderGrid>(parent());
-@@ -2067,12 +2115,12 @@ LayoutUnit RenderGrid::columnAxisBaselineOffsetForGridItem(const RenderBox& grid
+@@ -2067,12 +2128,12 @@ LayoutUnit RenderGrid::columnAxisBaselineOffsetForGridItem(const RenderBox& grid
      return m_trackSizingAlgorithm.baselineOffsetForGridItem(gridItem, Style::GridTrackSizingDirection::Rows);
  }
  
@@ -102257,7 +102480,7 @@ index e4016aa11263c14ff1ece803b6abdb2d697c2f75..9bf1666ece23ed52c20c02f71f4c9598
  
      if (isSubgridColumns()) {
          RenderGrid* outer = downcast<RenderGrid>(parent());
-@@ -2179,14 +2227,8 @@ GridAxisPosition RenderGrid::rowAxisPositionForGridItem(const RenderBox& gridIte
+@@ -2179,14 +2240,8 @@ GridAxisPosition RenderGrid::rowAxisPositionForGridItem(const RenderBox& gridIte
      case ItemPosition::Stretch:
          return GridAxisPosition::GridAxisStart;
      case ItemPosition::Baseline:
@@ -102272,7 +102495,7 @@ index e4016aa11263c14ff1ece803b6abdb2d697c2f75..9bf1666ece23ed52c20c02f71f4c9598
          return hasSameDirection ? GridAxisPosition::GridAxisEnd : GridAxisPosition::GridAxisStart;
      case ItemPosition::Legacy:
      case ItemPosition::Auto:
-@@ -2204,16 +2246,18 @@ LayoutUnit RenderGrid::columnAxisOffsetForGridItem(const RenderBox& gridItem, Gr
+@@ -2204,16 +2259,18 @@ LayoutUnit RenderGrid::columnAxisOffsetForGridItem(const RenderBox& gridItem, Gr
      LayoutUnit startPosition = startOfRow + marginBeforeForChild(gridItem);
      LayoutUnit columnAxisGridItemSize = GridLayoutFunctions::isOrthogonalGridItem(*this, gridItem) ? gridItem.logicalWidth() + gridItem.marginLogicalWidth() : gridItem.logicalHeight() + gridItem.marginLogicalHeight();
      LayoutUnit stackingAxisOffset = hasStackingAxisRows() ? gridLanesResult->get().stackingAxisOffsetForGridItem(gridItem) : 0_lu;
@@ -102294,7 +102517,7 @@ index e4016aa11263c14ff1ece803b6abdb2d697c2f75..9bf1666ece23ed52c20c02f71f4c9598
      case GridAxisPosition::GridAxisCenter:
          return startPosition + (offsetFromStartPosition / 2);
      }
-@@ -2230,15 +2274,16 @@ LayoutUnit RenderGrid::rowAxisOffsetForGridItem(const RenderBox& gridItem, GridL
+@@ -2230,15 +2287,16 @@ LayoutUnit RenderGrid::rowAxisOffsetForGridItem(const RenderBox& gridItem, GridL
      if (GridLayoutFunctions::hasAutoMarginsInRowAxis(gridItem, writingMode()))
          return startPosition;
      LayoutUnit rowAxisGridItemSize = GridLayoutFunctions::isOrthogonalGridItem(*this, gridItem) ? gridItem.logicalHeight() + gridItem.marginLogicalHeight() : gridItem.logicalWidth() + gridItem.marginLogicalWidth();
@@ -102315,7 +102538,7 @@ index e4016aa11263c14ff1ece803b6abdb2d697c2f75..9bf1666ece23ed52c20c02f71f4c9598
      case GridAxisPosition::GridAxisCenter:
          return startPosition + offsetFromStartPosition / 2;
      }
-@@ -2704,8 +2749,19 @@ void RenderGrid::updateIntrinsicLogicalHeightsForRowSizingFirstPassCacheAvailabi
+@@ -2704,8 +2762,19 @@ void RenderGrid::updateIntrinsicLogicalHeightsForRowSizingFirstPassCacheAvailabi
  
      if (canCreateIntrinsicLogicalHeightsCacheForRowSizingFirstPass && m_intrinsicLogicalHeightsForRowSizingFirstPass) {
          for (auto& gridItem : childrenOfType<RenderBox>(*this)) {
@@ -102337,10 +102560,18 @@ index e4016aa11263c14ff1ece803b6abdb2d697c2f75..9bf1666ece23ed52c20c02f71f4c9598
      } else if (canCreateIntrinsicLogicalHeightsCacheForRowSizingFirstPass)
          m_intrinsicLogicalHeightsForRowSizingFirstPass.emplace();
 diff --git a/Source/WebCore/rendering/RenderGrid.h b/Source/WebCore/rendering/RenderGrid.h
-index d4011dc069a914499be7b756d26e1fc39e5d1905..ce4ef579e84cee961e36272773e02b031ddec9a0 100644
+index d4011dc069a914499be7b756d26e1fc39e5d1905..1990532a49c02baec4f6fbe7d9b47d05450a3ce4 100644
 --- a/Source/WebCore/rendering/RenderGrid.h
 +++ b/Source/WebCore/rendering/RenderGrid.h
-@@ -269,8 +269,8 @@ private:
+@@ -245,6 +245,7 @@ private:
+ 
+     std::pair<LayoutUnit, LayoutUnit> gridAreaPositionForInFlowGridItem(const RenderBox&, Style::GridTrackSizingDirection) const;
+ 
++    std::pair<ItemPosition, unsigned> baselineAlignmentContextForGridItem(const RenderBox&, Style::GridTrackSizingDirection) const;
+     GridAxisPosition columnAxisPositionForGridItem(const RenderBox&) const;
+     GridAxisPosition rowAxisPositionForGridItem(const RenderBox&) const;
+     LayoutUnit columnAxisOffsetForGridItem(const RenderBox&, GridLanesResultRef) const;
+@@ -269,8 +270,8 @@ private:
      std::optional<LayoutUnit> lastLineBaseline() const final;
      const RenderBox* baselineGridItem(ItemPosition alignment) const;
  
