@@ -42,6 +42,14 @@ curl -sL https://raw.githubusercontent.com/web-platform-tests/wpt.fyi/main/webap
 # (and label=stable), saved with curl --compressed as stp-summary.json / safari-summary.json
 ```
 
+For the combined 2025 and 2026 review, use the saved dashboard configuration
+and the metadata checkout from the review. The combined `labels.json` uses
+year-qualified area names. `all.txt` lists each test URL once across both years.
+
+```sh
+python3 "$KIT/labels.py" wpt-metadata both-years --year 2025 --year 2026 --interop-data interop-data.json
+```
+
 On the test machine (`SUMMIT_REMOTE_DIR`, default `/boot/home/interop`):
 
 1. Extract the Summit packages under test into `xh/` (`package extract` each
