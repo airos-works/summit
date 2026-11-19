@@ -26853,6 +26853,22 @@ index fe92fc6370b31f2f826b8762171186c54700be76..4976d5a2754255636b2c71b899d6482d
      return timestamp <= m_lastAnimationFrameTimestamp || (isThrottledRelativeToPage() && (timestamp - m_lastAnimationFrameTimestamp < preferredScriptedAnimationInterval()));
  }
  
+diff --git a/Source/WebCore/dom/SelectorQuery.cpp b/Source/WebCore/dom/SelectorQuery.cpp
+index e5681b29c8401304c9f8b6fd2af39bd215c6ad60..a6228336ece9513f5ad6775cf89a5500442da186 100644
+--- a/Source/WebCore/dom/SelectorQuery.cpp
++++ b/Source/WebCore/dom/SelectorQuery.cpp
+@@ -83,8 +83,10 @@ template<typename Output> static ALWAYS_INLINE void appendOutputForElement(Outpu
+ 
+ static bool NODELETE canBeUsedForIdFastPath(const CSSSelector& selector)
+ {
++    // The tree scope's ID index only contains nonempty IDs.
+     return selector.match() == CSSSelector::Match::Id
+-        || (selector.match() == CSSSelector::Match::Exact && selector.attribute() == HTMLNames::idAttr && selector.attributeMatchType() != CSSSelector::AttributeMatchType::CaseInsensitive);
++        || (selector.match() == CSSSelector::Match::Exact && selector.attribute() == HTMLNames::idAttr
++            && !selector.value().isEmpty() && selector.attributeMatchType() != CSSSelector::AttributeMatchType::CaseInsensitive);
+ }
+ 
+ static IdMatchingType NODELETE findIdMatchingType(const CSSSelector& firstSelector)
 diff --git a/Source/WebCore/dom/SlotAssignment.cpp b/Source/WebCore/dom/SlotAssignment.cpp
 index b7cc6b07caf172c2c167a081bd963c0c0a894842..1303442c7820d596d0253cd46eba6b7086bddb22 100644
 --- a/Source/WebCore/dom/SlotAssignment.cpp
@@ -31520,6 +31536,86 @@ index bbb54b89194cc6399eba94d1f9ea11ad625d5285..f9883c5c58f83ff0c429d302aab104b0
  
      scheduleRenderingUpdateIfNecessary(*element);
  }
+diff --git a/Source/WebCore/page/LocalDOMWindow.cpp b/Source/WebCore/page/LocalDOMWindow.cpp
+index f3af2c99162d2f25d3aa42786ddc24d827230428..b8b641713a5f26005be2f435046cf3293e7d3170 100644
+--- a/Source/WebCore/page/LocalDOMWindow.cpp
++++ b/Source/WebCore/page/LocalDOMWindow.cpp
+@@ -30,6 +30,7 @@
+ #include "BackForwardController.h"
+ #include "BarProp.h"
+ #include "CSSComputedStyleDeclaration.h"
++#include "CSSMarkup.h"
+ #include "CSSRule.h"
+ #include "CSSRuleList.h"
+ #include "CSSSelectorParser.h"
+@@ -83,6 +84,7 @@
+ #include "FrameLoader.h"
+ #include "FrameTree.h"
+ #include "HTMLFrameOwnerElement.h"
++#include "HTMLNames.h"
+ #include "HTTPParsers.h"
+ #include "History.h"
+ #include "IdleRequestOptions.h"
+@@ -175,6 +177,7 @@
+ #include <wtf/TZoneMallocInlines.h>
+ #include <wtf/URL.h>
+ #include <wtf/text/MakeString.h>
++#include <wtf/text/StringBuilder.h>
+ #include <wtf/text/WTFString.h>
+ 
+ #if ENABLE(USER_MESSAGE_HANDLERS)
+@@ -2804,10 +2807,36 @@ PerformanceEventTimingCandidate LocalDOMWindow::initializeEventTiming(Event& eve
+         .processingEnd = { },
+         .duration = { },
+         .target = { },
++        .targetSelector = { },
+         .interactionID = computeInteractionID(event, type)
+     };
+ }
+ 
++// https://w3c.github.io/event-timing/#generate-a-css-selector
++static String eventTimingTargetSelector(const Node& node)
++{
++    RefPtr element = dynamicDowncast<Element>(node);
++    if (!element)
++        return node.nodeName();
++
++    StringBuilder selector;
++    serializeIdentifier(selector, element->nodeName());
++    auto& id = element->getIdAttribute();
++    if (!id.isNull()) {
++        if (id.isEmpty())
++            selector.append("[id=\"\"]"_s);
++        else {
++            selector.append('#');
++            serializeIdentifier(selector, id);
++        }
++    } else if (auto& src = element->attributeWithoutSynchronization(HTMLNames::srcAttr); !src.isNull()) {
++        selector.append("[src="_s);
++        serializeString(selector, src);
++        selector.append(']');
++    }
++    return selector.toString();
++}
++
+ void LocalDOMWindow::markEndOfProcessingForEventTiming(PerformanceEventTimingCandidate& entry, const Event& event, EventType type)
+ {
+     // Maps to "Finalize event timing" in the spec.
+@@ -2817,9 +2846,11 @@ void LocalDOMWindow::markEndOfProcessingForEventTiming(PerformanceEventTimingCan
+     // Without this, when no event listeners are registered for a given event type,
+     // the event target may be an un-retargeted node inside a user-agent shadow tree
+     // (e.g., an internal node of <input>), leaking shadow DOM internals.
+-    if (RefPtr targetNode = dynamicDowncast<Node>(event.target()))
+-        entry.target = targetNode->document().retargetToScope(*targetNode).get();
+-    else
++    if (RefPtr targetNode = dynamicDowncast<Node>(event.target())) {
++        Ref scopedTarget = targetNode->document().retargetToScope(*targetNode);
++        entry.target = scopedTarget.get();
++        entry.targetSelector = eventTimingTargetSelector(scopedTarget.get());
++    } else
+         entry.target = event.target();
+ 
+     switch (type) {
 diff --git a/Source/WebCore/page/LocalFrameView.cpp b/Source/WebCore/page/LocalFrameView.cpp
 index 2132dee6a2c27be522007bb4df5bc1f5940c1c06..f11f7c790e38d3d0fca5837cf441c436da83b368 100644
 --- a/Source/WebCore/page/LocalFrameView.cpp
@@ -32596,6 +32692,70 @@ index 12c38036f87636c92b0cdde24c1ee546f36ac008..7dbc2ddc2fc32c946b8dc365cdb6f886
      UNUSED_PARAM(context);
  
  #if USE(GRAPHICS_CONTEXT_FILTERS)
+diff --git a/Source/WebCore/page/PerformanceEventTiming.cpp b/Source/WebCore/page/PerformanceEventTiming.cpp
+index c89a31f1a0aadb55542d3971658a2885e0a8b92d..cf8acd31125ed2bb63f41af6567219dd33e4dde6 100644
+--- a/Source/WebCore/page/PerformanceEventTiming.cpp
++++ b/Source/WebCore/page/PerformanceEventTiming.cpp
+@@ -47,6 +47,7 @@ PerformanceEventTiming::PerformanceEventTiming(const PerformanceEventTimingCandi
+     , m_processingEnd(candidate.processingEnd)
+     , m_interactionID(candidate.interactionID)
+     , m_target(candidate.target)
++    , m_targetSelector(candidate.targetSelector)
+ { }
+ 
+ PerformanceEventTiming::~PerformanceEventTiming() = default;
+diff --git a/Source/WebCore/page/PerformanceEventTiming.h b/Source/WebCore/page/PerformanceEventTiming.h
+index b057765611b2029bbf9eb192ba4e91c50ad5abd9..7e0df60932e51f87afd5b4fcb828ec7cc923096f 100644
+--- a/Source/WebCore/page/PerformanceEventTiming.h
++++ b/Source/WebCore/page/PerformanceEventTiming.h
+@@ -47,6 +47,7 @@ public:
+     DOMHighResTimeStamp processingEnd() const { return m_processingEnd.milliseconds(); }
+     bool cancelable() const { return m_cancelable; }
+     RefPtr<Node> target() const;
++    const String& targetSelector() const { return m_targetSelector; }
+     uint64_t NODELETE interactionId() const;
+ 
+     Type NODELETE performanceEntryType() const final;
+@@ -66,6 +67,7 @@ private:
+     ReducedResolutionSeconds m_processingEnd;
+     EventTimingInteractionID m_interactionID;
+     WeakPtr<EventTarget, EventTarget::WeakPtrImplType> m_target;
++    String m_targetSelector;
+ };
+ 
+ } // namespace WebCore
+diff --git a/Source/WebCore/page/PerformanceEventTiming.idl b/Source/WebCore/page/PerformanceEventTiming.idl
+index 573e82705d072fd7ec54f378c8b814225b0ec5cc..d84e9e86370ebef3d4b7c176b4c3798930abe338 100644
+--- a/Source/WebCore/page/PerformanceEventTiming.idl
++++ b/Source/WebCore/page/PerformanceEventTiming.idl
+@@ -35,6 +35,7 @@ typedef double DOMHighResTimeStamp;
+     readonly attribute DOMHighResTimeStamp processingEnd;
+     readonly attribute boolean cancelable;
+     readonly attribute Node? target;
++    readonly attribute DOMString targetSelector;
+     readonly attribute unsigned long long interactionId;
+     [Default] object toJSON();
+ };
+diff --git a/Source/WebCore/page/PerformanceEventTimingCandidate.h b/Source/WebCore/page/PerformanceEventTimingCandidate.h
+index 794ed4090c5f4d97b1fb8c098965b1735e19b20c..c58ab61f841f3c0c6737c18abf9015cee2bc32ea 100644
+--- a/Source/WebCore/page/PerformanceEventTimingCandidate.h
++++ b/Source/WebCore/page/PerformanceEventTimingCandidate.h
+@@ -29,6 +29,7 @@
+ #include <WebCore/EventTimingInteractionID.h>
+ #include <wtf/ReducedResolutionSeconds.h>
+ #include <wtf/WeakPtr.h>
++#include <wtf/text/WTFString.h>
+ 
+ namespace WebCore {
+ 
+@@ -42,6 +43,7 @@ struct PerformanceEventTimingCandidate {
+     ReducedResolutionSeconds processingEnd;
+     Seconds duration;
+     WeakPtr<EventTarget, EventTarget::WeakPtrImplType> target;
++    String targetSelector;
+     EventTimingInteractionID interactionID;
+ };
+ 
 diff --git a/Source/WebCore/page/PointerCaptureController.cpp b/Source/WebCore/page/PointerCaptureController.cpp
 index 8f6e1c689e7c8d043c84b5704a113e358c1c71bc..e9a97a0b1409adb17857cf848ef82b41449bb6c5 100644
 --- a/Source/WebCore/page/PointerCaptureController.cpp
