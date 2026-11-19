@@ -99525,7 +99525,7 @@ index 455aef736779facc0f165ddf7495622cc59b6160..c0a99de127da8efd90265687d52a1c37
  
  inline bool PositionedLayoutConstraints::isOpposing() const
 diff --git a/Source/WebCore/rendering/RenderBlock.cpp b/Source/WebCore/rendering/RenderBlock.cpp
-index 0ff11fddb608c1b65d17189a08c8ffa40c284e90..a4d6e90c3f2cc51ed933ae7cb06618071733a041 100644
+index 0ff11fddb608c1b65d17189a08c8ffa40c284e90..1683cacf7ce6ef0c6e30fb648f5005fcbd2e12d4 100644
 --- a/Source/WebCore/rendering/RenderBlock.cpp
 +++ b/Source/WebCore/rendering/RenderBlock.cpp
 @@ -93,6 +93,11 @@
@@ -100536,6 +100536,19 @@ index 0ff11fddb608c1b65d17189a08c8ffa40c284e90..a4d6e90c3f2cc51ed933ae7cb0661807
      };
  
      return style.floating() != Float::None
+@@ -2394,6 +3367,12 @@ void RenderBlock::computeIntrinsicLogicalWidthContributions()
+         applyAutomaticContentBasedMinimumSize(m_minContentLogicalWidthContribution, m_maxContentLogicalWidthContribution);
+     } else {
+         auto [minContentLogicalWidth, maxContentLogicalWidth] = computeIntrinsicLogicalWidths();
++        if (logicalWidth.isAuto() && !shouldApplySizeOrInlineSizeContainment()
++            && (styleToUse.usedAppearance() == StyleAppearance::Checkbox || styleToUse.usedAppearance() == StyleAppearance::Radio)) {
++            auto naturalWidth = adjustContentBoxLogicalWidthForBoxSizing(intrinsicLogicalWidth());
++            minContentLogicalWidth = std::max(minContentLogicalWidth, naturalWidth);
++            maxContentLogicalWidth = std::max(maxContentLogicalWidth, naturalWidth);
++        }
+ 
+         if (overridingLogicalWidthForFlexBasisComputation() && logicalWidth.isCalcSize() && logicalWidth.isAuto()) {
+             // A flex-basis used as the main size, where `auto` means the width property rather than the width this box would otherwise take.
 diff --git a/Source/WebCore/rendering/RenderBlockFlow.cpp b/Source/WebCore/rendering/RenderBlockFlow.cpp
 index 820170c9ccbad7e487a557bcd6549aaeaeb0d9b0..7996a4aa1830960e51de28b8e426f7155bda0ffc 100644
 --- a/Source/WebCore/rendering/RenderBlockFlow.cpp
@@ -100943,7 +100956,7 @@ index 820170c9ccbad7e487a557bcd6549aaeaeb0d9b0..7996a4aa1830960e51de28b8e426f715
  }
  
 diff --git a/Source/WebCore/rendering/RenderBox.cpp b/Source/WebCore/rendering/RenderBox.cpp
-index b69c7bf9751cc17db10467583c079ebdedd9f1ae..e85d7df59745b36ff2cad87e71e6fade62e82a9c 100644
+index b69c7bf9751cc17db10467583c079ebdedd9f1ae..ceccd5eaa3071cf057b3fdef65bd4e97fcd7aee4 100644
 --- a/Source/WebCore/rendering/RenderBox.cpp
 +++ b/Source/WebCore/rendering/RenderBox.cpp
 @@ -132,6 +132,24 @@
@@ -101118,7 +101131,20 @@ index b69c7bf9751cc17db10467583c079ebdedd9f1ae..e85d7df59745b36ff2cad87e71e6fade
              view().repaintRootContents();
              if (Style::hasEntirelyFixedBackground(oldStyle->backgroundLayers()) != Style::hasEntirelyFixedBackground(newStyle.backgroundLayers()))
                  view().compositor().rootLayerConfigurationChanged();
-@@ -3559,7 +3709,11 @@ LayoutUnit RenderBox::computeIntrinsicLogicalHeight()
+@@ -3474,6 +3624,12 @@ RenderBox::LogicalExtentComputedValues RenderBox::computeLogicalHeight(LayoutUni
+ 
+         if (intrinsicHeight)
+             *intrinsicHeight -= borderAndPaddingLogicalHeight();
++        if (computedLogicalHeight.isAuto() && !shouldApplySizeContainment()
++            && (style().usedAppearance() == StyleAppearance::Checkbox || style().usedAppearance() == StyleAppearance::Radio)) {
++            auto naturalHeight = adjustContentBoxLogicalHeightForBoxSizing(intrinsicLogicalHeight());
++            intrinsicHeight = std::max(intrinsicHeight.value_or(0_lu), naturalHeight);
++            computedValues.extent = *intrinsicHeight + borderAndPaddingLogicalHeight();
++        }
+         auto mainOrPreferredHeight = computeLogicalHeightUsing(computedLogicalHeight, intrinsicHeight).value_or(computedValues.extent);
+         return constrainLogicalHeightByMinMax(mainOrPreferredHeight, intrinsicHeight, isComputingIntrinsicSize);
+     };
+@@ -3559,7 +3715,11 @@ LayoutUnit RenderBox::computeIntrinsicLogicalHeight()
      // height. A descendant that does not resolve against this box's logical height is unaffected and need not lay out again.
      layoutIfNeeded();
      auto blockSize = logicalHeight();
@@ -104083,7 +104109,7 @@ index 22d96170539d88e1dec6f45bd98c269eb1b526e3..d637fa7e85d0d5a09667eaedff83359b
      CascadeLayerName m_resolvedCascadeLayerName;
      HashMap<CascadeLayerName, RuleSet::CascadeLayerIdentifier> m_cascadeLayerIdentifierMap;
 diff --git a/Source/WebCore/style/StyleAdjuster.cpp b/Source/WebCore/style/StyleAdjuster.cpp
-index 0656f3ce6877d1b6a86f05c8fdc5515a0a450d32..e7540f3bf0f7c1582d3c7a8374f21b4378b054e5 100644
+index 0656f3ce6877d1b6a86f05c8fdc5515a0a450d32..297bb6db8d9898ffdc19ef632c1907209a962431 100644
 --- a/Source/WebCore/style/StyleAdjuster.cpp
 +++ b/Source/WebCore/style/StyleAdjuster.cpp
 @@ -332,11 +332,6 @@ OptionSet<EventListenerRegionType> Adjuster::computeEventListenerRegionTypes(con
@@ -104140,6 +104166,23 @@ index 0656f3ce6877d1b6a86f05c8fdc5515a0a450d32..e7540f3bf0f7c1582d3c7a8374f21b43
      }
  
      // Call setStylesForPaginationMode() if a pagination mode is set for any non-root elements. If these
+@@ -1052,6 +1036,16 @@ void Adjuster::adjustThemeStyle(Style::ComputedStyle& style, const Style::Comput
+ 
+     RenderTheme::singleton().adjustStyle(style, parentStyle, m_element.get());
+ 
++    // Flex and grid layout need the automatic axes to resolve stretching. The
++    // theme supplies the natural dimensions during intrinsic size calculation.
++    if ((style.usedAppearance() == StyleAppearance::Checkbox || style.usedAppearance() == StyleAppearance::Radio)
++        && m_parentBoxStyle.display().isFlexibleOrGridFormattingContextBox() && !style.hasOutOfFlowPosition()) {
++        if (isOldWidthAuto)
++            style.setWidth(CSS::Keyword::Auto { });
++        if (isOldHeightAuto)
++            style.setHeight(CSS::Keyword::Auto { });
++    }
++
+     if (style.usedAppearance() == StyleAppearance::None || style.usedAppearance() == StyleAppearance::Base)
+         return;
+ 
 diff --git a/Source/WebCore/style/StyleDifference.cpp b/Source/WebCore/style/StyleDifference.cpp
 index 3e48388cf2c59e21ffb1a3cbef6f7bfb41fe6c37..d8836ff456f6ef7e7e95882728efd472719bd1cd 100644
 --- a/Source/WebCore/style/StyleDifference.cpp
