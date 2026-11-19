@@ -69456,7 +69456,7 @@ index 776466ea87d3d721d32ac4e52db702bb2b544e46..6684517a6c57ba91fbb37fb77648b4d7
      m_skiaGLContexts.add(*s_skiaGLContext);
  }
 diff --git a/Source/WebCore/platform/graphics/skia/SkiaHarfBuzzFont.cpp b/Source/WebCore/platform/graphics/skia/SkiaHarfBuzzFont.cpp
-index daeed3e5dc0bf77c433fb0df23a09ecf4a677d10..b82600ddb9fc56c5f5a24efe5048378fed16107a 100644
+index daeed3e5dc0bf77c433fb0df23a09ecf4a677d10..8b6ddc0b5d0b8dc714e552274b67740d9d788538 100644
 --- a/Source/WebCore/platform/graphics/skia/SkiaHarfBuzzFont.cpp
 +++ b/Source/WebCore/platform/graphics/skia/SkiaHarfBuzzFont.cpp
 @@ -33,6 +33,7 @@
@@ -69467,7 +69467,7 @@ index daeed3e5dc0bf77c433fb0df23a09ecf4a677d10..b82600ddb9fc56c5f5a24efe5048378f
  
  WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
  #include <skia/core/SkStream.h>
-@@ -194,11 +195,40 @@ std::optional<hb_codepoint_t> SkiaHarfBuzzFont::glyph(hb_codepoint_t unicode, st
+@@ -194,11 +195,42 @@ std::optional<hb_codepoint_t> SkiaHarfBuzzFont::glyph(hb_codepoint_t unicode, st
      return std::nullopt;
  }
  
@@ -69478,10 +69478,12 @@ index daeed3e5dc0bf77c433fb0df23a09ecf4a677d10..b82600ddb9fc56c5f5a24efe5048378f
 +// WebKitGTK too; CoreText's widths are exact). The parent font holds the
 +// face at its own scale, with the typeface's variations, so its advance is
 +// the design one. Only rounding noise is replaced: hinted widths and synthetic
-+// bold keep Skia's.
++// bold keep Skia's. FreeType also uses linear advances for antialiased
++// light hinting, even when the SkFont has not requested linear metrics.
 +SkScalar SkiaHarfBuzzFont::exactWidthHaiku(const SkFont& font, hb_codepoint_t glyph, SkScalar width) const
 +{
-+    if (!font.isLinearMetrics() || font.isEmbolden())
++    bool usesLightHinting = font.getEdging() != SkFont::Edging::kAlias && font.getHinting() == SkFontHinting::kSlight;
++    if (font.isEmbolden() || (!font.isLinearMetrics() && !usesLightHinting))
 +        return width;
 +    auto* parent = hb_font_get_parent(m_font.get());
 +    int xScale = 0;
@@ -69508,7 +69510,7 @@ index daeed3e5dc0bf77c433fb0df23a09ecf4a677d10..b82600ddb9fc56c5f5a24efe5048378f
      return skScalarToHarfBuzzPosition(width);
  }
  
-@@ -218,6 +248,12 @@ void SkiaHarfBuzzFont::glyphWidths(unsigned count, const hb_codepoint_t* glyphs,
+@@ -218,6 +250,12 @@ void SkiaHarfBuzzFont::glyphWidths(unsigned count, const hb_codepoint_t* glyphs,
          for (unsigned i = 0; i < count; ++i)
              widths[i] = SkScalarRoundToInt(widths[i]);
      }
