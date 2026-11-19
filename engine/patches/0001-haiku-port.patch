@@ -25046,6 +25046,44 @@ index d073fc72fc5f38f819baff14ee07cd871e2c8e27..c1296f7f4d14a6c3898ca82dcb49e18f
      void didMutateRuleFromCSSStyleDeclaration();
      void didMutate();
      
+diff --git a/Source/WebCore/dom/CaretPosition.cpp b/Source/WebCore/dom/CaretPosition.cpp
+index 624fb5b85a5aeea5c069e0c48c738e2eaee68281..98f704405fbb5de03622631735d6831e69946efb 100644
+--- a/Source/WebCore/dom/CaretPosition.cpp
++++ b/Source/WebCore/dom/CaretPosition.cpp
+@@ -26,10 +26,16 @@
+ #include "config.h"
+ #include "CaretPosition.h"
+ 
++#include "ContainerNodeInlines.h"
+ #include "DOMRect.h"
++#include "Document.h"
++#include "HTMLTextFormControlElement.h"
+ #include "Range.h"
++#include "RenderElement.h"
+ #include "ScriptWrappableInlines.h"
+ #include "SimpleRange.h"
++#include "TextControlInnerElements.h"
++#include "VisiblePosition.h"
+ #include <wtf/TZoneMallocInlines.h>
+ 
+ namespace WebCore {
+@@ -47,6 +53,16 @@ RefPtr<DOMRect> CaretPosition::getClientRect()
+     if (!m_offsetNode)
+         return nullptr;
+ 
++    if (RefPtr control = dynamicDowncast<HTMLTextFormControlElement>(m_offsetNode)) {
++        control->document().updateLayout();
++        CheckedPtr renderer = control->renderer();
++        if (!renderer || !control->innerTextElement() || m_offset > control->value()->length())
++            return nullptr;
++        FloatRect rect = control->visiblePositionForIndex(m_offset).absoluteCaretBounds();
++        control->document().convertAbsoluteToClientRect(rect, renderer->style());
++        return DOMRect::create(rect);
++    }
++
+     return Range::boundingClientRect(SimpleRange { BoundaryPoint { *m_offsetNode, m_offset }, BoundaryPoint { *m_offsetNode, m_offset } });
+ }
+ 
 diff --git a/Source/WebCore/dom/DataTransfer.cpp b/Source/WebCore/dom/DataTransfer.cpp
 index a7339e182f59f517e27c3c754bb13a0fd9d64576..4260356cb468093d4bb496f1b8df012db96c286c 100644
 --- a/Source/WebCore/dom/DataTransfer.cpp
@@ -25195,7 +25233,7 @@ index 25d1a39c50333e9d5c5f48936cf1d9bad22d09d8..6025a0f1ed9ea0e138b59a0c6a8870b4
      }
  
 diff --git a/Source/WebCore/dom/Document.cpp b/Source/WebCore/dom/Document.cpp
-index 79f2bcbc106c7c43e8a971816c183dcc00610b83..16bd94d0dec69b9581249394a66341ef487017ab 100644
+index 79f2bcbc106c7c43e8a971816c183dcc00610b83..a8882810627b9dcc8f3c7cca51ce809d32d60d04 100644
 --- a/Source/WebCore/dom/Document.cpp
 +++ b/Source/WebCore/dom/Document.cpp
 @@ -384,6 +384,7 @@
@@ -25242,6 +25280,20 @@ index 79f2bcbc106c7c43e8a971816c183dcc00610b83..16bd94d0dec69b9581249394a66341ef
  
      if (m_logger)
          m_logger->removeObserver(*this);
+@@ -2374,10 +2397,10 @@ RefPtr<CaretPosition> Document::caretPositionFromPoint(double x, double y, Caret
+         return nullptr;
+ 
+     RefPtr anchorNode = position.anchorNode();
+-    if (CheckedPtr textFormControl = dynamicDowncast<HTMLTextFormControlElement>(anchorNode->shadowHost())) {
++    if (RefPtr textFormControl = dynamicDowncast<HTMLTextFormControlElement>(anchorNode->shadowHost())) {
+         anchorNode = textFormControl.get();
+-        if ((!anchorNode->isInShadowTree() && !options.shadowRoots.size()) || (anchorNode->isInShadowTree() && options.shadowRoots.contains(Ref(anchorNode->treeScope().rootNode()))))
+-            return CaretPosition::create(WTF::move(anchorNode), position.offsetInContainerNode());
++        if (!anchorNode->isInShadowTree() || options.shadowRoots.contains(Ref(anchorNode->treeScope().rootNode())))
++            return CaretPosition::create(WTF::move(anchorNode), textFormControl->indexForVisiblePosition(position));
+     }
+ 
+     bool adjustPosition = false;
 @@ -2835,6 +2858,17 @@ void Document::updateRenderTree(std::unique_ptr<Style::Update> styleUpdate)
  
  void Document::resolveStyle(ResolveStyleType type)
