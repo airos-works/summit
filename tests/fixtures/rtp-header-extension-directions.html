@@ -1,0 +1,54 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>RTP header extension directions in offer and answer</title>
+<pre id="result"></pre>
+<script>
+const audioLevel = 'urn:ietf:params:rtp-hdrext:ssrc-audio-level';
+const videoDescriptor = 'https://aomediacodec.github.io/av1-rtp-spec/#dependency-descriptor-rtp-header-extension';
+
+function sdpDirection(description, uri) {
+    const line = description.sdp.split(/\r?\n/).find(line =>
+        line.startsWith('a=extmap:') && line.split(' ')[1] === uri);
+    return line ? line.split(' ')[0].split('/')[1] || 'sendrecv' : 'stopped';
+}
+
+async function check(kind, uri, requested) {
+    const sender = new RTCPeerConnection();
+    const receiver = new RTCPeerConnection();
+    const extension = list => list.find(item => item.uri === uri);
+    try {
+        const local = sender.addTransceiver(kind);
+        const preferences = local.getHeaderExtensionsToNegotiate();
+        extension(preferences).direction = requested;
+        local.setHeaderExtensionsToNegotiate(preferences);
+        const configured = extension(local.getHeaderExtensionsToNegotiate()).direction;
+
+        await sender.setLocalDescription();
+        await receiver.setRemoteDescription(sender.localDescription);
+        const remote = receiver.getTransceivers()[0];
+        const pending = [local, remote].every(t => t.getNegotiatedHeaderExtensions().length === 0);
+        await receiver.setLocalDescription();
+        await sender.setRemoteDescription(receiver.localDescription);
+
+        // Summit's backend can negotiate an optional extension bidirectionally or disable it.
+        const expected = requested === 'sendrecv' ? 'sendrecv' : 'stopped';
+        return pending && [
+            configured, sdpDirection(sender.localDescription, uri), sdpDirection(receiver.localDescription, uri),
+            extension(local.getNegotiatedHeaderExtensions()).direction,
+            extension(remote.getNegotiatedHeaderExtensions()).direction
+        ].every(direction => direction === expected);
+    } finally {
+        sender.close();
+        receiver.close();
+    }
+}
+
+(async () => {
+    const checks = {};
+    for (const [kind, uri] of [['audio', audioLevel], ['video', videoDescriptor]]) {
+        for (const direction of ['sendrecv', 'sendonly', 'recvonly', 'inactive', 'stopped'])
+            checks[kind + ' ' + direction] = await check(kind, uri, direction);
+    }
+    document.getElementById('result').textContent = JSON.stringify(checks);
+})().catch(error => { document.getElementById('result').textContent = String(error); });
+</script>
