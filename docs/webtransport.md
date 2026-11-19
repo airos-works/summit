@@ -76,14 +76,34 @@ Engine side, in `Source/WebKit/NetworkProcess/webtransport/haiku/`:
 - `defaultWebTransportEnabled()` is on for Haiku when the engine was built
   with the libraries.
 
-Build: `Source/WebKit/PlatformHaiku.cmake` looks for ngtcp2,
-`ngtcp2_crypto_ossl` and nghttp3 (air/OS ships them for its HTTP/3 curl);
-without them (stock Haiku) the files build without QUIC and WebTransport
-stays off. `-DHAIKU_QUIC_ROOT=DIR` points at a tree with `develop/headers`
-and `develop/lib` when they are not in the sysroot: air/OS CI passes its
-dependency prefix (airos-ci `summit/build-engine.sh`), where the image's
-`airos_ngtcp2` and `airos_nghttp3` come from. `summit_webkit` then requires
-`lib:libngtcp2`, `lib:libngtcp2_crypto_ossl` and `lib:libnghttp3`.
+## Building on Haiku
+
+The modern native builder uses the installed ngtcp2, ngtcp2_crypto_ossl and
+nghttp3 libraries when available. On stock Haiku with OpenSSL 3.5 or newer,
+it can build these three archives from pinned upstream sources and link them
+into libWebKit. The resulting bundle includes the ngtcp2, nghttp3 and sfparse
+notices. Its x86-64 engine package requires `openssl3 >= 3.5` for the QUIC
+TLS functions.
+
+For a stock cross build, set the target compiler, binutils and OpenSSL flags
+in the SDK environment. Run the helper with a dependency directory dedicated
+to that SDK and pass the printed prefix to WebKit's CMake configuration.
+
+```sh
+quic_root=$(python3 tools/prepare-webtransport-libs.py --host "$TRIPLET" --deps-dir "$SDK_DEPS")
+# Add this to the existing WebKit CMake configure command:
+#   -DHAIKU_QUIC_ROOT="$quic_root"
+```
+
+The helper accepts `--archive-dir DIR` for offline builds and checks the
+SHA-256 digest of both release tarballs. The prefix contains `develop/headers`,
+`develop/lib` and `share/licenses`. The native builder also accepts an explicit
+`-DHAIKU_QUIC_ROOT=DIR` through `SUMMIT_ENGINE_CMAKE_EXTRA`.
+
+The separate airos-ci release workflow supplies its shared library prefix on
+air/OS. Those packages depend on `lib:libngtcp2`, `lib:libngtcp2_crypto_ossl`
+and `lib:libnghttp3`. Its stock Haiku release build still needs to call the
+helper, supply the prefix and include the notices and OpenSSL requirement.
 
 Traps found on the way: ngtcp2's `stream_stop_sending` callback is about
 our own STOP_SENDING; the server's is `recv_stop_sending`. GCC cannot turn

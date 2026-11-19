@@ -150,6 +150,17 @@ def engine_inputs(inputs):
                 raise RuntimeError('Public FFmpeg header differs from its manifest: ' + relative)
             paths.append(path)
     configuration = dict(expected)
+    if cache.get('HAIKU_QUIC_ROOT'):
+        prefix = pathlib.Path(cache['HAIKU_QUIC_ROOT'])
+        report_path = prefix / 'summit-webtransport-manifest.json'
+        if report_path.is_file() and cache.get('HAIKU_NGTCP2_LIBRARY') == str(prefix / 'develop/lib/libngtcp2.a'):
+            paths.append(report_path)
+            for relative, expected_hash in json.loads(report_path.read_text()).items():
+                path = prefix / relative
+                if not path.is_relative_to(prefix) or '..' in pathlib.Path(relative).parts or digest(path) != expected_hash:
+                    raise RuntimeError('Private WebTransport input differs from its manifest: ' + relative)
+                paths.append(path)
+            configuration['HAIKU_QUIC_ROOT'] = str(prefix)
     for key in ('USE_MIMALLOC', 'USE_SYSTEM_MALLOC', 'USE_SKIA',
                 'USE_HAIKU_GL_COMPOSITING', 'ENABLE_ASYNC_SCROLLING', 'CMAKE_CXX_FLAGS',
                 'ENABLE_MEDIA_SOURCE', 'ENABLE_FULLSCREEN_API', 'ENABLE_CANVAS_HIT_REGIONS', 'ENABLE_OFFSCREEN_CANVAS',
@@ -262,6 +273,17 @@ def freeze(work, inputs, commands, before, configuration, build, executable_name
             if digest(bundle / 'licenses/libzip/zip.h') != before[str(LIBZIP / 'include/zip.h')]:
                 raise RuntimeError('The libzip license header changed during copying')
             assets.append('licenses/libzip/zip.h')
+        if configuration.get('HAIKU_QUIC_ROOT'):
+            prefix = pathlib.Path(configuration['HAIKU_QUIC_ROOT'])
+            for name in ('ngtcp2/COPYING', 'nghttp3/COPYING', 'nghttp3/sfparse-COPYING'):
+                source = prefix / 'share/licenses' / name
+                relative = 'licenses/' + name
+                destination = bundle / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, destination)
+                if digest(destination) != before[str(source)]:
+                    raise RuntimeError('The WebTransport license changed during copying: ' + name)
+                assets.append(relative)
         if 'ffmpeg_headers' in inputs and configuration.get('ENABLE_MEDIA_SOURCE') == 'ON':
             for source in sorted((FFMPEG_HEADERS / 'share/licenses').rglob('*')):
                 if not source.is_file():

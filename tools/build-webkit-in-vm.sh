@@ -104,6 +104,19 @@ if [[ $SUMMIT_ENGINE_MODE != legacy ]]; then
         bash "$SUMMIT_REMOTE_SHELL" 'tar -xf - -C /boot/home/summit && python3.10 /boot/home/summit/tools/prepare-image-codecs.py'
     tar -cf - tools/prepare-ffmpeg-headers.py engine/ffmpeg-headers.lock.json |
         bash "$SUMMIT_REMOTE_SHELL" 'tar -xf - -C /boot/home/summit && python3.10 /boot/home/summit/tools/prepare-ffmpeg-headers.py'
+    if [[ " $SUMMIT_ENGINE_CMAKE_EXTRA " != *" -DHAIKU_QUIC_ROOT="* ]]; then
+        tar -cf - tools/prepare-webtransport-libs.py |
+            bash "$SUMMIT_REMOTE_SHELL" 'tar -xf - -C /boot/home/summit'
+        SUMMIT_QUIC_ROOT=$(bash "$SUMMIT_REMOTE_SHELL" '
+            if ! pkg-config --exists libngtcp2 libngtcp2_crypto_ossl libnghttp3 && pkg-config --atleast-version=3.5 openssl; then
+                python3.10 /boot/home/summit/tools/prepare-webtransport-libs.py --jobs '"$SUMMIT_WEBKIT_JOBS"'
+            fi')
+        if [[ -n $SUMMIT_QUIC_ROOT && ! $SUMMIT_QUIC_ROOT =~ ^/boot/home/summit-deps/[a-z0-9.-]+$ ]]; then
+            echo "Unexpected private WebTransport prefix: $SUMMIT_QUIC_ROOT" >&2
+            exit 1
+        fi
+        SUMMIT_ENGINE_CMAKE_EXTRA+=" -DHAIKU_QUIC_ROOT=$SUMMIT_QUIC_ROOT"
+    fi
 fi
 python3 tools/prepare-webkit.py
 SUMMIT_ENGINE_PATCH_SHA=$(python3 -c 'import json; print(json.load(open("engine/sources.lock.json"))["patch"]["sha256"])')

@@ -117256,10 +117256,10 @@ index 0000000000000000000000000000000000000000..abdba4dff009ff314eecd9f825a128aa
 +} // namespace WebKit
 diff --git a/Source/WebKit/PlatformHaiku.cmake b/Source/WebKit/PlatformHaiku.cmake
 new file mode 100644
-index 0000000000000000000000000000000000000000..bc0cb34000503fd32da0cbf4b71686f50248fca6
+index 0000000000000000000000000000000000000000..2cb80a3b4a1100ed62c19df0dbbdb5a1d1358992
 --- /dev/null
 +++ b/Source/WebKit/PlatformHaiku.cmake
-@@ -0,0 +1,620 @@
+@@ -0,0 +1,629 @@
 +include(Headers.cmake)
 +include(Platform/Curl.cmake)
 +
@@ -117852,7 +117852,7 @@ index 0000000000000000000000000000000000000000..bc0cb34000503fd32da0cbf4b71686f5
 +# WebTransport over HTTP/3 (Summit #176): QUIC from ngtcp2 on OpenSSL 3.5's
 +# QUIC TLS interface, QPACK from nghttp3; the session and stream protocol
 +# are the port's own (NetworkProcess/webtransport/haiku). Without the
-+# libraries (stock Haiku) the files build without QUIC and WebTransport stays
++# libraries the files build without QUIC and WebTransport stays
 +# off. HAIKU_QUIC_ROOT points at a tree with develop/headers and develop/lib
 +# when the libraries are not in the sysroot.
 +list(APPEND WebKit_SOURCES
@@ -117860,8 +117860,15 @@ index 0000000000000000000000000000000000000000..bc0cb34000503fd32da0cbf4b71686f5
 +    NetworkProcess/webtransport/haiku/NetworkTransportStreamHaiku.cpp
 +    NetworkProcess/webtransport/haiku/WebTransportQuicConnectionHaiku.cpp
 +)
++# An existing CMake build can switch between the SDK and a private prefix.
++if (NOT "${HAIKU_QUIC_ROOT}" STREQUAL "${_HAIKU_LAST_QUIC_ROOT}")
++    foreach (_entry HAIKU_NGTCP2_INCLUDE_DIR HAIKU_NGHTTP3_INCLUDE_DIR HAIKU_NGTCP2_LIBRARY HAIKU_NGTCP2_CRYPTO_OSSL_LIBRARY HAIKU_NGHTTP3_LIBRARY)
++        unset(${_entry} CACHE)
++    endforeach ()
++    set(_HAIKU_LAST_QUIC_ROOT "${HAIKU_QUIC_ROOT}" CACHE INTERNAL "Last configured Haiku QUIC prefix")
++endif ()
 +if (HAIKU_QUIC_ROOT)
-+    set(_haiku_quic_find_options PATHS "${HAIKU_QUIC_ROOT}/develop/headers" "${HAIKU_QUIC_ROOT}/develop/lib" NO_CMAKE_FIND_ROOT_PATH)
++    set(_haiku_quic_find_options PATHS "${HAIKU_QUIC_ROOT}/develop/headers" "${HAIKU_QUIC_ROOT}/develop/lib" NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
 +endif ()
 +find_path(HAIKU_NGTCP2_INCLUDE_DIR ngtcp2/ngtcp2_crypto_ossl.h ${_haiku_quic_find_options})
 +find_path(HAIKU_NGHTTP3_INCLUDE_DIR nghttp3/nghttp3.h ${_haiku_quic_find_options})
@@ -117875,6 +117882,8 @@ index 0000000000000000000000000000000000000000..bc0cb34000503fd32da0cbf4b71686f5
 +        COMPILE_DEFINITIONS HAVE_HAIKU_WEBTRANSPORT_QUIC=1
 +        INCLUDE_DIRECTORIES "${HAIKU_NGTCP2_INCLUDE_DIR};${HAIKU_NGHTTP3_INCLUDE_DIR}"
 +    )
++    # Keep private archive symbols out of the embedding application's namespace.
++    target_link_options(WebKit PRIVATE "LINKER:--exclude-libs,libngtcp2_crypto_ossl.a:libngtcp2.a:libnghttp3.a")
 +    list(APPEND WebKit_LIBRARIES ${HAIKU_NGTCP2_CRYPTO_OSSL_LIBRARY} ${HAIKU_NGTCP2_LIBRARY} ${HAIKU_NGHTTP3_LIBRARY} OpenSSL::SSL OpenSSL::Crypto)
 +else ()
 +    message(STATUS "WebTransport: off (ngtcp2, ngtcp2_crypto_ossl or nghttp3 not found)")

@@ -49,6 +49,12 @@ own=$(cd "$E" && find . -name '*.so*' | sed 's|.*/||')
 needed=$(find "$E" -type f \( -name '*.so*' -o -name WebProcess -o -name NetworkProcess \) -exec readelf -d {} \; 2>/dev/null \
     | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p' | sort -u)
 requires=""
+# Stock Haiku advertises lib:libssl = 3 even for OpenSSL 3.5. Its package
+# version distinguishes the releases that export the QUIC TLS functions.
+if readelf --dyn-syms --wide "$E/lib/libWebKit.so.1" | grep -q ' UND SSL_set_quic_tls_cbs@OPENSSL_3\.5\.0'; then
+    requires="	openssl3 >= 3.5
+"
+fi
 for n in $needed; do
     if echo "$own" | grep -qx "$n"; then continue; fi
     case $n in
