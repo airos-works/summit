@@ -76584,7 +76584,7 @@ index 271b076b101e307f8e4dc09ec7450da3c7bc898e..456d4f10287f138ba068510b504fcb6d
      void setClient(TextureMapperPlatformLayer::Client* client) { m_client = client; }
  
 diff --git a/Source/WebCore/platform/graphics/texmap/TextureMapperShaderProgram.cpp b/Source/WebCore/platform/graphics/texmap/TextureMapperShaderProgram.cpp
-index 9cc95ada9f61a23ec22e73313ea6bb16de4b062d..ac5b9b9fae26162c8ce6536ee358eeec062dc1b5 100644
+index 9cc95ada9f61a23ec22e73313ea6bb16de4b062d..2dfd0cda75388e636fe1dae54c7b869ce632f51f 100644
 --- a/Source/WebCore/platform/graphics/texmap/TextureMapperShaderProgram.cpp
 +++ b/Source/WebCore/platform/graphics/texmap/TextureMapperShaderProgram.cpp
 @@ -21,6 +21,9 @@
@@ -76597,7 +76597,48 @@ index 9cc95ada9f61a23ec22e73313ea6bb16de4b062d..ac5b9b9fae26162c8ce6536ee358eeec
  
  #if USE(TEXTURE_MAPPER)
  
-@@ -381,6 +384,8 @@ static const char* fragmentTemplateCommon =
+@@ -135,13 +138,16 @@ static const char* vertexTemplateCommon =
+                 // Calculate the 2D direction from the center to the vertex in the viewport space (homogeneous coordinates).
+                 // Subtract after the reduction to common denominator, centerInViewportCoordinates.w * v_nonProjectedPosition.w.
+                 vec2 direction = v_nonProjectedPosition.xy * centerInViewportCoordinates.w - centerInViewportCoordinates.xy * v_nonProjectedPosition.w;
+-                if (length(direction) > 0.) {
+-                    float oldDistance = distance(v_nonProjectedPosition.xyz, centerInViewportCoordinates.xyz);
+-                    // Move the vertex toward the direction from the center to the vertex.
+-                    v_nonProjectedPosition += vec4(normalize(direction) * antialiasInflationDistance * v_nonProjectedPosition.w, 0., 0.);
+-                    float newDistance = distance(v_nonProjectedPosition.xyz, centerInViewportCoordinates.xyz);
+-                    // Move v_texCoord based on 3D distance inflation ratio.
+-                    v_texCoord += normalize(position - center) * (newDistance - oldDistance) / oldDistance;
++                // Extrapolate along the same center-to-corner vector in both
++                // spaces. Choose the local fraction that moves the projected
++                // vertex one pixel, accounting for the change in w.
++                vec4 radial = v_nonProjectedPosition - centerInViewportCoordinates;
++                float w = v_nonProjectedPosition.w;
++                float divisor = length(direction) - antialiasInflationDistance * w * radial.w;
++                if (w > 0. && centerInViewportCoordinates.w > 0. && divisor > 0.) {
++                    float fraction = antialiasInflationDistance * w * w / divisor;
++                    v_nonProjectedPosition += radial * fraction;
++                    v_texCoord += (position - center) * fraction;
+                 }
+                 v_antialias = 0.;
+             }
+@@ -227,9 +233,15 @@ static const char* fragmentTemplateHeaderCommonVariables =
+         uniform mat4 u_textureSpaceMatrix;
+         uniform mat4 u_textureColorSpaceMatrix;
+     )
++    "\n"
++    // Antialiased draws calculate transformed texture coordinates in the
++    // fragment shader. Keep the matrix precision through the texture lookup.
++    GLSL_DIRECTIVE(ifndef ENABLE_Antialiasing)
+     STRINGIFY(
+         precision mediump float;
+-    );
++    )
++    "\n"
++    GLSL_DIRECTIVE(endif);
+ 
+ // Input/output variables definition for both OpenGL ES < 3.2.
+ static const char* fragmentTemplateLT320Vars =
+@@ -381,6 +393,8 @@ static const char* fragmentTemplateCommon =
          }
  
          void applyTextureRGB(inout vec4 color, vec2 texCoord) { color = u_textureColorSpaceMatrix * texture2D(s_sampler, texCoord); }
@@ -76606,7 +76647,7 @@ index 9cc95ada9f61a23ec22e73313ea6bb16de4b062d..ac5b9b9fae26162c8ce6536ee358eeec
  
          void applyPremultiply(inout vec4 color) { color = vec4(color.rgb * color.a, color.a); }
  
-@@ -501,6 +506,13 @@ static const char* fragmentTemplateCommon =
+@@ -501,6 +515,13 @@ static const char* fragmentTemplateCommon =
              color = texture2D(s_sampler, coord);
          }
  
@@ -76620,7 +76661,7 @@ index 9cc95ada9f61a23ec22e73313ea6bb16de4b062d..ac5b9b9fae26162c8ce6536ee358eeec
          void applyBlurFilter(inout vec4 color, vec2 texCoord)
          {
              vec2 step = u_blurDirection * u_texelSize;
-@@ -511,8 +523,8 @@ static const char* fragmentTemplateCommon =
+@@ -511,8 +532,8 @@ static const char* fragmentTemplateCommon =
  
              for (int i = 1; i < GaussianKernelHalfSize; i++) {
                  vec2 offset = step * u_gaussianKernelOffset[i];
@@ -76631,7 +76672,7 @@ index 9cc95ada9f61a23ec22e73313ea6bb16de4b062d..ac5b9b9fae26162c8ce6536ee358eeec
              }
  
              color = total;
-@@ -575,10 +587,14 @@ static const char* fragmentTemplateCommon =
+@@ -575,10 +596,14 @@ static const char* fragmentTemplateCommon =
              return clamp(0.5 - d, 0.0, 1.0);
          }
  
@@ -76648,7 +76689,7 @@ index 9cc95ada9f61a23ec22e73313ea6bb16de4b062d..ac5b9b9fae26162c8ce6536ee358eeec
  
              highp vec2 topLeftCenter = bounds.xy + topLeftRadii;
              highp vec2 topRightCenter = bounds.zy + (topRightRadii * vec2(-1, 1));
-@@ -586,18 +602,18 @@ static const char* fragmentTemplateCommon =
+@@ -586,18 +611,18 @@ static const char* fragmentTemplateCommon =
              highp vec2 bottomRightCenter = bounds.zw + (bottomRightRadii * vec2(-1, -1));
  
              if (p.x < topLeftCenter.x && p.y < topLeftCenter.y)
@@ -76672,7 +76713,7 @@ index 9cc95ada9f61a23ec22e73313ea6bb16de4b062d..ac5b9b9fae26162c8ce6536ee358eeec
          }
  
          void applyRoundedRectClip(inout vec4 color)
-@@ -629,7 +645,8 @@ static const char* fragmentTemplateCommon =
+@@ -629,7 +654,8 @@ static const char* fragmentTemplateCommon =
                  highp vec2 topRightRadii = u_roundedRect[(rectIndex * 3) + 1].zw;
                  highp vec2 bottomLeftRadii = u_roundedRect[(rectIndex * 3) + 2].xy;
                  highp vec2 bottomRightRadii = u_roundedRect[(rectIndex * 3) + 2].zw;
@@ -76682,7 +76723,7 @@ index 9cc95ada9f61a23ec22e73313ea6bb16de4b062d..ac5b9b9fae26162c8ce6536ee358eeec
  
                  // Pixels outside the rect have coverage 0.0.
                  // Pixels inside the rect have coverage 1.0.
-@@ -697,6 +714,14 @@ Ref<TextureMapperShaderProgram> TextureMapperShaderProgram::create(TextureMapper
+@@ -697,6 +723,14 @@ Ref<TextureMapperShaderProgram> TextureMapperShaderProgram::create(TextureMapper
  
      StringBuilder optionsApplierBuilder;
      SET_APPLIER_FROM_OPTIONS(TextureRGB);
@@ -76697,7 +76738,7 @@ index 9cc95ada9f61a23ec22e73313ea6bb16de4b062d..ac5b9b9fae26162c8ce6536ee358eeec
      SET_APPLIER_FROM_OPTIONS(TextureYUV);
      SET_APPLIER_FROM_OPTIONS(TextureYUVA);
      SET_APPLIER_FROM_OPTIONS(TextureNV12);
-@@ -757,6 +782,9 @@ Ref<TextureMapperShaderProgram> TextureMapperShaderProgram::create(TextureMapper
+@@ -757,6 +791,9 @@ Ref<TextureMapperShaderProgram> TextureMapperShaderProgram::create(TextureMapper
      else
          fragmentShaderBuilder.append(unsafeSpan(GLSL_DIRECTIVE(define GaussianKernelHalfSize GAUSSIAN_KERNEL_MAX_HALF_SIZE)));
  
@@ -76707,7 +76748,7 @@ index 9cc95ada9f61a23ec22e73313ea6bb16de4b062d..ac5b9b9fae26162c8ce6536ee358eeec
      // Append the common header.
      fragmentShaderBuilder.append(unsafeSpan(fragmentTemplateHeaderCommon));
  
-@@ -818,6 +846,9 @@ static UTF8CString getProgramLog(GLuint program)
+@@ -818,6 +855,9 @@ static UTF8CString getProgramLog(GLuint program)
  
  TextureMapperShaderProgram::TextureMapperShaderProgram(const String& vertex, const String& fragment)
  {
@@ -76717,7 +76758,7 @@ index 9cc95ada9f61a23ec22e73313ea6bb16de4b062d..ac5b9b9fae26162c8ce6536ee358eeec
      m_vertexShader = glCreateShader(GL_VERTEX_SHADER);
      {
          auto vertexCString = vertex.utf8();
-@@ -851,6 +882,10 @@ TextureMapperShaderProgram::TextureMapperShaderProgram(const String& vertex, con
+@@ -851,6 +891,10 @@ TextureMapperShaderProgram::TextureMapperShaderProgram(const String& vertex, con
  
  TextureMapperShaderProgram::~TextureMapperShaderProgram()
  {
