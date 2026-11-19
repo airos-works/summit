@@ -29584,6 +29584,40 @@ index ae292e47510d5537fe8023a85931e8c869bcaca1..098925628465e0b6b775b1697970f0e0
          page->cookieJar().setRawCookie(*document, cookie.value(), shouldPartitionCookie);
      }
  
+diff --git a/Source/WebCore/layout/formattingContexts/flex/FlexFormattingContext.cpp b/Source/WebCore/layout/formattingContexts/flex/FlexFormattingContext.cpp
+index dab814297af116724ee60e23c50b6427be64ed12..c951a224580abc508915373b8c32fdf9049dfe38 100644
+--- a/Source/WebCore/layout/formattingContexts/flex/FlexFormattingContext.cpp
++++ b/Source/WebCore/layout/formattingContexts/flex/FlexFormattingContext.cpp
+@@ -981,6 +981,8 @@ LayoutUnit FlexFormattingContext::computeMainSizeFromAspectRatioUsing(const Flex
+     ASSERT(FlexFormattingUtils::flexItemHasAspectRatio(flexLayoutItem));
+     auto flexItemCrossAxisBorderAndPadding = flexLayoutItem.crossAxisBorderAndPadding;
+ 
++    // Keep the preferred, minimum or maximum size type when resolving block-axis
++    // percentages, so calculations use the same indefinite-size fallback as percentages.
+     // All paths return border-box cross size.
+     auto crossSizeOptional = WTF::switchOn(crossSizeLength,
+         [&](const SizeType::Fixed& fixedCrossSizeLength) -> std::optional<LayoutUnit> {
+@@ -991,17 +993,17 @@ LayoutUnit FlexFormattingContext::computeMainSizeFromAspectRatioUsing(const Flex
+         },
+         [&](const SizeType::Percentage& percentageCrossSizeLength) -> std::optional<LayoutUnit> {
+             return flexLayoutItem.mainAxisIsInlineAxis
+-                ? integrationUtils().computePercentageLogicalHeightForFlexItem(flexLayoutItem, SizeType { percentageCrossSizeLength })
++                ? integrationUtils().computePercentageLogicalHeightForFlexItem(flexLayoutItem, crossSizeLength)
+                 : integrationUtils().adjustBorderBoxLogicalWidthForBoxSizing(Style::evaluate<LayoutUnit>(percentageCrossSizeLength, m_constraints.crossAxisSizeForLengthResolution));
+         },
+         [&](const SizeType::Calc& calcCrossSizeLength) -> std::optional<LayoutUnit> {
+             return flexLayoutItem.mainAxisIsInlineAxis
+-                ? integrationUtils().computePercentageLogicalHeightForFlexItem(flexLayoutItem, calcCrossSizeLength)
++                ? integrationUtils().computePercentageLogicalHeightForFlexItem(flexLayoutItem, crossSizeLength)
+                 : integrationUtils().adjustBorderBoxLogicalWidthForBoxSizing(Style::evaluate<LayoutUnit>(calcCrossSizeLength, m_constraints.crossAxisSizeForLengthResolution, style->usedZoomForLength()));
+         },
+         [&](const typename SizeType::CalcSize& calcSizeCrossSizeLength) -> std::optional<LayoutUnit> {
+             return flexLayoutItem.mainAxisIsInlineAxis
+-                ? integrationUtils().computePercentageLogicalHeightForFlexItem(flexLayoutItem, SizeType { calcSizeCrossSizeLength })
++                ? integrationUtils().computePercentageLogicalHeightForFlexItem(flexLayoutItem, crossSizeLength)
+                 : integrationUtils().adjustBorderBoxLogicalWidthForBoxSizing(Style::evaluate<LayoutUnit>(calcSizeCrossSizeLength, m_constraints.crossAxisSizeForLengthResolution, style->usedZoomForLength()));
+         },
+         [&](const CSS::Keyword::Auto&) -> std::optional<LayoutUnit> {
 diff --git a/Source/WebCore/layout/formattingContexts/grid/GridFormattingContext.cpp b/Source/WebCore/layout/formattingContexts/grid/GridFormattingContext.cpp
 index 1e32526022d7299e8ba3b5f4f82c59d5244267af..42eba71cd13dd736fde5b3ca949bddba0595983b 100644
 --- a/Source/WebCore/layout/formattingContexts/grid/GridFormattingContext.cpp
@@ -30272,7 +30306,7 @@ index 0767e8c6ac89de2e79bcf9e6279a242d2a44b543..ac14c1c86718156ec1893f25d06bbb31
  }
 -
 diff --git a/Source/WebCore/layout/integration/flex/FlexIntegrationUtils.cpp b/Source/WebCore/layout/integration/flex/FlexIntegrationUtils.cpp
-index c13a0e3bb1faf7b85e398e990867c4407b752256..63c0e97b2dc678507011aec5286f3ec79d024245 100644
+index c13a0e3bb1faf7b85e398e990867c4407b752256..b0fc56e32152285a5c8874e861196d2fbbdac441 100644
 --- a/Source/WebCore/layout/integration/flex/FlexIntegrationUtils.cpp
 +++ b/Source/WebCore/layout/integration/flex/FlexIntegrationUtils.cpp
 @@ -26,6 +26,12 @@
@@ -30399,6 +30433,14 @@ index c13a0e3bb1faf7b85e398e990867c4407b752256..63c0e97b2dc678507011aec5286f3ec7
              }
              if (size.isMaxContent()) {
                  invalidateFlexItemContentLogicalWidthsIfNeeded(flexLayoutItem);
+@@ -647,7 +713,6 @@ template<typename SizeType> std::optional<LayoutUnit> FlexIntegrationUtils::comp
+ template std::optional<LayoutUnit> FlexIntegrationUtils::computePercentageLogicalHeightForFlexItem<Style::PreferredSize>(const FlexLayoutItem&, const Style::PreferredSize&) const;
+ template std::optional<LayoutUnit> FlexIntegrationUtils::computePercentageLogicalHeightForFlexItem<Style::MinimumSize>(const FlexLayoutItem&, const Style::MinimumSize&) const;
+ template std::optional<LayoutUnit> FlexIntegrationUtils::computePercentageLogicalHeightForFlexItem<Style::MaximumSize>(const FlexLayoutItem&, const Style::MaximumSize&) const;
+-template std::optional<LayoutUnit> FlexIntegrationUtils::computePercentageLogicalHeightForFlexItem<Style::PreferredSize::Calc>(const FlexLayoutItem&, const Style::PreferredSize::Calc&) const;
+ 
+ std::optional<bool> FlexIntegrationUtils::isFlexBoxBlockSizeDefiniteForFlexItem(const FlexLayoutItem& flexLayoutItem) const
+ {
 diff --git a/Source/WebCore/layout/integration/flex/LayoutIntegrationFlexLayout.cpp b/Source/WebCore/layout/integration/flex/LayoutIntegrationFlexLayout.cpp
 index 485864a524831cf3db5cd34b2b542bfd101954d3..16342f5f3ce683c21a58c151da3b39f820c5f38c 100644
 --- a/Source/WebCore/layout/integration/flex/LayoutIntegrationFlexLayout.cpp
