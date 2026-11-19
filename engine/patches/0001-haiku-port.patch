@@ -25341,6 +25341,63 @@ index c0e79d205b34ca017d69dd11e47fc353b313e940..660b4095d4a014466616ecacca3b2554
  }
  
  void CSSFontSelector::updateStyleIfNeeded()
+diff --git a/Source/WebCore/css/CSSProperties.json b/Source/WebCore/css/CSSProperties.json
+index bf647feda8b76086349434ba673d35091c601c47..2ec20ab0b736132bb91bf3688475aa194dc8e2eb 100644
+--- a/Source/WebCore/css/CSSProperties.json
++++ b/Source/WebCore/css/CSSProperties.json
+@@ -10874,6 +10874,8 @@
+                 "normal",
+                 "flex-start",
+                 "flex-end",
++                "flow-start",
++                "flow-end",
+                 "center",
+                 "space-between",
+                 "space-around",
+@@ -10911,6 +10913,8 @@
+             "values": [
+                 "flex-start",
+                 "flex-end",
++                "flow-start",
++                "flow-end",
+                 "center",
+                 "baseline",
+                 "stretch",
+@@ -10950,6 +10954,8 @@
+                 "auto",
+                 "flex-start",
+                 "flex-end",
++                "flow-start",
++                "flow-end",
+                 "center",
+                 "baseline",
+                 "stretch",
+@@ -11180,6 +11186,8 @@
+                 "normal",
+                 "flex-start",
+                 "flex-end",
++                "flow-start",
++                "flow-end",
+                 "center",
+                 "space-between",
+                 "space-around",
+@@ -15939,14 +15947,14 @@
+             }
+         },
+         "<self-position>": {
+-            "grammar": "center | start | end | self-start | self-end | flex-start | flex-end | anchor-center",
++            "grammar": "center | start | end | self-start | self-end | flow-start | flow-end | flex-start | flex-end | anchor-center",
+             "specification": {
+                 "category": "css-align",
+                 "url": "https://www.w3.org/TR/css-align-3/#typedef-self-position"
+             }
+         },
+         "<content-position>": {
+-            "grammar": "center | start | end | flex-start | flex-end",
++            "grammar": "center | start | end | flow-start | flow-end | flex-start | flex-end",
+             "specification": {
+                 "category": "css-align",
+                 "url": "https://www.w3.org/TR/css-align-3/#typedef-content-position"
 diff --git a/Source/WebCore/css/CSSStyleSheet.cpp b/Source/WebCore/css/CSSStyleSheet.cpp
 index dd3c8bcbe66c87ea0ea7ff2dda98e27c39c8aaae..c228552fba5b24eddc563513583e6e840b2aa24d 100644
 --- a/Source/WebCore/css/CSSStyleSheet.cpp
@@ -25426,6 +25483,143 @@ index d073fc72fc5f38f819baff14ee07cd871e2c8e27..c1296f7f4d14a6c3898ca82dcb49e18f
      void didMutateRuleFromCSSStyleDeclaration();
      void didMutate();
      
+diff --git a/Source/WebCore/css/CSSValueKeywords.in b/Source/WebCore/css/CSSValueKeywords.in
+index 9fe7b721226601cc22a62b5aa05ef8b573ba3d3b..b8aede654f8f6427c2b187ca5a08f1c903f33be7 100644
+--- a/Source/WebCore/css/CSSValueKeywords.in
++++ b/Source/WebCore/css/CSSValueKeywords.in
+@@ -718,6 +718,8 @@ multiple
+ // align-content
+ flex-start
+ flex-end
++flow-start
++flow-end
+ // center
+ space-between
+ space-around
+diff --git a/Source/WebCore/css/parser/CSSPropertyParserConsumer+Align.cpp b/Source/WebCore/css/parser/CSSPropertyParserConsumer+Align.cpp
+index 770ef5bcabccf77f8419e695f7f2000386b56cfe..6a7722709b5f48931f0c6ac672fdb4823127ea59 100644
+--- a/Source/WebCore/css/parser/CSSPropertyParserConsumer+Align.cpp
++++ b/Source/WebCore/css/parser/CSSPropertyParserConsumer+Align.cpp
+@@ -113,7 +113,9 @@ RefPtr<CSSValue> consumeAlignContent(CSSParserTokenRange& range, CSS::PropertyPa
+     case CSSValueStart:
+     case CSSValueEnd:
+     case CSSValueCenter:
++    case CSSValueFlowStart:
+     case CSSValueFlexStart:
++    case CSSValueFlowEnd:
+     case CSSValueFlexEnd:
+         range.consumeIncludingWhitespace();
+         return CSSKeywordValue::create(initial);
+@@ -134,7 +136,9 @@ RefPtr<CSSValue> consumeAlignContent(CSSParserTokenRange& range, CSS::PropertyPa
+             case CSSValueStart:
+             case CSSValueEnd:
+             case CSSValueCenter:
++            case CSSValueFlowStart:
+             case CSSValueFlexStart:
++            case CSSValueFlowEnd:
+             case CSSValueFlexEnd:
+                 return true;
+             default:
+@@ -164,7 +168,9 @@ RefPtr<CSSValue> consumeJustifyContent(CSSParserTokenRange& range, CSS::Property
+     case CSSValueStart:
+     case CSSValueEnd:
+     case CSSValueCenter:
++    case CSSValueFlowStart:
+     case CSSValueFlexStart:
++    case CSSValueFlowEnd:
+     case CSSValueFlexEnd:
+     case CSSValueLeft:
+     case CSSValueRight:
+@@ -179,7 +185,9 @@ RefPtr<CSSValue> consumeJustifyContent(CSSParserTokenRange& range, CSS::Property
+             case CSSValueStart:
+             case CSSValueEnd:
+             case CSSValueCenter:
++            case CSSValueFlowStart:
+             case CSSValueFlexStart:
++            case CSSValueFlowEnd:
+             case CSSValueFlexEnd:
+             case CSSValueLeft:
+             case CSSValueRight:
+@@ -216,7 +224,9 @@ RefPtr<CSSValue> consumeAlignSelf(CSSParserTokenRange& range, CSS::PropertyParse
+     case CSSValueCenter:
+     case CSSValueSelfStart:
+     case CSSValueSelfEnd:
++    case CSSValueFlowStart:
+     case CSSValueFlexStart:
++    case CSSValueFlowEnd:
+     case CSSValueFlexEnd:
+         range.consumeIncludingWhitespace();
+         return CSSKeywordValue::create(initial);
+@@ -241,7 +251,9 @@ RefPtr<CSSValue> consumeAlignSelf(CSSParserTokenRange& range, CSS::PropertyParse
+             case CSSValueCenter:
+             case CSSValueSelfStart:
+             case CSSValueSelfEnd:
++            case CSSValueFlowStart:
+             case CSSValueFlexStart:
++            case CSSValueFlowEnd:
+             case CSSValueFlexEnd:
+                 return true;
+             default:
+@@ -276,7 +288,9 @@ RefPtr<CSSValue> consumeJustifySelf(CSSParserTokenRange& range, CSS::PropertyPar
+     case CSSValueCenter:
+     case CSSValueSelfStart:
+     case CSSValueSelfEnd:
++    case CSSValueFlowStart:
+     case CSSValueFlexStart:
++    case CSSValueFlowEnd:
+     case CSSValueFlexEnd:
+     case CSSValueLeft:
+     case CSSValueRight:
+@@ -303,7 +317,9 @@ RefPtr<CSSValue> consumeJustifySelf(CSSParserTokenRange& range, CSS::PropertyPar
+             case CSSValueCenter:
+             case CSSValueSelfStart:
+             case CSSValueSelfEnd:
++            case CSSValueFlowStart:
+             case CSSValueFlexStart:
++            case CSSValueFlowEnd:
+             case CSSValueFlexEnd:
+             case CSSValueLeft:
+             case CSSValueRight:
+@@ -338,7 +354,9 @@ RefPtr<CSSValue> consumeAlignItems(CSSParserTokenRange& range, CSS::PropertyPars
+     case CSSValueCenter:
+     case CSSValueSelfStart:
+     case CSSValueSelfEnd:
++    case CSSValueFlowStart:
+     case CSSValueFlexStart:
++    case CSSValueFlowEnd:
+     case CSSValueFlexEnd:
+         range.consumeIncludingWhitespace();
+         return CSSKeywordValue::create(initial);
+@@ -363,7 +381,9 @@ RefPtr<CSSValue> consumeAlignItems(CSSParserTokenRange& range, CSS::PropertyPars
+             case CSSValueCenter:
+             case CSSValueSelfStart:
+             case CSSValueSelfEnd:
++            case CSSValueFlowStart:
+             case CSSValueFlexStart:
++            case CSSValueFlowEnd:
+             case CSSValueFlexEnd:
+                 return true;
+             default:
+@@ -395,7 +415,9 @@ RefPtr<CSSValue> consumeJustifyItems(CSSParserTokenRange& range, CSS::PropertyPa
+     case CSSValueEnd:
+     case CSSValueSelfStart:
+     case CSSValueSelfEnd:
++    case CSSValueFlowStart:
+     case CSSValueFlexStart:
++    case CSSValueFlowEnd:
+     case CSSValueFlexEnd:
+         range.consumeIncludingWhitespace();
+         return CSSKeywordValue::create(initial);
+@@ -420,7 +442,9 @@ RefPtr<CSSValue> consumeJustifyItems(CSSParserTokenRange& range, CSS::PropertyPa
+             case CSSValueCenter:
+             case CSSValueSelfStart:
+             case CSSValueSelfEnd:
++            case CSSValueFlowStart:
+             case CSSValueFlexStart:
++            case CSSValueFlowEnd:
+             case CSSValueFlexEnd:
+             case CSSValueLeft:
+             case CSSValueRight:
 diff --git a/Source/WebCore/css/parser/CSSPropertyParserCustom.h b/Source/WebCore/css/parser/CSSPropertyParserCustom.h
 index a556315d3f11f3c7ba8070821a4d1637b08c0a4e..307f9bb056d5e879132a45197c7bb2406ec88a90 100644
 --- a/Source/WebCore/css/parser/CSSPropertyParserCustom.h
@@ -104498,6 +104692,258 @@ index e641504e4e70e439c7aa08b6bf795b8c711aba05..044ef9c7f3fe8ea090e8ed4a0b1424e6
          return { };
      }
  
+diff --git a/Source/WebCore/style/values/align/StyleAlignContent.cpp b/Source/WebCore/style/values/align/StyleAlignContent.cpp
+index 65c527609d4f9853714e732ce9bd5e10ae49ea15..ce7f580e36a29392ce0367e2911d10996a1c6578 100644
+--- a/Source/WebCore/style/values/align/StyleAlignContent.cpp
++++ b/Source/WebCore/style/values/align/StyleAlignContent.cpp
+@@ -104,8 +104,10 @@ auto CSSValueConversion<AlignContent>::operator()(BuilderState& state, const CSS
+             return CSS::Keyword::End { };
+         case CSSValueCenter:
+             return CSS::Keyword::Center { };
++        case CSSValueFlowStart:
+         case CSSValueFlexStart:
+             return CSS::Keyword::FlexStart { };
++        case CSSValueFlowEnd:
+         case CSSValueFlexEnd:
+             return CSS::Keyword::FlexEnd { };
+         default:
+@@ -136,8 +138,10 @@ auto CSSValueConversion<AlignContent>::operator()(BuilderState& state, const CSS
+             return { CSS::Keyword::End { }, overflowPosition };
+         case CSSValueCenter:
+             return { CSS::Keyword::Center { }, overflowPosition };
++        case CSSValueFlowStart:
+         case CSSValueFlexStart:
+             return { CSS::Keyword::FlexStart { }, overflowPosition };
++        case CSSValueFlowEnd:
+         case CSSValueFlexEnd:
+             return { CSS::Keyword::FlexEnd { }, overflowPosition };
+         default:
+diff --git a/Source/WebCore/style/values/align/StyleAlignContent.h b/Source/WebCore/style/values/align/StyleAlignContent.h
+index 64d6b679c16d5c5d29b1b2edbc56d0adf03d2bba..d955ca2b4f8be0d82c35fe13ce04d92db44ecaec 100644
+--- a/Source/WebCore/style/values/align/StyleAlignContent.h
++++ b/Source/WebCore/style/values/align/StyleAlignContent.h
+@@ -242,9 +242,9 @@ template<typename... F> constexpr decltype(auto) AlignContent::switchOn(NOESCAPE
+     case PrimaryKind::End:
+         return visitOverflowPosition(CSS::Keyword::End { }, overflowPosition(), visitor);
+     case PrimaryKind::FlexStart:
+-        return visitOverflowPosition(CSS::Keyword::FlexStart { }, overflowPosition(), visitor);
++        return visitOverflowPosition(CSS::Keyword::FlowStart { }, overflowPosition(), visitor);
+     case PrimaryKind::FlexEnd:
+-        return visitOverflowPosition(CSS::Keyword::FlexEnd { }, overflowPosition(), visitor);
++        return visitOverflowPosition(CSS::Keyword::FlowEnd { }, overflowPosition(), visitor);
+     }
+     RELEASE_ASSERT_NOT_REACHED();
+ }
+diff --git a/Source/WebCore/style/values/align/StyleAlignItems.cpp b/Source/WebCore/style/values/align/StyleAlignItems.cpp
+index fd9e12cd004609721ac25111749681156930a5de..9c055bcc4e059beb282b91b61186cc95cc8e924a 100644
+--- a/Source/WebCore/style/values/align/StyleAlignItems.cpp
++++ b/Source/WebCore/style/values/align/StyleAlignItems.cpp
+@@ -102,8 +102,10 @@ auto CSSValueConversion<AlignItems>::operator()(BuilderState& state, const CSSVa
+             return CSS::Keyword::SelfStart { };
+         case CSSValueSelfEnd:
+             return CSS::Keyword::SelfEnd { };
++        case CSSValueFlowStart:
+         case CSSValueFlexStart:
+             return CSS::Keyword::FlexStart { };
++        case CSSValueFlowEnd:
+         case CSSValueFlexEnd:
+             return CSS::Keyword::FlexEnd { };
+         case CSSValueAnchorCenter:
+@@ -142,8 +144,10 @@ auto CSSValueConversion<AlignItems>::operator()(BuilderState& state, const CSSVa
+             return { CSS::Keyword::SelfStart { }, overflowPosition };
+         case CSSValueSelfEnd:
+             return { CSS::Keyword::SelfEnd { }, overflowPosition };
++        case CSSValueFlowStart:
+         case CSSValueFlexStart:
+             return { CSS::Keyword::FlexStart { }, overflowPosition };
++        case CSSValueFlowEnd:
+         case CSSValueFlexEnd:
+             return { CSS::Keyword::FlexEnd { }, overflowPosition };
+         case CSSValueAnchorCenter:
+diff --git a/Source/WebCore/style/values/align/StyleAlignItems.h b/Source/WebCore/style/values/align/StyleAlignItems.h
+index 2cd791f67c30506c69e473352d17fbac0092c741..5dc91d62c1debb967a7395460f5314f6dd0f0447 100644
+--- a/Source/WebCore/style/values/align/StyleAlignItems.h
++++ b/Source/WebCore/style/values/align/StyleAlignItems.h
+@@ -242,9 +242,9 @@ template<typename... F> constexpr decltype(auto) AlignItems::switchOn(NOESCAPE F
+     case PrimaryKind::SelfEnd:
+         return visitOverflowPosition(CSS::Keyword::SelfEnd { }, overflowPosition(), visitor);
+     case PrimaryKind::FlexStart:
+-        return visitOverflowPosition(CSS::Keyword::FlexStart { }, overflowPosition(), visitor);
++        return visitOverflowPosition(CSS::Keyword::FlowStart { }, overflowPosition(), visitor);
+     case PrimaryKind::FlexEnd:
+-        return visitOverflowPosition(CSS::Keyword::FlexEnd { }, overflowPosition(), visitor);
++        return visitOverflowPosition(CSS::Keyword::FlowEnd { }, overflowPosition(), visitor);
+     case PrimaryKind::AnchorCenter:
+         return visitOverflowPosition(CSS::Keyword::AnchorCenter { }, overflowPosition(), visitor);
+     }
+diff --git a/Source/WebCore/style/values/align/StyleAlignSelf.cpp b/Source/WebCore/style/values/align/StyleAlignSelf.cpp
+index 1ab219aa0009ea262faebd1ea3dfdd119b0ec84a..99efe473f943bff9dd0edac26b7466b6180a8783 100644
+--- a/Source/WebCore/style/values/align/StyleAlignSelf.cpp
++++ b/Source/WebCore/style/values/align/StyleAlignSelf.cpp
+@@ -121,8 +121,10 @@ auto CSSValueConversion<AlignSelf>::operator()(BuilderState& state, const CSSVal
+             return CSS::Keyword::SelfStart { };
+         case CSSValueSelfEnd:
+             return CSS::Keyword::SelfEnd { };
++        case CSSValueFlowStart:
+         case CSSValueFlexStart:
+             return CSS::Keyword::FlexStart { };
++        case CSSValueFlowEnd:
+         case CSSValueFlexEnd:
+             return CSS::Keyword::FlexEnd { };
+         case CSSValueAnchorCenter:
+@@ -161,8 +163,10 @@ auto CSSValueConversion<AlignSelf>::operator()(BuilderState& state, const CSSVal
+             return { CSS::Keyword::SelfStart { }, overflowPosition };
+         case CSSValueSelfEnd:
+             return { CSS::Keyword::SelfEnd { }, overflowPosition };
++        case CSSValueFlowStart:
+         case CSSValueFlexStart:
+             return { CSS::Keyword::FlexStart { }, overflowPosition };
++        case CSSValueFlowEnd:
+         case CSSValueFlexEnd:
+             return { CSS::Keyword::FlexEnd { }, overflowPosition };
+         case CSSValueAnchorCenter:
+diff --git a/Source/WebCore/style/values/align/StyleAlignSelf.h b/Source/WebCore/style/values/align/StyleAlignSelf.h
+index 85ddee95e79780c1dadb7a4f70882f4df28616cd..0b5564647b58594a153616e21ce6b13b42615b81 100644
+--- a/Source/WebCore/style/values/align/StyleAlignSelf.h
++++ b/Source/WebCore/style/values/align/StyleAlignSelf.h
+@@ -252,9 +252,9 @@ template<typename... F> constexpr decltype(auto) AlignSelf::switchOn(NOESCAPE F&
+     case PrimaryKind::SelfEnd:
+         return visitOverflowPosition(CSS::Keyword::SelfEnd { }, overflowPosition(), visitor);
+     case PrimaryKind::FlexStart:
+-        return visitOverflowPosition(CSS::Keyword::FlexStart { }, overflowPosition(), visitor);
++        return visitOverflowPosition(CSS::Keyword::FlowStart { }, overflowPosition(), visitor);
+     case PrimaryKind::FlexEnd:
+-        return visitOverflowPosition(CSS::Keyword::FlexEnd { }, overflowPosition(), visitor);
++        return visitOverflowPosition(CSS::Keyword::FlowEnd { }, overflowPosition(), visitor);
+     case PrimaryKind::AnchorCenter:
+         return visitOverflowPosition(CSS::Keyword::AnchorCenter { }, overflowPosition(), visitor);
+     }
+diff --git a/Source/WebCore/style/values/align/StyleJustifyContent.cpp b/Source/WebCore/style/values/align/StyleJustifyContent.cpp
+index d395b72424eb7296c161298d1f7c46366342a84e..b69a16e104e376be14b612d857e502039b896c7f 100644
+--- a/Source/WebCore/style/values/align/StyleJustifyContent.cpp
++++ b/Source/WebCore/style/values/align/StyleJustifyContent.cpp
+@@ -101,8 +101,10 @@ auto CSSValueConversion<JustifyContent>::operator()(BuilderState& state, const C
+             return CSS::Keyword::Start { };
+         case CSSValueEnd:
+             return CSS::Keyword::End { };
++        case CSSValueFlowStart:
+         case CSSValueFlexStart:
+             return CSS::Keyword::FlexStart { };
++        case CSSValueFlowEnd:
+         case CSSValueFlexEnd:
+             return CSS::Keyword::FlexEnd { };
+         case CSSValueLeft:
+@@ -127,8 +129,10 @@ auto CSSValueConversion<JustifyContent>::operator()(BuilderState& state, const C
+             return { CSS::Keyword::Start { }, overflowPosition };
+         case CSSValueEnd:
+             return { CSS::Keyword::End { }, overflowPosition };
++        case CSSValueFlowStart:
+         case CSSValueFlexStart:
+             return { CSS::Keyword::FlexStart { }, overflowPosition };
++        case CSSValueFlowEnd:
+         case CSSValueFlexEnd:
+             return { CSS::Keyword::FlexEnd { }, overflowPosition };
+         case CSSValueLeft:
+diff --git a/Source/WebCore/style/values/align/StyleJustifyContent.h b/Source/WebCore/style/values/align/StyleJustifyContent.h
+index da394da45c61477761c83ab8b99d62f2658295e2..e192debd54feaf6d2ea77f061dd776e172027eb3 100644
+--- a/Source/WebCore/style/values/align/StyleJustifyContent.h
++++ b/Source/WebCore/style/values/align/StyleJustifyContent.h
+@@ -235,9 +235,9 @@ template<typename... F> constexpr decltype(auto) JustifyContent::switchOn(NOESCA
+     case PrimaryKind::End:
+         return visitContentPosition(CSS::Keyword::End { });
+     case PrimaryKind::FlexStart:
+-        return visitContentPosition(CSS::Keyword::FlexStart { });
++        return visitContentPosition(CSS::Keyword::FlowStart { });
+     case PrimaryKind::FlexEnd:
+-        return visitContentPosition(CSS::Keyword::FlexEnd { });
++        return visitContentPosition(CSS::Keyword::FlowEnd { });
+     case PrimaryKind::Left:
+         return visitContentPosition(CSS::Keyword::Left { });
+     case PrimaryKind::Right:
+diff --git a/Source/WebCore/style/values/align/StyleJustifyItems.cpp b/Source/WebCore/style/values/align/StyleJustifyItems.cpp
+index 7b1a607f882b1e2c6caa32778c2c88f33d54d44a..522fa2130a39673ad8a83a3a1af6593585895d35 100644
+--- a/Source/WebCore/style/values/align/StyleJustifyItems.cpp
++++ b/Source/WebCore/style/values/align/StyleJustifyItems.cpp
+@@ -117,8 +117,10 @@ auto CSSValueConversion<JustifyItems>::operator()(BuilderState& state, const CSS
+             return CSS::Keyword::SelfStart { };
+         case CSSValueSelfEnd:
+             return CSS::Keyword::SelfEnd { };
++        case CSSValueFlowStart:
+         case CSSValueFlexStart:
+             return CSS::Keyword::FlexStart { };
++        case CSSValueFlowEnd:
+         case CSSValueFlexEnd:
+             return CSS::Keyword::FlexEnd { };
+         case CSSValueLeft:
+@@ -164,8 +166,10 @@ auto CSSValueConversion<JustifyItems>::operator()(BuilderState& state, const CSS
+             return { CSS::Keyword::SelfStart { }, overflowPosition };
+         case CSSValueSelfEnd:
+             return { CSS::Keyword::SelfEnd { }, overflowPosition };
++        case CSSValueFlowStart:
+         case CSSValueFlexStart:
+             return { CSS::Keyword::FlexStart { }, overflowPosition };
++        case CSSValueFlowEnd:
+         case CSSValueFlexEnd:
+             return { CSS::Keyword::FlexEnd { }, overflowPosition };
+         case CSSValueLeft:
+diff --git a/Source/WebCore/style/values/align/StyleJustifyItems.h b/Source/WebCore/style/values/align/StyleJustifyItems.h
+index c54621b5ba107c67651df5a3dd3439acffdbfaec..0a3d95084f9cea61895c776433e563b707089545 100644
+--- a/Source/WebCore/style/values/align/StyleJustifyItems.h
++++ b/Source/WebCore/style/values/align/StyleJustifyItems.h
+@@ -297,9 +297,9 @@ template<typename... F> constexpr decltype(auto) JustifyItems::switchOn(NOESCAPE
+     case PrimaryKind::SelfEnd:
+         return visitOverflowPosition(CSS::Keyword::SelfEnd { }, overflowPosition(), visitor);
+     case PrimaryKind::FlexStart:
+-        return visitOverflowPosition(CSS::Keyword::FlexStart { }, overflowPosition(), visitor);
++        return visitOverflowPosition(CSS::Keyword::FlowStart { }, overflowPosition(), visitor);
+     case PrimaryKind::FlexEnd:
+-        return visitOverflowPosition(CSS::Keyword::FlexEnd { }, overflowPosition(), visitor);
++        return visitOverflowPosition(CSS::Keyword::FlowEnd { }, overflowPosition(), visitor);
+     case PrimaryKind::Left:
+         return visitOverflowPosition(CSS::Keyword::Left { }, overflowPosition(), visitor);
+     case PrimaryKind::Right:
+diff --git a/Source/WebCore/style/values/align/StyleJustifySelf.cpp b/Source/WebCore/style/values/align/StyleJustifySelf.cpp
+index bf164e988c416b582bb686d81469c21e6884a002..2f2c3475384131444ecce5fed999eea3655929d7 100644
+--- a/Source/WebCore/style/values/align/StyleJustifySelf.cpp
++++ b/Source/WebCore/style/values/align/StyleJustifySelf.cpp
+@@ -125,8 +125,10 @@ auto CSSValueConversion<JustifySelf>::operator()(BuilderState& state, const CSSV
+             return CSS::Keyword::SelfStart { };
+         case CSSValueSelfEnd:
+             return CSS::Keyword::SelfEnd { };
++        case CSSValueFlowStart:
+         case CSSValueFlexStart:
+             return CSS::Keyword::FlexStart { };
++        case CSSValueFlowEnd:
+         case CSSValueFlexEnd:
+             return CSS::Keyword::FlexEnd { };
+         case CSSValueLeft:
+@@ -169,8 +171,10 @@ auto CSSValueConversion<JustifySelf>::operator()(BuilderState& state, const CSSV
+             return { CSS::Keyword::SelfStart { }, overflowPosition };
+         case CSSValueSelfEnd:
+             return { CSS::Keyword::SelfEnd { }, overflowPosition };
++        case CSSValueFlowStart:
+         case CSSValueFlexStart:
+             return { CSS::Keyword::FlexStart { }, overflowPosition };
++        case CSSValueFlowEnd:
+         case CSSValueFlexEnd:
+             return { CSS::Keyword::FlexEnd { }, overflowPosition };
+         case CSSValueLeft:
+diff --git a/Source/WebCore/style/values/align/StyleJustifySelf.h b/Source/WebCore/style/values/align/StyleJustifySelf.h
+index 97f47c51bfe97f2649de7153298141cb46468654..757f5bef6480cd6c1824f88be829b5c3c9af1a2f 100644
+--- a/Source/WebCore/style/values/align/StyleJustifySelf.h
++++ b/Source/WebCore/style/values/align/StyleJustifySelf.h
+@@ -271,9 +271,9 @@ template<typename... F> constexpr decltype(auto) JustifySelf::switchOn(NOESCAPE
+     case PrimaryKind::SelfEnd:
+         return visitOverflowPosition(CSS::Keyword::SelfEnd { }, overflowPosition(), visitor);
+     case PrimaryKind::FlexStart:
+-        return visitOverflowPosition(CSS::Keyword::FlexStart { }, overflowPosition(), visitor);
++        return visitOverflowPosition(CSS::Keyword::FlowStart { }, overflowPosition(), visitor);
+     case PrimaryKind::FlexEnd:
+-        return visitOverflowPosition(CSS::Keyword::FlexEnd { }, overflowPosition(), visitor);
++        return visitOverflowPosition(CSS::Keyword::FlowEnd { }, overflowPosition(), visitor);
+     case PrimaryKind::Left:
+         return visitOverflowPosition(CSS::Keyword::Left { }, overflowPosition(), visitor);
+     case PrimaryKind::Right:
 diff --git a/Source/WebCore/style/values/images/kinds/StyleImage.cpp b/Source/WebCore/style/values/images/kinds/StyleImage.cpp
 index 8c2140820809b4cca9a71529340875995dd059e8..1a02ba3d3a0e5130247a53f72d8e95602b1eac60 100644
 --- a/Source/WebCore/style/values/images/kinds/StyleImage.cpp
