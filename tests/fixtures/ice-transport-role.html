@@ -1,0 +1,73 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>ICE roles during negotiation and role conflict resolution</title>
+<pre id="result"></pre>
+<script>
+function gathered(peer) {
+    if (peer.iceGatheringState === 'complete')
+        return Promise.resolve();
+    return new Promise(resolve => {
+        function changed() {
+            if (peer.iceGatheringState === 'complete') {
+                peer.removeEventListener('icegatheringstatechange', changed);
+                resolve();
+            }
+        }
+        peer.addEventListener('icegatheringstatechange', changed);
+    });
+}
+
+async function transportStatsRole(peer) {
+    for (const entry of (await peer.getStats()).values()) {
+        if (entry.type === 'transport' && entry.selectedCandidatePairId)
+            return entry.iceRole;
+    }
+}
+
+async function check(simulateConflict) {
+    const offerer = new RTCPeerConnection({ iceServers: [] });
+    const answerer = new RTCPeerConnection({ iceServers: [] });
+    let timer;
+    try {
+        const channel = offerer.createDataChannel('roles');
+        const open = new Promise(resolve => channel.addEventListener('open', resolve, { once: true }));
+        const local = [], remote = [];
+        offerer.onicecandidate = e => { if (e.candidate) local.push(e.candidate); };
+        answerer.onicecandidate = e => { if (e.candidate) remote.push(e.candidate); };
+
+        await offerer.setLocalDescription();
+        const offer = offerer.localDescription;
+        // An ICE-lite offer makes the full answerer controlling. The actual full
+        // offerer will also initially be controlling, until the ICE agents resolve it.
+        const sdp = simulateConflict ? offer.sdp.replace(/^m=/m, 'a=ice-lite\r\nm=') : offer.sdp;
+        await answerer.setRemoteDescription({ type: 'offer', sdp });
+        await answerer.setLocalDescription();
+        await offerer.setRemoteDescription(answerer.localDescription);
+
+        const a = offerer.sctp.transport.iceTransport, b = answerer.sctp.transport.iceTransport;
+        const before = a.role === 'controlling' && b.role === (simulateConflict ? 'controlling' : 'controlled');
+        const timeout = new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new Error('ICE connection timed out')), 15000);
+        });
+        await Promise.race([Promise.all([gathered(offerer), gathered(answerer)]), timeout]);
+        await Promise.all([...local.map(c => answerer.addIceCandidate(c)), ...remote.map(c => offerer.addIceCandidate(c))]);
+        await Promise.race([open, timeout]);
+        const [left, right] = await Promise.all([transportStatsRole(offerer), transportStatsRole(answerer)]);
+        const matchesStats = a.role === left && b.role === right;
+        offerer.close();
+        answerer.close();
+        return before && matchesStats && [left, right].sort().join() === 'controlled,controlling'
+            && a.role === left && b.role === right && a.state === 'closed' && b.state === 'closed';
+    } finally {
+        clearTimeout(timer);
+        offerer.close();
+        answerer.close();
+    }
+}
+
+(async () => {
+    const ordinary = await check(false);
+    const conflict = await check(true);
+    document.getElementById('result').textContent = JSON.stringify({ ordinary, conflict });
+})().catch(error => { document.getElementById('result').textContent = String(error); });
+</script>
