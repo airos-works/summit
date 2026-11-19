@@ -93,6 +93,12 @@ passes every reftest, so check that failures and passes show real pages.
 
 ## What the wpt patch changes, and why
 
+- `anchor-scroll-position-try-014.html` only shows a vertical scrollbar.
+  With a 21 px horizontal scrollbar, the reversed flex scroller is only
+  179 px tall inside. At `scrollTop = -116` the bottom fallback still fits
+  by 5 px, so Summit correctly keeps it. Using the full 200 px height makes
+  the bottom fallback overflow at the tested offset and exercises the flip.
+  [Summit #238](https://github.com/airos-works/summit/issues/238)
 - The local copy of `event-timing/buffered-and-duration-threshold.html` waits
   until the first observer receives the click's `pointerdown`. It then checks
   the second observer's replay queue with `takeRecords()` before generating
