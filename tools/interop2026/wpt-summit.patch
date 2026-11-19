@@ -128,7 +128,7 @@ index 66c675188..caec917fc 100644
  
  
 diff --git a/tools/wptrunner/wptrunner/executors/executorwebdriver.py b/tools/wptrunner/wptrunner/executors/executorwebdriver.py
-index 203fcb6bf..16a0c2e2c 100644
+index 203fcb6..d0fa55c 100644
 --- a/tools/wptrunner/wptrunner/executors/executorwebdriver.py
 +++ b/tools/wptrunner/wptrunner/executors/executorwebdriver.py
 @@ -515,6 +515,14 @@ class WebDriverTestharnessProtocolPart(TestharnessProtocolPart):
@@ -146,27 +146,39 @@ index 203fcb6bf..16a0c2e2c 100644
                  if window_handle in remaining_windows:
                      raise Exception("the window remained open after sending the window close command")
              except webdriver_error.NoSuchWindowException:
-@@ -1185,6 +1193,19 @@ class WebDriverProtocol(Protocol):
+@@ -1185,6 +1193,31 @@ class WebDriverProtocol(Protocol):
  
      def after_connect(self):
          self.testharness.load_runner(self.executor.last_environment["protocol"])
-+        import os
 +        if os.environ.get("SUMMIT_REMOTE_BINARY"):
-+            # Summit opens maximised and ignores Set Window Rect: give the
-+            # automated window an 800x600 viewport through Haiku scripting,
-+            # then reload the runner so it sees the new size.
-+            import subprocess
-+            ssh = os.environ.get("SUMMIT_SSH", "ssh -F /mnt/HaikuWork/x399/ssh/config ws-haiku").split()
-+            r = subprocess.run(ssh + [os.environ.get("SUMMIT_REMOTE_DIR", "/boot/home/interop") + "/size.sh"],
-+                               capture_output=True, text=True, timeout=60)
++            viewport = "return [innerWidth, innerHeight]"
++            width, height = self.webdriver.execute_script(viewport)
++            if [width, height] == [800, 600]:
++                return
++            try:
++                frame = self.webdriver.window.rect
++                self.webdriver.window.rect = {"x": 0, "y": 0,
++                                              "width": frame["width"] + 800 - width,
++                                              "height": frame["height"] + 600 - height}
++            except webdriver_error.WebDriverException as error:
++                self.logger.debug(f"Set Window Rect failed: {error}")
++
 +            self.testharness.load_runner(self.executor.last_environment["protocol"])
-+            size = self.webdriver.execute_script("return [innerWidth, innerHeight]")
-+            if size != [800, 600]:
-+                self.logger.warning(f"Summit viewport is {size} after sizing ({r.stdout.strip()} {r.stderr.strip()})")
++            if self.webdriver.execute_script(viewport) != [800, 600]:
++                # Older Summit releases need Haiku's native window scripting.
++                import subprocess
++                import shlex
++                ssh = shlex.split(os.environ.get("SUMMIT_SSH", "ssh -F /mnt/HaikuWork/x399/ssh/config ws-haiku"))
++                script = os.path.join(os.environ.get("SUMMIT_REMOTE_DIR", "/boot/home/interop"), "size.sh")
++                subprocess.run(ssh + [shlex.quote(script)], capture_output=True, timeout=60)
++                self.testharness.load_runner(self.executor.last_environment["protocol"])
++                size = self.webdriver.execute_script(viewport)
++                if size != [800, 600]:
++                    self.logger.warning(f"Summit viewport is {size} after sizing")
  
  
  class WebDriverBidiProtocol(WebDriverProtocol):
-@@ -1454,6 +1475,31 @@ class WebDriverRefTestExecutor(RefTestExecutor):
+@@ -1454,6 +1487,31 @@ class WebDriverRefTestExecutor(RefTestExecutor):
          # return value.
          protocol.testdriver.run(url, self.wait_script)
  

@@ -21,7 +21,7 @@ suite (1714 tests) takes about 30 minutes.
 | `score.py RUN.json ...` | Per-area scores next to Safari TP and Safari stable (wpt.fyi summaries), and `results/tests.json` for triage |
 | `gaps.py [RUN ...]` | Best result per test over several runs, and the points each failure group is worth |
 | `mcp.py` | Small MCP client (Summit's MCP server, for on-screen screenshots) |
-| `x399/size.sh` | Gives the automated window an 800x600 viewport with `hey` (Set Window Rect does nothing, #187) |
+| `x399/size.sh` | Fallback for releases that need Haiku window scripting to set the viewport |
 | `x399/noblank.sh` | Keeps screen_blanker away while tests run |
 | `sp3.sh BUILD RUNS` | Speedometer 3.1 (browserbench.org) in a test copy, each run in a fresh Summit and profile, scores read over MCP; `SP3_ENV` adds settings, `SP3_PROFILE=SECONDS` takes a system profile 40 s in |
 
@@ -118,12 +118,12 @@ passes every reftest, so check that failures and passes show real pages.
   test machine). The server binds to `WPT_SERVER_HOST` (`env_options`).
 - `--webkit-port=summit` sends `summit:browserOptions` (binary, args) and
   `acceptInsecureCerts`.
-- After connecting, the window is sized with `x399/size.sh` (Set Window Rect
-  was ignored before the #187 fixes) and the runner reloaded so the viewport is 800x600 CSS
-  pixels. The X399 runs at 2x, so WebDriver screenshots are 1600x1200; test
-  and reference are taken the same way.
-- Closing a window waits up to 2 s for its handle to go (Close Window answered
-  early before the #187 fixes). Both workarounds are kept for older builds.
+- After connecting, the runner measures the CSS viewport and uses WebDriver
+  Set Window Rect to resize it to 800×600. Older builds can use the
+  `x399/size.sh` fallback. On a 2× display, a viewport screenshot is 1600×1200 pixels.
+- Closing a window waits up to two seconds for its handle to disappear on
+  builds that acknowledge Close Window early.
+
 - `SUMMIT_SCREEN_SHOTS=1`: reftest pictures come from Summit's MCP
   `screenshot` (what the screen shows) instead of WebDriver, whose pictures
   leave out composited content (#186). Neither is perfect: compare both runs.
