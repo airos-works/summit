@@ -14597,27 +14597,35 @@ index cd9a3d954e42a3886ade1462945b9f10e81d8374..b73da6790a6da855074d922dcb9598c3
      case CaptureDevice::DeviceType::Unknown:
          ASSERT_NOT_REACHED();
 diff --git a/Source/WebCore/Modules/mediastream/RTCEncodedAudioFrame.cpp b/Source/WebCore/Modules/mediastream/RTCEncodedAudioFrame.cpp
-index 04d105e4800d0c299bd6577b277c4f578f690773..96874b422af685427cab8a580d7a45169d345a02 100644
+index 04d105e4800d0c299bd6577b277c4f578f690773..6c2c306addb5602210486cf3d169b8ffd905820a 100644
 --- a/Source/WebCore/Modules/mediastream/RTCEncodedAudioFrame.cpp
 +++ b/Source/WebCore/Modules/mediastream/RTCEncodedAudioFrame.cpp
-@@ -47,10 +47,11 @@ RTCEncodedAudioFrame::RTCEncodedAudioFrame(Ref<RTCRtpTransformableFrame>&& frame
+@@ -42,16 +42,16 @@ Ref<RTCEncodedAudioFrame> RTCEncodedAudioFrame::create(RTCEncodedAudioFrame& fra
+ 
+ RTCEncodedAudioFrame::RTCEncodedAudioFrame(Ref<RTCRtpTransformableFrame>&& frame)
+     : RTCEncodedFrame(WTF::move(frame))
++    , m_metadata(m_frame->audioMetadata())
+ {
+ }
  
  RTCEncodedAudioFrame::~RTCEncodedAudioFrame() = default;
  
 -const RTCEncodedAudioFrame::Metadata& RTCEncodedAudioFrame::getMetadata()
 +const RTCEncodedAudioFrame::Metadata& RTCEncodedAudioFrame::getMetadata(ScriptExecutionContext& context)
  {
-     if (!m_metadata)
-         m_metadata = m_frame->audioMetadata();
-+    m_metadata->receiveTime = receiveTime(context);
-     return *m_metadata;
+-    if (!m_metadata)
+-        m_metadata = m_frame->audioMetadata();
+-    return *m_metadata;
++    m_metadata.receiveTime = receiveTime(context);
++    return m_metadata;
  }
  
+ } // namespace WebCore
 diff --git a/Source/WebCore/Modules/mediastream/RTCEncodedAudioFrame.h b/Source/WebCore/Modules/mediastream/RTCEncodedAudioFrame.h
-index c7c9253410403334afde846c5254754640f5cfbc..5df63833e32aa87743223ba5820e39a1b6e0a77e 100644
+index c7c9253410403334afde846c5254754640f5cfbc..d26fd6114d0189f2ab2dbc92656661babed1af1d 100644
 --- a/Source/WebCore/Modules/mediastream/RTCEncodedAudioFrame.h
 +++ b/Source/WebCore/Modules/mediastream/RTCEncodedAudioFrame.h
-@@ -41,7 +41,7 @@ public:
+@@ -41,12 +41,12 @@ public:
      ~RTCEncodedAudioFrame();
  
      using Metadata = RTCEncodedAudioFrameMetadata;
@@ -14626,8 +14634,14 @@ index c7c9253410403334afde846c5254754640f5cfbc..5df63833e32aa87743223ba5820e39a1
  
  private:
      explicit RTCEncodedAudioFrame(Ref<RTCRtpTransformableFrame>&&);
+ 
+-    mutable std::optional<Metadata> m_metadata;
++    Metadata m_metadata;
+ };
+ 
+ } // namespace WebCore
 diff --git a/Source/WebCore/Modules/mediastream/RTCEncodedAudioFrame.idl b/Source/WebCore/Modules/mediastream/RTCEncodedAudioFrame.idl
-index adafc1772318624a91eeae8a4efc8966b9b553b2..166c9f2e439f2cb50b2e302784b6c3986a57debe 100644
+index adafc1772318624a91eeae8a4efc8966b9b553b2..2f4560ecb846c0adde6448fad6b27c256040fb99 100644
 --- a/Source/WebCore/Modules/mediastream/RTCEncodedAudioFrame.idl
 +++ b/Source/WebCore/Modules/mediastream/RTCEncodedAudioFrame.idl
 @@ -25,6 +25,8 @@
@@ -14639,7 +14653,7 @@ index adafc1772318624a91eeae8a4efc8966b9b553b2..166c9f2e439f2cb50b2e302784b6c398
  [
      Conditional=WEB_RTC,
      JSGenerateToJSObject,
-@@ -36,10 +38,10 @@
+@@ -36,10 +38,11 @@
      short sequenceNumber;
      unsigned long rtpTimestamp;
      // FIXME: add additional time metadata
@@ -14648,10 +14662,11 @@ index adafc1772318624a91eeae8a4efc8966b9b553b2..166c9f2e439f2cb50b2e302784b6c398
      // DOMHighResTimeStamp senderCaptureTimeOffset;
      DOMString mimeType;
 +    DOMHighResTimeStamp receiveTime;
++    double audioLevel;
  };
  
  [
-@@ -59,5 +61,5 @@
+@@ -59,5 +62,5 @@
  
      readonly attribute unsigned long long timestamp;
      attribute ArrayBuffer data;
@@ -14941,7 +14956,7 @@ index b9764722013300cd6891da5c51d484e6951c9867..5bf5d83dcedaa28fc77a72fbcbd9827a
  
      void setSignalingState(RTCSignalingState);
 diff --git a/Source/WebCore/Modules/mediastream/RTCRtpTransformableFrame.h b/Source/WebCore/Modules/mediastream/RTCRtpTransformableFrame.h
-index a6edf51e1d68e899cc0b602bad3d079629988792..1681dd9f43211907c7b6cc893a188cc1cbb88ec0 100644
+index a6edf51e1d68e899cc0b602bad3d079629988792..54b772070a7c1a12262ccb90206ff7cf0f0f6f20 100644
 --- a/Source/WebCore/Modules/mediastream/RTCRtpTransformableFrame.h
 +++ b/Source/WebCore/Modules/mediastream/RTCRtpTransformableFrame.h
 @@ -26,7 +26,9 @@
@@ -14954,15 +14969,16 @@ index a6edf51e1d68e899cc0b602bad3d079629988792..1681dd9f43211907c7b6cc893a188cc1
  #include <span>
  #include <wtf/ThreadSafeRefCounted.h>
  #include <wtf/Vector.h>
-@@ -41,6 +43,7 @@ struct RTCEncodedAudioFrameMetadata {
+@@ -41,6 +43,8 @@ struct RTCEncodedAudioFrameMetadata {
      std::optional<uint16_t> sequenceNumber;
      std::optional<uint32_t> rtpTimestamp;
      String mimeType;
 +    std::optional<DOMHighResTimeStamp> receiveTime { };
++    std::optional<double> audioLevel { };
  };
  
  struct RTCEncodedVideoFrameMetadata {
-@@ -56,6 +59,7 @@ struct RTCEncodedVideoFrameMetadata {
+@@ -56,6 +60,7 @@ struct RTCEncodedVideoFrameMetadata {
      std::optional<int64_t> timestamp;
      std::optional<uint32_t> rtpTimestamp;
      String mimeType;
@@ -14970,7 +14986,7 @@ index a6edf51e1d68e899cc0b602bad3d079629988792..1681dd9f43211907c7b6cc893a188cc1
  };
  
  class RTCRtpScriptTransformer;
-@@ -66,6 +70,7 @@ public:
+@@ -66,6 +71,7 @@ public:
      virtual std::span<const uint8_t> data() const = 0;
      virtual void setData(std::span<const uint8_t>) = 0;
  
@@ -14978,7 +14994,7 @@ index a6edf51e1d68e899cc0b602bad3d079629988792..1681dd9f43211907c7b6cc893a188cc1
      virtual uint64_t timestamp() const = 0;
      virtual RTCEncodedAudioFrameMetadata audioMetadata() const = 0;
      virtual RTCEncodedVideoFrameMetadata videoMetadata() const = 0;
-@@ -81,6 +86,9 @@ public:
+@@ -81,6 +87,9 @@ public:
  
      virtual bool isLibWebRTCRtpTransformableFrame() const { return false; }
  
@@ -14988,11 +15004,33 @@ index a6edf51e1d68e899cc0b602bad3d079629988792..1681dd9f43211907c7b6cc893a188cc1
  private:
      WeakPtr<RTCRtpScriptTransformer> m_transformer;
  };
+diff --git a/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCRtpReceiverBackend.cpp b/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCRtpReceiverBackend.cpp
+index 17140c7803a3b514b84b57a4ce0bebf79725b117..06fe1a6d9744942fa7abd763c8de22c3829e946c 100644
+--- a/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCRtpReceiverBackend.cpp
++++ b/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCRtpReceiverBackend.cpp
+@@ -122,7 +122,7 @@ static inline void fillRTCRtpContributingSource(RTCRtpContributingSource& source
+     source.rtpTimestamp = rtcSource.rtp_timestamp();
+     source.source = rtcSource.source_id();
+     if (rtcSource.audio_level())
+-        source.audioLevel = (*rtcSource.audio_level() == 127) ? 0 : pow(10, -*rtcSource.audio_level() / 20);
++        source.audioLevel = linearAudioLevelFromRTP(*rtcSource.audio_level());
+ }
+ 
+ static inline RTCRtpContributingSource toRTCRtpContributingSource(const webrtc::RtpSource& rtcSource, double webrtcToWallTimeOffset)
 diff --git a/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCRtpTransformableFrame.cpp b/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCRtpTransformableFrame.cpp
-index 0b5965c97f73d2419367fd570999069f0425716c..18d899c08f71aa39608134f25e1053f532b18f7b 100644
+index 0b5965c97f73d2419367fd570999069f0425716c..28d85e3f4177eafa572141c08e944357d2b277f8 100644
 --- a/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCRtpTransformableFrame.cpp
 +++ b/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCRtpTransformableFrame.cpp
-@@ -44,6 +44,8 @@ LibWebRTCRtpTransformableFrame::LibWebRTCRtpTransformableFrame(std::unique_ptr<w
+@@ -25,6 +25,8 @@
+ #include "config.h"
+ #include "LibWebRTCRtpTransformableFrame.h"
+ #include "LibWebRTCUtils.h"
++#include <algorithm>
++#include <cmath>
+ #include <wtf/TZoneMallocInlines.h>
+ 
+ #if ENABLE(WEB_RTC) && USE(LIBWEBRTC)
+@@ -44,6 +46,8 @@ LibWebRTCRtpTransformableFrame::LibWebRTCRtpTransformableFrame(std::unique_ptr<w
      : m_rtcFrame(WTF::move(frame))
      , m_isAudio(isAudio)
  {
@@ -15001,17 +15039,109 @@ index 0b5965c97f73d2419367fd570999069f0425716c..18d899c08f71aa39608134f25e1053f5
  }
  
  LibWebRTCRtpTransformableFrame::~LibWebRTCRtpTransformableFrame() = default;
-@@ -141,7 +143,9 @@ Ref<RTCRtpTransformableFrame> LibWebRTCRtpTransformableFrame::clone()
+@@ -91,16 +95,21 @@ RTCEncodedAudioFrameMetadata LibWebRTCRtpTransformableFrame::audioMetadata() con
+         return { };
+ 
+     Vector<uint32_t> cssrcs;
++    auto& audioFrame = static_cast<webrtc::TransformableAudioFrameInterface&>(*m_rtcFrame);
++    auto audioLevel = m_audioLevelOverride;
++    if (!audioLevel) {
++        if (auto level = audioFrame.AudioLevel())
++            audioLevel = linearAudioLevelFromRTP(*level);
++    }
+     std::optional<uint16_t> sequenceNumber;
+     if (m_rtcFrame->GetDirection() == webrtc::TransformableFrameInterface::Direction::kReceiver) {
+-        auto* audioFrame = static_cast<webrtc::TransformableAudioFrameInterface*>(m_rtcFrame.get());
+-        auto contributingSources = audioFrame->GetContributingSources();
++        auto contributingSources = audioFrame.GetContributingSources();
+         cssrcs = Vector<uint32_t>(contributingSources.size(), [&](size_t cptr) {
+             return contributingSources[cptr];
+         });
+-        sequenceNumber = audioFrame->SequenceNumber();
++        sequenceNumber = audioFrame.SequenceNumber();
+     }
+-    return { m_rtcFrame->GetSsrc(), m_rtcFrame->GetPayloadType(), WTF::move(cssrcs), sequenceNumber, timestampFromRtpTimestampInfo(m_rtcFrame->GetRtpTimestampInfo()), fromStdString(m_rtcFrame->GetMimeType()) };
++    return { m_rtcFrame->GetSsrc(), m_rtcFrame->GetPayloadType(), WTF::move(cssrcs), sequenceNumber, timestampFromRtpTimestampInfo(m_rtcFrame->GetRtpTimestampInfo()), fromStdString(m_rtcFrame->GetMimeType()), { }, audioLevel };
+ }
+ 
+ RTCEncodedVideoFrameMetadata LibWebRTCRtpTransformableFrame::videoMetadata() const
+@@ -141,12 +150,24 @@ Ref<RTCRtpTransformableFrame> LibWebRTCRtpTransformableFrame::clone()
          rtcClone = webrtc::CloneAudioFrame(static_cast<webrtc::TransformableAudioFrameInterface*>(m_rtcFrame.get()));
      else
          rtcClone = webrtc::CloneVideoFrame(static_cast<webrtc::TransformableVideoFrameInterface*>(m_rtcFrame.get()));
 -    return adoptRef(*new LibWebRTCRtpTransformableFrame(WTF::move(rtcClone), m_isAudio));
 +    auto clone = adoptRef(*new LibWebRTCRtpTransformableFrame(WTF::move(rtcClone), m_isAudio));
 +    clone->m_receiveTime = m_receiveTime;
++    clone->m_audioLevelOverride = m_audioLevelOverride;
 +    return clone;
  }
  
  void LibWebRTCRtpTransformableFrame::setOptions(const RTCEncodedAudioFrameMetadata& metadata)
+ {
+     ASSERT(m_isAudio);
++    if (metadata.audioLevel) {
++        m_audioLevelOverride = metadata.audioLevel;
++        auto& audioFrame = static_cast<webrtc::TransformableAudioFrameInterface&>(*m_rtcFrame);
++        if (audioFrame.CanSetAudioLevel()) {
++            auto level = *metadata.audioLevel;
++            auto decibelsBelowFullScale = level > 0 ? std::clamp(std::round(-20 * std::log10(level)), 0.0, 127.0) : 127.0;
++            audioFrame.SetAudioLevel(static_cast<uint8_t>(decibelsBelowFullScale));
++        }
++    }
+     // FIXME: Support more metadata.
+     if (metadata.rtpTimestamp)
+         m_rtcFrame->SetRTPTimestamp(*metadata.rtpTimestamp);
+diff --git a/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCRtpTransformableFrame.h b/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCRtpTransformableFrame.h
+index 0ebfebd7394123d8b78d400aaf3317fede16cc9b..3857f9b387f9dbb17a9abbe8934e5980c6af9db9 100644
+--- a/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCRtpTransformableFrame.h
++++ b/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCRtpTransformableFrame.h
+@@ -62,6 +62,8 @@ private:
+ 
+     std::unique_ptr<webrtc::TransformableFrameInterface> m_rtcFrame;
+     bool m_isAudio;
++    // The JS copy preserves the supplied level at double precision. RTP uses whole decibels.
++    std::optional<double> m_audioLevelOverride;
+ };
+ 
+ } // namespace WebCore
+diff --git a/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCUtils.cpp b/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCUtils.cpp
+index f9e2d242d7915918856c95986d936682b967c4d8..f19640ffe43bc8d5493c4798df612dfce016f5fc 100644
+--- a/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCUtils.cpp
++++ b/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCUtils.cpp
+@@ -34,6 +34,7 @@
+ #include "RTCIceCandidate.h"
+ #include "RTCPeerConnection.h"
+ #include "RTCRtpSendParameters.h"
++#include <cmath>
+ #include <wtf/text/WTFString.h>
+ 
+ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
+@@ -49,6 +50,12 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
+ 
+ namespace WebCore {
+ 
++double linearAudioLevelFromRTP(uint8_t level)
++{
++    // RFC 6464 reserves 127 for silence.
++    return level == 127 ? 0 : std::pow(10.0, -level / 20.0);
++}
++
+ webrtc::Priority fromRTCPriorityType(RTCPriorityType priority)
+ {
+     switch (priority) {
+diff --git a/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCUtils.h b/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCUtils.h
+index 9ce718e56e3d8c6f1cbb04b6ecd5da06f925a463..ca50c86106a7c779ee4ed0f82e3661ade4bd15df 100644
+--- a/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCUtils.h
++++ b/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCUtils.h
+@@ -87,6 +87,8 @@ webrtc::Priority NODELETE fromRTCPriorityType(RTCPriorityType);
+ enum class MediaStreamTrackHintValue : uint8_t;
+ webrtc::VideoTrackInterface::ContentHint toWebRTCContentHint(MediaStreamTrackHintValue);
+ 
++double linearAudioLevelFromRTP(uint8_t);
++
+ inline String fromStdString(const std::string& value)
+ {
+     return String::fromUTF8(value);
 diff --git a/Source/WebCore/Modules/modern-media-controls/media/pip-support.js b/Source/WebCore/Modules/modern-media-controls/media/pip-support.js
 index 760bb8b038ff94fd34ff200228a0313fe243d092..15403102944c94a1de88e5dcda4b20e56a992463 100644
 --- a/Source/WebCore/Modules/modern-media-controls/media/pip-support.js
