@@ -25964,6 +25964,153 @@ index 2d5334014685d35d974eed8d6ec9be5c0865344b..5d344747f435031557ca31614aaebe4a
  
      // FIXME: non-standard.
      double movementX = 0;
+diff --git a/Source/WebCore/dom/PointerEvent.cpp b/Source/WebCore/dom/PointerEvent.cpp
+index dd8c59fe17c70a72f03df3c884b5a92f8f655e61..3b0a4e60a19bbb0fe8bbe9f38a64bc542df69298 100644
+--- a/Source/WebCore/dom/PointerEvent.cpp
++++ b/Source/WebCore/dom/PointerEvent.cpp
+@@ -128,10 +128,23 @@ auto PointerEvent::angleFromTilt(long tiltX, long tiltY) -> PointerEventAngle
+ // This algorithm is equivalent to the one provided in https://w3c.github.io/pointerevents/#converting-between-tiltx-tilty-and-altitudeangle-azimuthangle.
+ auto PointerEvent::tiltFromAngle(double altitudeAngle, double azimuthAngle) -> PointerEventTilt
+ {
+-    double tiltXRadians = WTF::areEssentiallyEqual(altitudeAngle, 0.0) ? cos(azimuthAngle) * piOverTwoDouble : atan(cos(azimuthAngle) / tan(altitudeAngle));
+-    double tiltYRadians = WTF::areEssentiallyEqual(altitudeAngle, 0.0) ? sin(azimuthAngle) * piOverTwoDouble : atan(sin(azimuthAngle) / tan(altitudeAngle));
++    if (!altitudeAngle) {
++        // A pen in the screen plane has 90 degrees of tilt on each
++        // projected axis, except where the projection is exactly zero.
++        long tiltX = 0;
++        if (azimuthAngle != piOverTwoDouble && azimuthAngle != 3 * piOverTwoDouble)
++            tiltX = cos(azimuthAngle) > 0 ? 90 : -90;
++        long tiltY = 0;
++        if (azimuthAngle && azimuthAngle != std::numbers::pi && azimuthAngle != radiansPerTurnDouble)
++            tiltY = sin(azimuthAngle) > 0 ? 90 : -90;
++        return { tiltX, tiltY };
++    }
+ 
+-    return { static_cast<long>(round(tiltXRadians * degreesPerRadianDouble)), static_cast<long>(round(tiltYRadians * degreesPerRadianDouble)) };
++    double tangent = tan(altitudeAngle);
++    auto tilt = [&](double projection) {
++        return static_cast<long>(floor(atan(projection / tangent) * degreesPerRadianDouble + 0.5));
++    };
++    return { tilt(cos(azimuthAngle)), tilt(sin(azimuthAngle)) };
+ }
+ 
+ PointerEvent::PointerEvent(const AtomString& type, Init&& initializer, IsTrusted isTrusted)
+@@ -141,28 +154,27 @@ PointerEvent::PointerEvent(const AtomString& type, Init&& initializer, IsTrusted
+     , m_height(initializer.height)
+     , m_pressure(initializer.pressure)
+     , m_tangentialPressure(initializer.tangentialPressure)
+-    , m_tiltX(initializer.tiltX)
+-    , m_tiltY(initializer.tiltY)
++    , m_tiltX(initializer.tiltX.value_or(0))
++    , m_tiltY(initializer.tiltY.value_or(0))
+     , m_twist(initializer.twist)
+-    , m_altitudeAngle(initializer.altitudeAngle)
+-    , m_azimuthAngle(initializer.azimuthAngle)
++    , m_altitudeAngle(initializer.altitudeAngle.value_or(piOverTwoDouble))
++    , m_azimuthAngle(initializer.azimuthAngle.value_or(0))
++    , m_persistentDeviceId(initializer.persistentDeviceId)
+     , m_pointerType(initializer.pointerType)
+     , m_isPrimary(initializer.isPrimary)
+     , m_fractionalCoordinatesAllowed(fractionalCoordinatesAllowedForType(type))
+     , m_coalescedEvents(initializer.coalescedEvents)
+     , m_predictedEvents(initializer.predictedEvents)
+ {
+-    // A pair of components is complete when both or no values have been initialized to non-default values.
+-    bool tiltComponentsComplete = !initializer.tiltX == !initializer.tiltY;
+-    bool angleComponentsComplete = !initializer.azimuthAngle == (initializer.altitudeAngle == piOverTwoDouble);
+-
+-    PointerEventAngle angle = angleFromTilt(m_tiltX, m_tiltY);
+-    PointerEventTilt tilt = tiltFromAngle(m_altitudeAngle, m_azimuthAngle);
+-
+-    m_altitudeAngle = angleComponentsComplete ? angle.altitudeAngle : m_altitudeAngle;
+-    m_azimuthAngle = angleComponentsComplete ? angle.azimuthAngle : m_azimuthAngle;
+-    m_tiltX = tiltComponentsComplete ? tilt.tiltX : m_tiltX;
+-    m_tiltY = tiltComponentsComplete ? tilt.tiltY : m_tiltY;
++    if ((initializer.tiltX || initializer.tiltY) && !initializer.altitudeAngle && !initializer.azimuthAngle) {
++        auto angles = angleFromTilt(m_tiltX, m_tiltY);
++        m_altitudeAngle = angles.altitudeAngle;
++        m_azimuthAngle = angles.azimuthAngle;
++    } else if ((initializer.altitudeAngle || initializer.azimuthAngle) && !initializer.tiltX && !initializer.tiltY) {
++        auto tilt = tiltFromAngle(m_altitudeAngle, m_azimuthAngle);
++        m_tiltX = tilt.tiltX;
++        m_tiltY = tilt.tiltY;
++    }
+ }
+ 
+ static Vector<Ref<PointerEvent>> createCoalescedPointerEvents(const AtomString& type, MouseButton button, const MouseEvent& mouseEvent, PointerID pointerId, const String& pointerType)
+diff --git a/Source/WebCore/dom/PointerEvent.h b/Source/WebCore/dom/PointerEvent.h
+index a9ad0f77eedb629a360c8ec77257e84e59418dbf..90bd7faf72438b58473914dded0a2b5c4a1d4231 100644
+--- a/Source/WebCore/dom/PointerEvent.h
++++ b/Source/WebCore/dom/PointerEvent.h
+@@ -58,11 +58,12 @@ public:
+         double height { 1 };
+         float pressure { 0 };
+         float tangentialPressure { 0 };
+-        long tiltX { 0 };
+-        long tiltY { 0 };
++        std::optional<long> tiltX;
++        std::optional<long> tiltY;
+         long twist { 0 };
+-        double altitudeAngle { piOverTwoDouble };
+-        double azimuthAngle { 0 };
++        std::optional<double> altitudeAngle;
++        std::optional<double> azimuthAngle;
++        int32_t persistentDeviceId { 0 };
+         String pointerType { mousePointerEventType() };
+         bool isPrimary { false };
+         Vector<Ref<PointerEvent>> coalescedEvents;
+@@ -121,6 +122,7 @@ public:
+     long twist() const { return m_twist; }
+     double altitudeAngle() const { return m_altitudeAngle; }
+     double azimuthAngle() const { return m_azimuthAngle; }
++    int32_t persistentDeviceId() const { return m_persistentDeviceId; }
+     String pointerType() const { return m_pointerType; }
+     bool isPrimary() const { return m_isPrimary; }
+     bool fractionalCoordinatesAllowed() const { return m_fractionalCoordinatesAllowed; }
+@@ -208,6 +210,7 @@ private:
+     long m_twist { 0 };
+     double m_altitudeAngle { piOverTwoDouble };
+     double m_azimuthAngle { 0 };
++    int32_t m_persistentDeviceId { 0 };
+     String m_pointerType { mousePointerEventType() };
+     bool m_isPrimary { false };
+     bool m_fractionalCoordinatesAllowed { true };
+diff --git a/Source/WebCore/dom/PointerEvent.idl b/Source/WebCore/dom/PointerEvent.idl
+index 6d31af2f372edd30bc7ef5bba0ae51f41b324319..fbe3a5301026d165f2546b961582b2b8e64f24f1 100644
+--- a/Source/WebCore/dom/PointerEvent.idl
++++ b/Source/WebCore/dom/PointerEvent.idl
+@@ -25,18 +25,18 @@
+ 
+ // https://w3c.github.io/pointerevents/
+ 
+-// FIXME: The specification does not have defaults for tiltX, tiltY, altitudeAngle, and azimuthAngle, but it should.
+ dictionary PointerEventInit : MouseEventInit {
+     long pointerId = 0;
+     double width = 1;
+     double height = 1;
+     float pressure = 0;
+     float tangentialPressure = 0;
+-    [ImplementationDefaultValue=0] long tiltX;
+-    [ImplementationDefaultValue=0] long tiltY;
++    long tiltX;
++    long tiltY;
+     long twist = 0;
+-    [EnabledBySetting=AltitudeAngleEnabled, ImplementationDefaultValue=piOverTwoDouble] double altitudeAngle;
+-    [EnabledBySetting=AzimuthAngleEnabled, ImplementationDefaultValue=0] double azimuthAngle;
++    [EnabledBySetting=AltitudeAngleEnabled] double altitudeAngle;
++    [EnabledBySetting=AzimuthAngleEnabled] double azimuthAngle;
++    long persistentDeviceId = 0;
+     DOMString pointerType = "";
+     boolean isPrimary = false;
+     sequence<PointerEvent> coalescedEvents = [];
+@@ -61,6 +61,7 @@ dictionary PointerEventInit : MouseEventInit {
+     readonly attribute long twist;
+     [EnabledBySetting=AltitudeAngleEnabled] readonly attribute double altitudeAngle;
+     [EnabledBySetting=AzimuthAngleEnabled] readonly attribute double azimuthAngle;
++    readonly attribute long persistentDeviceId;
+     readonly attribute DOMString pointerType;
+     readonly attribute boolean isPrimary;
+ 
 diff --git a/Source/WebCore/dom/Position.cpp b/Source/WebCore/dom/Position.cpp
 index 105e7fcdcc8733c8dd1e662460015680f469a3a4..8fe399844836fefc38c61faa98bf397e65dd46d1 100644
 --- a/Source/WebCore/dom/Position.cpp
@@ -172336,10 +172483,10 @@ index 0000000000000000000000000000000000000000..c9a119d02f85b7c5ad8fe9153bfc9604
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebView.cpp b/Source/WebKit/UIProcess/haiku/WebView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..868a30d57891a41e6457f7c8950ed6e49f9572bd
+index 0000000000000000000000000000000000000000..1c6edd6085d19b9fd6050789c37298be6931ba0d
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebView.cpp
-@@ -0,0 +1,3907 @@
+@@ -0,0 +1,3909 @@
 +/*
 + * Copyright (C) 2013 Intel Corporation. All rights reserved.
 + *
@@ -174574,6 +174721,8 @@ index 0000000000000000000000000000000000000000..868a30d57891a41e6457f7c8950ed6e4
 +    // DataTransfer.items, on by default for the other ports: editors (GitHub's
 +    // among them) take pasted and dropped images from it.
 +    configuration->preferences().setDataTransferItemsEnabled(true);
++    configuration->preferences().setAltitudeAngleEnabled(true);
++    configuration->preferences().setAzimuthAngleEnabled(true);
 +    configuration->preferences().setInputTypeColorEnabled(true);
 +#if ENABLE(PDFJS)
 +    configuration->preferences().setPDFJSViewerEnabled(true);
