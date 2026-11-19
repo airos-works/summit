@@ -15183,6 +15183,19 @@ index 7d4633cbea43f5816021e3f64c405d33e310d1bc..274f2b98e3a444860e9e7bcdc8a2ef52
 -    RTCEncodedVideoFrameMetadata getMetadata();
 +    [CallWith=RelevantScriptExecutionContext] RTCEncodedVideoFrameMetadata getMetadata();
  };
+diff --git a/Source/WebCore/Modules/mediastream/RTCIceCandidate.h b/Source/WebCore/Modules/mediastream/RTCIceCandidate.h
+index dcad033852e14bdf0d313c817aa304aca53e21bb..1ca34c74b3a7b0c38e85b804d8eefcf7060f2958 100644
+--- a/Source/WebCore/Modules/mediastream/RTCIceCandidate.h
++++ b/Source/WebCore/Modules/mediastream/RTCIceCandidate.h
+@@ -47,7 +47,7 @@ public:
+ 
+     static ExceptionOr<Ref<RTCIceCandidate>> create(const RTCIceCandidateInit&);
+     static Ref<RTCIceCandidate> create(const String& candidate, const String& sdpMid, std::optional<unsigned short> sdpMLineIndex);
+-    static Ref<RTCIceCandidate> create(const String& candidate, const String& sdpMid, Fields&& fields) { return adoptRef(*new RTCIceCandidate(candidate, sdpMid, { }, WTF::move(fields))); }
++    static Ref<RTCIceCandidate> create(const String& candidate, const String& sdpMid, Fields&& fields, std::optional<unsigned short> sdpMLineIndex = std::nullopt) { return adoptRef(*new RTCIceCandidate(candidate, sdpMid, sdpMLineIndex, WTF::move(fields))); }
+ 
+     const String& candidate() const LIFETIME_BOUND { return m_candidate; }
+     const String& sdpMid() const LIFETIME_BOUND { return m_sdpMid; }
 diff --git a/Source/WebCore/Modules/mediastream/RTCIceCandidatePair.h b/Source/WebCore/Modules/mediastream/RTCIceCandidatePair.h
 new file mode 100644
 index 0000000000000000000000000000000000000000..f5dae3f5ce25d51e741ca0550141b885997ab0e8
@@ -15304,10 +15317,17 @@ index 0000000000000000000000000000000000000000..83f4617a1ebd772d7b880865f3cd4b61
 +    [SameObject] readonly attribute RTCIceCandidate remote;
 +};
 diff --git a/Source/WebCore/Modules/mediastream/RTCIceTransport.cpp b/Source/WebCore/Modules/mediastream/RTCIceTransport.cpp
-index f1de2d1b6ad86b69433d830cd68c02de61497d3b..14be4561d935f5fb740789a21d486256f285828d 100644
+index f1de2d1b6ad86b69433d830cd68c02de61497d3b..364ff767d42d8701182ef5670cea61fe025c8a4e 100644
 --- a/Source/WebCore/Modules/mediastream/RTCIceTransport.cpp
 +++ b/Source/WebCore/Modules/mediastream/RTCIceTransport.cpp
-@@ -39,15 +39,16 @@ namespace WebCore {
+@@ -33,25 +33,28 @@
+ #include "EventNames.h"
+ #include "EventTargetInlines.h"
+ #include "RTCPeerConnection.h"
++#include "RTCSessionDescription.h"
+ #include <wtf/TZoneMallocInlines.h>
+ 
+ namespace WebCore {
  
  WTF_MAKE_TZONE_ALLOCATED_IMPL(RTCIceTransport);
  
@@ -15327,7 +15347,12 @@ index f1de2d1b6ad86b69433d830cd68c02de61497d3b..14be4561d935f5fb740789a21d486256
      , m_backend(WTF::move(backend))
      , m_connection(connection)
  {
-@@ -68,6 +69,7 @@ void RTCIceTransport::stop()
+     m_backend->registerClient(*this);
++    updateDescriptions(connection.localDescription().get(), connection.remoteDescription());
+ }
+ 
+ RTCIceTransport::~RTCIceTransport()
+@@ -68,6 +71,7 @@ void RTCIceTransport::stop()
  {
      m_isStopped = true;
      m_transportState = RTCIceTransportState::Closed;
@@ -15335,7 +15360,7 @@ index f1de2d1b6ad86b69433d830cd68c02de61497d3b..14be4561d935f5fb740789a21d486256
  }
  
  bool RTCIceTransport::virtualHasPendingActivity() const
-@@ -75,6 +77,20 @@ bool RTCIceTransport::virtualHasPendingActivity() const
+@@ -75,6 +79,20 @@ bool RTCIceTransport::virtualHasPendingActivity() const
      return m_transportState != RTCIceTransportState::Closed && hasEventListeners();
  }
  
@@ -15356,7 +15381,7 @@ index f1de2d1b6ad86b69433d830cd68c02de61497d3b..14be4561d935f5fb740789a21d486256
  void RTCIceTransport::onStateChanged(RTCIceTransportState state)
  {
      queueTaskKeepingObjectAlive(*this, TaskSource::Networking, [state](auto& transport) mutable {
-@@ -85,8 +101,10 @@ void RTCIceTransport::onStateChanged(RTCIceTransportState state)
+@@ -85,8 +103,10 @@ void RTCIceTransport::onStateChanged(RTCIceTransportState state)
              return;
  
          transport.m_transportState = state;
@@ -15369,15 +15394,38 @@ index f1de2d1b6ad86b69433d830cd68c02de61497d3b..14be4561d935f5fb740789a21d486256
  
          if (RefPtr connection = transport.connection())
              connection->processIceTransportStateChange(transport);
-@@ -107,24 +125,22 @@ void RTCIceTransport::onGatheringStateChanged(RTCIceGatheringState state)
+@@ -107,24 +127,45 @@ void RTCIceTransport::onGatheringStateChanged(RTCIceGatheringState state)
      });
  }
  
 -void RTCIceTransport::onSelectedCandidatePairChanged(RefPtr<RTCIceCandidate>&& local, RefPtr<RTCIceCandidate>&& remote)
-+void RTCIceTransport::onSelectedCandidatePairChanged(RefPtr<RTCIceCandidatePair>&& pair)
++void RTCIceTransport::Description::update(RTCSessionDescription* description)
  {
 -    queueTaskKeepingObjectAlive(*this, TaskSource::Networking, [local = WTF::move(local), remote = WTF::move(remote)](auto& transport) mutable {
 -        if (transport.m_isStopped)
++    if (session.get() == description)
++        return;
++    session = description;
++    cache.reset();
++}
++
++const RTCIceTransportDescription& RTCIceTransport::Description::info(RTCIceTransport& transport)
++{
++    if (!cache)
++        cache = session ? transport.m_backend->description(*session, transport.component()) : RTCIceTransportDescription { };
++    return *cache;
++}
++
++void RTCIceTransport::updateDescriptions(RTCSessionDescription* local, RTCSessionDescription* remote)
++{
++    if (m_isStopped)
++        return;
++    m_localDescription.update(local);
++    m_remoteDescription.update(remote);
++}
++
++void RTCIceTransport::onSelectedCandidatePairChanged(RefPtr<RTCIceCandidatePair>&& pair)
++{
 +    queueTaskKeepingObjectAlive(*this, TaskSource::Networking, [pair = WTF::move(pair)](auto& transport) mutable {
 +        if (transport.m_isStopped || transport.m_selectedCandidatePair == pair)
              return;
@@ -15403,7 +15451,7 @@ index f1de2d1b6ad86b69433d830cd68c02de61497d3b..14be4561d935f5fb740789a21d486256
  
  } // namespace WebCore
 diff --git a/Source/WebCore/Modules/mediastream/RTCIceTransport.h b/Source/WebCore/Modules/mediastream/RTCIceTransport.h
-index f08606300433c3fe4ff5a02424d63ad7bfdd2476..2aa3e2f0a24854832c932e172c367fb45f32b4a7 100644
+index f08606300433c3fe4ff5a02424d63ad7bfdd2476..d3a34ad949fbb17fb934c5bbeafd29c2d19be41c 100644
 --- a/Source/WebCore/Modules/mediastream/RTCIceTransport.h
 +++ b/Source/WebCore/Modules/mediastream/RTCIceTransport.h
 @@ -36,7 +36,8 @@
@@ -15425,7 +15473,7 @@ index f08606300433c3fe4ff5a02424d63ad7bfdd2476..2aa3e2f0a24854832c932e172c367fb4
      ~RTCIceTransport();
  
      // ContextDestructionObserver.
-@@ -59,20 +60,21 @@ public:
+@@ -59,20 +60,27 @@ public:
      void deref() const final { RefCounted::deref(); }
      USING_CAN_MAKE_WEAKPTR(EventTarget);
  
@@ -15445,7 +15493,13 @@ index f08606300433c3fe4ff5a02424d63ad7bfdd2476..2aa3e2f0a24854832c932e172c367fb4
 -        RefPtr<RTCIceCandidate> remote;
 -    };
 -    std::optional<CandidatePair> NODELETE getSelectedCandidatePair();
++    using Parameters = RTCIceParameters;
++    const Vector<Ref<RTCIceCandidate>>& getLocalCandidates() { return m_localDescription.info(*this).candidates; }
++    const Vector<Ref<RTCIceCandidate>>& getRemoteCandidates() { return m_remoteDescription.info(*this).candidates; }
++    const std::optional<Parameters>& getLocalParameters() { return m_localDescription.info(*this).parameters; }
++    const std::optional<Parameters>& getRemoteParameters() { return m_remoteDescription.info(*this).parameters; }
 +    RTCIceCandidatePair* getSelectedCandidatePair() const;
++    void updateDescriptions(RTCSessionDescription* local, RTCSessionDescription* remote);
  
  private:
 -    RTCIceTransport(ScriptExecutionContext&, UniqueRef<RTCIceTransportBackend>&&, RTCPeerConnection&);
@@ -15453,7 +15507,7 @@ index f08606300433c3fe4ff5a02424d63ad7bfdd2476..2aa3e2f0a24854832c932e172c367fb4
  
      // EventTarget
      enum EventTargetInterfaceType eventTargetInterface() const final { return EventTargetInterfaceType::RTCIceTransport; }
-@@ -85,16 +87,20 @@ private:
+@@ -85,16 +93,29 @@ private:
      bool NODELETE virtualHasPendingActivity() const final;
  
      // RTCIceTransportBackendClient
@@ -15462,7 +15516,16 @@ index f08606300433c3fe4ff5a02424d63ad7bfdd2476..2aa3e2f0a24854832c932e172c367fb4
      void onGatheringStateChanged(RTCIceGatheringState) final;
 -    void onSelectedCandidatePairChanged(RefPtr<RTCIceCandidate>&&, RefPtr<RTCIceCandidate>&&) final;
 +    void onSelectedCandidatePairChanged(RefPtr<RTCIceCandidatePair>&&) final;
++
++    struct Description {
++        void update(RTCSessionDescription*);
++        const RTCIceTransportDescription& info(RTCIceTransport&);
  
++        RefPtr<RTCSessionDescription> session;
++        std::optional<RTCIceTransportDescription> cache;
++    };
++    Description m_localDescription;
++    Description m_remoteDescription;
 +    const RTCIceComponent m_component;
 +    RTCIceRole m_role { RTCIceRole::Unknown };
 +    bool m_hasAppliedAnswer { false };
@@ -15477,26 +15540,25 @@ index f08606300433c3fe4ff5a02424d63ad7bfdd2476..2aa3e2f0a24854832c932e172c367fb4
  
  } // namespace WebCore
 diff --git a/Source/WebCore/Modules/mediastream/RTCIceTransport.idl b/Source/WebCore/Modules/mediastream/RTCIceTransport.idl
-index fdeade240059e1b65b47b3f717ac7566601d26ab..fddaec28f9141f4f224e4baab7b41f6d23a3ae02 100644
+index fdeade240059e1b65b47b3f717ac7566601d26ab..a5a36006cffed894affe1e64d4e15c8b8de7c46d 100644
 --- a/Source/WebCore/Modules/mediastream/RTCIceTransport.idl
 +++ b/Source/WebCore/Modules/mediastream/RTCIceTransport.idl
-@@ -26,15 +26,6 @@
- typedef RTCIceTransportState IceTransportState;
- typedef RTCIceGatheringState IceGatheringState;
- 
--[
--    Conditional=WEB_RTC,
--    EnabledBySetting=PeerConnectionEnabled,
+@@ -29,10 +29,10 @@ typedef RTCIceGatheringState IceGatheringState;
+ [
+     Conditional=WEB_RTC,
+     EnabledBySetting=PeerConnectionEnabled,
 -    JSGenerateToJSObject,
 -] dictionary RTCIceCandidatePair {
 -    RTCIceCandidate local;
 -    RTCIceCandidate remote;
--};
--
++    JSGenerateToJSObject
++] dictionary RTCIceParameters {
++    DOMString usernameFragment;
++    DOMString password;
+ };
+ 
  [
-     ActiveDOMObject,
-     Conditional=WEB_RTC,
-@@ -42,8 +33,8 @@ typedef RTCIceGatheringState IceGatheringState;
+@@ -42,15 +42,15 @@ typedef RTCIceGatheringState IceGatheringState;
      Exposed=Window,
      SkipVTableValidation
  ] interface RTCIceTransport : EventTarget {
@@ -15506,23 +15568,48 @@ index fdeade240059e1b65b47b3f717ac7566601d26ab..fddaec28f9141f4f224e4baab7b41f6d
 +    readonly attribute RTCIceComponent component;
      readonly attribute IceTransportState state;
      readonly attribute IceGatheringState gatheringState;
-     // FIXME 169662: missing sequence<RTCIceCandidate> getLocalCandidates();
+-    // FIXME 169662: missing sequence<RTCIceCandidate> getLocalCandidates();
+-    // FIXME 169662: missing sequence<RTCIceCandidate> getRemoteCandidates();
++    sequence<RTCIceCandidate> getLocalCandidates();
++    sequence<RTCIceCandidate> getRemoteCandidates();
+     RTCIceCandidatePair? getSelectedCandidatePair();
+-    // FIXME 169662: missing RTCIceParameters? getLocalParameters();
+-    // FIXME 169662: missing RTCIceParameters? getRemoteParameters();
++    RTCIceParameters? getLocalParameters();
++    RTCIceParameters? getRemoteParameters();
+     attribute EventHandler onstatechange;
+     attribute EventHandler ongatheringstatechange;
+     attribute EventHandler onselectedcandidatepairchange;
 diff --git a/Source/WebCore/Modules/mediastream/RTCIceTransportBackend.h b/Source/WebCore/Modules/mediastream/RTCIceTransportBackend.h
-index b59f580923c3e1a34cfe5d63dc1ed78b5300940d..926c8384bead16e8775dbce63e97fe1d55f8c63f 100644
+index b59f580923c3e1a34cfe5d63dc1ed78b5300940d..da8c0c365cd1ae83ad36ba27436e9500aa4ec5b1 100644
 --- a/Source/WebCore/Modules/mediastream/RTCIceTransportBackend.h
 +++ b/Source/WebCore/Modules/mediastream/RTCIceTransportBackend.h
-@@ -27,19 +27,21 @@
+@@ -26,20 +26,35 @@
+ 
  #if ENABLE(WEB_RTC)
  
++#include "RTCIceCandidate.h"
  #include "RTCIceGatheringState.h"
 +#include "RTCIceRole.h"
  #include "RTCIceTransportState.h"
  #include <wtf/AbstractRefCountedAndCanMakeWeakPtr.h>
++#include <wtf/Vector.h>
  
  namespace WebCore {
  
 -class RTCIceCandidate;
 +class RTCIceCandidatePair;
++class RTCSessionDescription;
++
++struct RTCIceParameters {
++    String usernameFragment;
++    String password;
++};
++
++struct RTCIceTransportDescription {
++    std::optional<RTCIceParameters> parameters;
++    Vector<Ref<RTCIceCandidate>> candidates;
++};
  
  class RTCIceTransportBackendClient : public AbstractRefCountedAndCanMakeWeakPtr<RTCIceTransportBackendClient> {
  public:
@@ -15535,17 +15622,18 @@ index b59f580923c3e1a34cfe5d63dc1ed78b5300940d..926c8384bead16e8775dbce63e97fe1d
  };
  
  class RTCIceTransportBackend {
-@@ -49,6 +51,8 @@ public:
+@@ -49,6 +64,9 @@ public:
  
      virtual void registerClient(RTCIceTransportBackendClient&) = 0;
      virtual void unregisterClient() = 0;
 +    virtual RTCIceRole startObservingRole() = 0;
++    virtual RTCIceTransportDescription description(const RTCSessionDescription&, RTCIceComponent) = 0;
 +    virtual void checkForClosure() = 0;
  };
  
  inline bool operator==(const RTCIceTransportBackend& a, const RTCIceTransportBackend& b)
 diff --git a/Source/WebCore/Modules/mediastream/RTCPeerConnection.cpp b/Source/WebCore/Modules/mediastream/RTCPeerConnection.cpp
-index 7369cc721d5ac7c067e7fd397758046c8cd80dfc..39f0ed0c754898fe70100d029265ff473c3f4e07 100644
+index 7369cc721d5ac7c067e7fd397758046c8cd80dfc..9ea22ad389a89781a4f7be66c948339d744964ad 100644
 --- a/Source/WebCore/Modules/mediastream/RTCPeerConnection.cpp
 +++ b/Source/WebCore/Modules/mediastream/RTCPeerConnection.cpp
 @@ -473,7 +473,7 @@ void RTCPeerConnection::setLocalDescription(RTCLocalSessionDescriptionInit&& loc
@@ -15669,7 +15757,17 @@ index 7369cc721d5ac7c067e7fd397758046c8cd80dfc..39f0ed0c754898fe70100d029265ff47
      }
  
      return m_dtlsTransports[index].copyRef();
-@@ -1300,14 +1301,28 @@ void RTCPeerConnection::updateDescriptions(PeerConnectionBackend::DescriptionSta
+@@ -1291,6 +1292,9 @@ void RTCPeerConnection::updateDescriptions(PeerConnectionBackend::DescriptionSta
+     updateDescription(m_currentRemoteDescription, states.currentRemoteDescriptionSdpType, WTF::move(states.currentRemoteDescriptionSdp));
+     updateDescription(m_pendingRemoteDescription, states.pendingRemoteDescriptionSdpType, WTF::move(states.pendingRemoteDescriptionSdp));
+ 
++    for (auto& transport : m_iceTransports)
++        transport->updateDescriptions(localDescription().get(), remoteDescription());
++
+     if (states.signalingState) {
+         setSignalingState(*states.signalingState);
+ 
+@@ -1300,14 +1304,28 @@ void RTCPeerConnection::updateDescriptions(PeerConnectionBackend::DescriptionSta
      }
  }
  
@@ -15700,7 +15798,7 @@ index 7369cc721d5ac7c067e7fd397758046c8cd80dfc..39f0ed0c754898fe70100d029265ff47
      }
  }
  
-@@ -1338,7 +1353,8 @@ void RTCPeerConnection::updateSctpBackend(std::unique_ptr<RTCSctpTransportBacken
+@@ -1338,7 +1356,8 @@ void RTCPeerConnection::updateSctpBackend(std::unique_ptr<RTCSctpTransportBacken
          if (!context)
              return;
  
@@ -15968,10 +16066,10 @@ index a6edf51e1d68e899cc0b602bad3d079629988792..54b772070a7c1a12262ccb90206ff7cf
      WeakPtr<RTCRtpScriptTransformer> m_transformer;
  };
 diff --git a/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCIceTransportBackend.cpp b/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCIceTransportBackend.cpp
-index cd57e0202fb108aefddc2db4bafc7a565fde7588..9abbd98042c7d285f9f6f38b6f7f5b5328a7ad4b 100644
+index cd57e0202fb108aefddc2db4bafc7a565fde7588..f964ba095ee556aabd37acb6560bad56bc2e7d02 100644
 --- a/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCIceTransportBackend.cpp
 +++ b/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCIceTransportBackend.cpp
-@@ -29,12 +29,13 @@
+@@ -29,12 +29,15 @@
  
  #include "LibWebRTCProvider.h"
  #include "LibWebRTCUtils.h"
@@ -15981,21 +16079,41 @@ index cd57e0202fb108aefddc2db4bafc7a565fde7588..9abbd98042c7d285f9f6f38b6f7f5b53
  
  ALLOW_UNUSED_PARAMETERS_BEGIN
  
++#include <webrtc/api/jsep.h>
  #include <webrtc/p2p/base/ice_transport_internal.h>
++#include <webrtc/pc/session_description.h>
 +#include <webrtc/rtc_base/thread.h>
  
  ALLOW_UNUSED_PARAMETERS_END
  
-@@ -84,6 +85,8 @@ public:
+@@ -84,6 +87,9 @@ public:
      static Ref<LibWebRTCIceTransportBackendObserver> create(RTCIceTransportBackendClient& client, Ref<webrtc::IceTransportInterface> backend) { return adoptRef(*new LibWebRTCIceTransportBackendObserver(client, WTF::move(backend))); }
  
      void start();
 +    RTCIceRole startObservingRole();
 +    void checkForClosure();
++    String transportName();
      void stop();
  
  private:
-@@ -147,6 +150,53 @@ void LibWebRTCIceTransportBackendObserver::start()
+@@ -95,6 +101,8 @@ private:
+ 
+     void processSelectedCandidatePairChanged(const webrtc::Candidate&, const webrtc::Candidate&);
+ 
++    // Accessed on the network thread, including after the transport is retired.
++    std::string m_transportName;
+     const Ref<webrtc::IceTransportInterface> m_backend;
+     WeakPtr<RTCIceTransportBackendClient> m_client;
+ };
+@@ -111,6 +119,7 @@ void LibWebRTCIceTransportBackendObserver::start()
+         auto* internal = m_backend->internal();
+         if (!internal)
+             return;
++        m_transportName = internal->transport_name();
+         internal->SubscribeIceTransportStateChanged(this, [weakThis = ThreadSafeWeakPtr { * this }](auto* transport) {
+             if (RefPtr protectedThis = weakThis.get())
+                 protectedThis->onIceTransportStateChanged(transport);
+@@ -147,6 +156,64 @@ void LibWebRTCIceTransportBackendObserver::start()
      });
  }
  
@@ -16032,6 +16150,17 @@ index cd57e0202fb108aefddc2db4bafc7a565fde7588..9abbd98042c7d285f9f6f38b6f7f5b53
 +    });
 +}
 +
++String LibWebRTCIceTransportBackendObserver::transportName()
++{
++    return LibWebRTCProvider::networkThread().BlockingCall([this] {
++        if (m_transportName.empty()) {
++            if (auto* internal = m_backend->internal())
++                m_transportName = internal->transport_name();
++        }
++        return fromStdString(m_transportName).isolatedCopy();
++    });
++}
++
 +void LibWebRTCIceTransportBackendObserver::checkForClosure()
 +{
 +    LibWebRTCProvider::callOnWebRTCNetworkThread([protectedThis = Ref { *this }] {
@@ -16049,7 +16178,7 @@ index cd57e0202fb108aefddc2db4bafc7a565fde7588..9abbd98042c7d285f9f6f38b6f7f5b53
  void LibWebRTCIceTransportBackendObserver::stop()
  {
      m_client = nullptr;
-@@ -154,6 +204,7 @@ void LibWebRTCIceTransportBackendObserver::stop()
+@@ -154,6 +221,7 @@ void LibWebRTCIceTransportBackendObserver::stop()
          auto* internal = m_backend->internal();
          if (!internal)
              return;
@@ -16057,7 +16186,7 @@ index cd57e0202fb108aefddc2db4bafc7a565fde7588..9abbd98042c7d285f9f6f38b6f7f5b53
          internal->RemoveGatheringStateCallback(this);
          internal->UnsubscribeNetworkRouteChanged(this);
      });
-@@ -177,20 +228,26 @@ void LibWebRTCIceTransportBackendObserver::onGatheringStateChanged(webrtc::IceTr
+@@ -177,20 +245,26 @@ void LibWebRTCIceTransportBackendObserver::onGatheringStateChanged(webrtc::IceTr
  
  void LibWebRTCIceTransportBackendObserver::onNetworkRouteChanged(std::optional<webrtc::NetworkRoute>)
  {
@@ -16087,13 +16216,47 @@ index cd57e0202fb108aefddc2db4bafc7a565fde7588..9abbd98042c7d285f9f6f38b6f7f5b53
      });
  }
  
-@@ -210,6 +267,16 @@ void LibWebRTCIceTransportBackend::registerClient(RTCIceTransportBackendClient&
+@@ -210,6 +284,50 @@ void LibWebRTCIceTransportBackend::registerClient(RTCIceTransportBackendClient&
      m_observer->start();
  }
  
 +RTCIceRole LibWebRTCIceTransportBackend::startObservingRole()
 +{
 +    return m_observer->startObservingRole();
++}
++
++RTCIceTransportDescription LibWebRTCIceTransportBackend::description(const RTCSessionDescription& description, RTCIceComponent component)
++{
++    if (m_transportName.isNull())
++        m_transportName = m_observer->transportName();
++    if (m_transportName.isEmpty())
++        return { };
++
++    auto parsed = parseSessionDescription(description, nullptr);
++    if (!parsed)
++        return { };
++    const auto& contents = parsed->description()->contents();
++    auto section = std::ranges::find(contents, m_transportName.utf8().toStdString(), &webrtc::ContentInfo::mid);
++    if (section == contents.end() || section->rejected)
++        return { };
++    const auto* transport = parsed->description()->GetTransportDescriptionByName(section->mid());
++    if (!transport)
++        return { };
++
++    RTCIceTransportDescription result;
++    result.parameters = RTCIceParameters { fromStdString(transport->ice_ufrag), fromStdString(transport->ice_pwd) };
++    size_t index = section - contents.begin();
++    std::optional<unsigned short> mLineIndex;
++    if (index <= std::numeric_limits<unsigned short>::max())
++        mLineIndex = static_cast<unsigned short>(index);
++    if (auto* candidates = parsed->candidates(index)) {
++        for (auto& candidate : candidates->candidates()) {
++            auto fields = convertIceCandidate(candidate->candidate());
++            if (fields.component == component)
++                result.candidates.append(RTCIceCandidate::create(fromStdString(candidate->ToString()), m_transportName, WTF::move(fields), mLineIndex));
++        }
++    }
++    return result;
 +}
 +
 +void LibWebRTCIceTransportBackend::checkForClosure()
@@ -16105,18 +16268,66 @@ index cd57e0202fb108aefddc2db4bafc7a565fde7588..9abbd98042c7d285f9f6f38b6f7f5b53
  {
      ASSERT(m_observer);
 diff --git a/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCIceTransportBackend.h b/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCIceTransportBackend.h
-index 6a9c7864add53e69952566785f5c2e47f30214b4..28b51b4da43b45650915fe15c30183b2a0b7ef67 100644
+index 6a9c7864add53e69952566785f5c2e47f30214b4..8a74220247fb931f07f11e5671da4a0794af99a9 100644
 --- a/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCIceTransportBackend.h
 +++ b/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCIceTransportBackend.h
-@@ -46,6 +46,8 @@ private:
+@@ -46,7 +46,11 @@ private:
      const void* backend() const final { return m_backend.ptr(); }
      void registerClient(RTCIceTransportBackendClient&) final;
      void unregisterClient() final;
 +    RTCIceRole startObservingRole() final;
 +    void checkForClosure() final;
++    RTCIceTransportDescription description(const RTCSessionDescription&, RTCIceComponent) final;
  
++    String m_transportName;
      const Ref<webrtc::IceTransportInterface> m_backend;
      const RefPtr<LibWebRTCIceTransportBackendObserver> m_observer;
+ };
+diff --git a/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCMediaEndpoint.cpp b/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCMediaEndpoint.cpp
+index 7989b6edfb260e470fbdd80742ae1d94b786d2c9..b9e5967eb27a1274a94051f6bf931553546ea925 100644
+--- a/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCMediaEndpoint.cpp
++++ b/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCMediaEndpoint.cpp
+@@ -182,22 +182,6 @@ bool LibWebRTCMediaEndpoint::isNegotiationNeeded(uint32_t eventId) const
+     return !m_isStopped ? m_backend->ShouldFireNegotiationNeededEvent(eventId) : false;
+ }
+ 
+-static inline webrtc::SdpType NODELETE sessionDescriptionType(RTCSdpType sdpType)
+-{
+-    switch (sdpType) {
+-    case RTCSdpType::Offer:
+-        return webrtc::SdpType::kOffer;
+-    case RTCSdpType::Pranswer:
+-        return webrtc::SdpType::kPrAnswer;
+-    case RTCSdpType::Answer:
+-        return webrtc::SdpType::kAnswer;
+-    case RTCSdpType::Rollback:
+-        return webrtc::SdpType::kRollback;
+-    }
+-    ASSERT_NOT_REACHED();
+-    return webrtc::SdpType::kOffer;
+-}
+-
+ void LibWebRTCMediaEndpoint::doSetLocalDescription(const RTCSessionDescription* description)
+ {
+     ASSERT(m_backend);
+@@ -208,7 +192,7 @@ void LibWebRTCMediaEndpoint::doSetLocalDescription(const RTCSessionDescription*
+     }
+ 
+     webrtc::SdpParseError error;
+-    auto sessionDescription = webrtc::CreateSessionDescription(sessionDescriptionType(description->type()), std::string_view { byteCast<char>(description->sdp().utf8().span()) }, &error);
++    auto sessionDescription = parseSessionDescription(*description, &error);
+ 
+     if (!sessionDescription) {
+         protect(m_peerConnectionBackend)->setLocalDescriptionFailed(Exception { ExceptionCode::OperationError, fromStdString(error.description) });
+@@ -229,7 +213,7 @@ void LibWebRTCMediaEndpoint::doSetRemoteDescription(const RTCSessionDescription&
+     ASSERT(!m_isStopped);
+ 
+     webrtc::SdpParseError error;
+-    auto sessionDescription = webrtc::CreateSessionDescription(sessionDescriptionType(description.type()), std::string_view { byteCast<char>(description.sdp().utf8().span()) }, &error);
++    auto sessionDescription = parseSessionDescription(description, &error);
+     if (!sessionDescription) {
+         protect(m_peerConnectionBackend)->setRemoteDescriptionFailed(Exception { ExceptionCode::SyntaxError, fromStdString(error.description) });
+         return;
 diff --git a/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCRtpReceiverBackend.cpp b/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCRtpReceiverBackend.cpp
 index 17140c7803a3b514b84b57a4ce0bebf79725b117..06fe1a6d9744942fa7abd763c8de22c3829e946c 100644
 --- a/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCRtpReceiverBackend.cpp
@@ -16280,23 +16491,51 @@ index 0ebfebd7394123d8b78d400aaf3317fede16cc9b..3857f9b387f9dbb17a9abbe8934e5980
  
  } // namespace WebCore
 diff --git a/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCUtils.cpp b/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCUtils.cpp
-index f9e2d242d7915918856c95986d936682b967c4d8..50da0d901f2d66ab11a4799dfd157f4ac99b3e66 100644
+index f9e2d242d7915918856c95986d936682b967c4d8..fac22f899abc97cf4056659d2021ab0d4fe09d74 100644
 --- a/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCUtils.cpp
 +++ b/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCUtils.cpp
-@@ -33,7 +33,9 @@
+@@ -33,12 +33,16 @@
  #include "RTCError.h"
  #include "RTCIceCandidate.h"
  #include "RTCPeerConnection.h"
 +#include "RTCRtpHeaderExtensionCapability.h"
  #include "RTCRtpSendParameters.h"
++#include "RTCSessionDescription.h"
 +#include <cmath>
  #include <wtf/text/WTFString.h>
  
  WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
-@@ -49,6 +51,17 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
+ IGNORE_CLANG_WARNINGS_BEGIN("nullability-completeness")
+ 
++#include <webrtc/api/jsep.h>
+ #include <webrtc/api/rtp_parameters.h>
+ #include <webrtc/api/rtp_transceiver_interface.h>
+ #include <webrtc/api/webrtc_sdp.h>
+@@ -49,6 +53,38 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
  
  namespace WebCore {
  
++static inline webrtc::SdpType NODELETE sessionDescriptionType(RTCSdpType sdpType)
++{
++    switch (sdpType) {
++    case RTCSdpType::Offer:
++        return webrtc::SdpType::kOffer;
++    case RTCSdpType::Pranswer:
++        return webrtc::SdpType::kPrAnswer;
++    case RTCSdpType::Answer:
++        return webrtc::SdpType::kAnswer;
++    case RTCSdpType::Rollback:
++        return webrtc::SdpType::kRollback;
++    }
++    ASSERT_NOT_REACHED();
++    return webrtc::SdpType::kOffer;
++}
++
++std::unique_ptr<webrtc::SessionDescriptionInterface> parseSessionDescription(const RTCSessionDescription& description, webrtc::SdpParseError* error)
++{
++    return webrtc::CreateSessionDescription(sessionDescriptionType(description.type()), std::string_view { byteCast<char>(description.sdp().utf8().span()) }, error);
++}
++
 +RTCRtpHeaderExtensionCapability toRTCRtpHeaderExtensionCapability(const webrtc::RtpHeaderExtensionCapability& extension)
 +{
 +    return { fromStdString(extension.uri), toRTCRtpTransceiverDirection(extension.direction) };
@@ -16311,7 +16550,7 @@ index f9e2d242d7915918856c95986d936682b967c4d8..50da0d901f2d66ab11a4799dfd157f4a
  webrtc::Priority fromRTCPriorityType(RTCPriorityType priority)
  {
      switch (priority) {
-@@ -167,6 +180,8 @@ static inline RTCRtpEncodingParameters toRTCEncodingParameters(const webrtc::Rtp
+@@ -167,6 +203,8 @@ static inline RTCRtpEncodingParameters toRTCEncodingParameters(const webrtc::Rtp
          parameters.maxFramerate = *rtcParameters.max_framerate;
      if (rtcParameters.rid.length())
          parameters.rid = fromStdString(rtcParameters.rid);
@@ -16320,7 +16559,7 @@ index f9e2d242d7915918856c95986d936682b967c4d8..50da0d901f2d66ab11a4799dfd157f4a
      if (rtcParameters.scale_resolution_down_by && !isAudio)
          parameters.scaleResolutionDownBy = *rtcParameters.scale_resolution_down_by;
  
-@@ -216,6 +231,8 @@ static inline webrtc::RtpEncodingParameters fromRTCEncodingParameters(const RTCR
+@@ -216,6 +254,8 @@ static inline webrtc::RtpEncodingParameters fromRTCEncodingParameters(const RTCR
      if (parameters.maxFramerate)
          rtcParameters.max_framerate = parameters.maxFramerate;
      rtcParameters.rid = parameters.rid.utf8().toStdString();
@@ -16329,7 +16568,7 @@ index f9e2d242d7915918856c95986d936682b967c4d8..50da0d901f2d66ab11a4799dfd157f4a
      if (parameters.scaleResolutionDownBy)
          rtcParameters.scale_resolution_down_by = parameters.scaleResolutionDownBy;
  
-@@ -321,6 +338,10 @@ void updateRTCRtpSendParameters(const RTCRtpSendParameters& parameters, webrtc::
+@@ -321,6 +361,10 @@ void updateRTCRtpSendParameters(const RTCRtpSendParameters& parameters, webrtc::
              rtcParameters.encodings[i].scale_resolution_down_by = *parameters.encodings[i].scaleResolutionDownBy;
          else
              rtcParameters.encodings[i].scale_resolution_down_by = std::nullopt;
@@ -16341,10 +16580,15 @@ index f9e2d242d7915918856c95986d936682b967c4d8..50da0d901f2d66ab11a4799dfd157f4a
          if (parameters.encodings[i].networkPriority)
              rtcParameters.encodings[i].network_priority = fromRTCPriorityType(*parameters.encodings[i].networkPriority);
 diff --git a/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCUtils.h b/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCUtils.h
-index 9ce718e56e3d8c6f1cbb04b6ecd5da06f925a463..83a04df16b294e7968691b4f55a06dd7b9578920 100644
+index 9ce718e56e3d8c6f1cbb04b6ecd5da06f925a463..8c2eeae8ae8ab63206cd9c3d1e8c3e9de789b347 100644
 --- a/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCUtils.h
 +++ b/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCUtils.h
-@@ -45,6 +45,7 @@ class Candidate;
+@@ -42,9 +42,12 @@ IGNORE_CLANG_WARNINGS_END
+ namespace webrtc {
+ 
+ class Candidate;
++class SessionDescriptionInterface;
++struct SdpParseError;
  class PriorityValue;
  class RTCError;
  
@@ -16352,23 +16596,27 @@ index 9ce718e56e3d8c6f1cbb04b6ecd5da06f925a463..83a04df16b294e7968691b4f55a06dd7
  struct RtpParameters;
  struct RtpTransceiverInit;
  
-@@ -60,6 +61,7 @@ namespace WebCore {
+@@ -59,7 +62,9 @@ namespace WebCore {
+ 
  class Exception;
  class RTCError;
++class RTCSessionDescription;
  
 +struct RTCRtpHeaderExtensionCapability;
  struct RTCRtpParameters;
  struct RTCRtpSendParameters;
  struct RTCRtpTransceiverInit;
-@@ -67,6 +69,7 @@ struct RTCRtpTransceiverInit;
+@@ -67,6 +72,9 @@ struct RTCRtpTransceiverInit;
  enum class RTCPriorityType : uint8_t;
  enum class RTCRtpTransceiverDirection;
  
++std::unique_ptr<webrtc::SessionDescriptionInterface> parseSessionDescription(const RTCSessionDescription&, webrtc::SdpParseError*);
++
 +RTCRtpHeaderExtensionCapability toRTCRtpHeaderExtensionCapability(const webrtc::RtpHeaderExtensionCapability&);
  RTCRtpParameters toRTCRtpParameters(const webrtc::RtpParameters&);
  void updateRTCRtpSendParameters(const RTCRtpSendParameters&, webrtc::RtpParameters&, webrtc::MediaType);
  RTCRtpSendParameters toRTCRtpSendParameters(const webrtc::RtpParameters&, bool isAudio);
-@@ -87,6 +90,8 @@ webrtc::Priority NODELETE fromRTCPriorityType(RTCPriorityType);
+@@ -87,6 +95,8 @@ webrtc::Priority NODELETE fromRTCPriorityType(RTCPriorityType);
  enum class MediaStreamTrackHintValue : uint8_t;
  webrtc::VideoTrackInterface::ContentHint toWebRTCContentHint(MediaStreamTrackHintValue);
  

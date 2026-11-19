@@ -1,0 +1,116 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>ICE candidates and parameters across negotiation and rollback</title>
+<pre id="result"></pre>
+<script>
+function gathered(pc) {
+    if (pc.iceGatheringState === 'complete')
+        return Promise.resolve();
+    return new Promise(resolve => {
+        function changed() {
+            if (pc.iceGatheringState === 'complete') {
+                pc.removeEventListener('icegatheringstatechange', changed);
+                resolve();
+            }
+        }
+        pc.addEventListener('icegatheringstatechange', changed);
+    });
+}
+
+function matchesDescription(ice, mid, description, parameters, candidates) {
+    if (!description)
+        return parameters === null && candidates.length === 0;
+    const sections = description.sdp.split(/^m=/m);
+    const index = sections.findIndex(section => section.split(/\r?\n/).includes(`a=mid:${mid}`)) - 1;
+    if (index < 0 || !parameters)
+        return false;
+    const lines = sections[index + 1].split(/\r?\n/);
+    const attr = name => [...lines, ...sections[0].split(/\r?\n/)].find(line => line.startsWith(`a=${name}:`))?.slice(name.length + 3);
+    const expected = lines.filter(line => line.startsWith('a=candidate:')).map(line =>
+        new RTCIceCandidate({ candidate: line.slice(2), sdpMid: mid, sdpMLineIndex: index })
+    ).filter(candidate => candidate.component === ice.component);
+    const fields = ['foundation', 'component', 'protocol', 'priority', 'address', 'port', 'type', 'tcpType'];
+    return parameters.usernameFragment === attr('ice-ufrag') && parameters.password === attr('ice-pwd')
+        && candidates.length === expected.length && candidates.every((candidate, i) => candidate instanceof RTCIceCandidate
+            && candidate.sdpMid === mid && candidate.sdpMLineIndex === index
+            && fields.every(field => candidate[field] === expected[i][field]));
+}
+
+function matches(pc, ice, mid) {
+    return matchesDescription(ice, mid, pc.localDescription, ice.getLocalParameters(), ice.getLocalCandidates())
+        && matchesDescription(ice, mid, pc.remoteDescription, ice.getRemoteParameters(), ice.getRemoteCandidates());
+}
+
+async function negotiate(a, b, bundle) {
+    const audio = a.addTransceiver('audio');
+    const video = a.addTransceiver('video');
+    await a.setLocalDescription();
+    const first = audio.sender.transport.iceTransport;
+    const second = video.sender.transport.iceTransport;
+    if (typeof first.getLocalParameters !== 'function')
+        return { available: false };
+    const pending = matches(a, first, audio.mid) && matches(a, second, video.mid);
+    await gathered(a);
+    const gatheredOffer = matches(a, first, audio.mid) && matches(a, second, video.mid);
+    const offer = a.localDescription;
+    const offerSdp = bundle ? offer.sdp : offer.sdp.replace(/^a=group:BUNDLE[^\r\n]*\r?\n/gm, '');
+    const candidateLines = [];
+    for (const section of offerSdp.split(/^m=/m).slice(1)) {
+        const lines = section.split(/\r?\n/);
+        const mid = lines.find(line => line.startsWith('a=mid:')).slice(6);
+        for (const line of lines.filter(line => line.startsWith('a=candidate:')))
+            candidateLines.push({ candidate: line.slice(2), sdpMid: mid });
+    }
+    await b.setRemoteDescription({ type: 'offer', sdp: offerSdp.replace(/^a=(?:candidate:[^\r\n]*|end-of-candidates)\r?\n/gm, '') });
+    await b.setLocalDescription();
+    const incoming = b.getTransceivers().find(t => t.mid === audio.mid).receiver.transport.iceTransport;
+    const startedEmpty = incoming.getRemoteCandidates().length === 0;
+    for (const candidate of candidateLines) {
+        if (!bundle || candidate.sdpMid === audio.mid)
+            await b.addIceCandidate(candidate);
+    }
+    const trickle = startedEmpty && incoming.getRemoteCandidates().length > 0 && matches(b, incoming, audio.mid);
+    await gathered(b);
+    await a.setRemoteDescription(b.localDescription);
+    const active = video.sender.transport.iceTransport;
+    const answererAudio = b.getTransceivers().find(t => t.mid === audio.mid).receiver.transport.iceTransport;
+    const answererVideo = b.getTransceivers().find(t => t.mid === video.mid).receiver.transport.iceTransport;
+    const settled = (bundle ? first === active : first !== active)
+        && matches(a, first, audio.mid) && matches(a, active, bundle ? audio.mid : video.mid)
+        && matches(b, answererAudio, audio.mid) && matches(b, answererVideo, bundle ? audio.mid : video.mid)
+        && first.getLocalCandidates().length > 0 && first.getRemoteCandidates().length > 0;
+    const initial = first.getLocalParameters().usernameFragment;
+    a.restartIce();
+    await a.setLocalDescription();
+    const restart = matches(a, first, audio.mid) && first.getLocalParameters().usernameFragment !== initial;
+    await a.setLocalDescription({ type: 'rollback' });
+    const rollback = matches(a, first, audio.mid) && first.getLocalParameters().usernameFragment === initial;
+    return { pending, gatheredOffer, trickle, settled, restart, rollback };
+}
+
+async function run(bundle) {
+    const config = { iceServers: [], bundlePolicy: 'max-compat' };
+    const a = new RTCPeerConnection(config);
+    const b = new RTCPeerConnection(config);
+    let timer;
+    try {
+        return await Promise.race([
+            negotiate(a, b, bundle),
+            new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('ICE negotiation timed out')), 15000); })
+        ]);
+    } finally {
+        clearTimeout(timer);
+        a.close();
+        b.close();
+    }
+}
+
+(async () => {
+    try {
+        const checks = { bundled: await run(true), separate: await run(false) };
+        document.getElementById('result').textContent = JSON.stringify(checks);
+    } catch (error) {
+        document.getElementById('result').textContent = error.name;
+    }
+})();
+</script>
