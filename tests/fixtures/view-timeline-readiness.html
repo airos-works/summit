@@ -1,0 +1,55 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>View timeline readiness after layout</title>
+<style>
+  #scroller { width: 160px; height: 100px; overflow: auto; }
+  #content { padding: 20px 0 160px; }
+  #subject { height: 40px; }
+</style>
+<div id="scroller"><div id="content"><div id="subject" hidden></div></div></div>
+<div id="target">Animation target</div>
+<pre id="result"></pre>
+<script>
+(async () => {
+    const subject = document.getElementById('subject');
+    const timeline = new ViewTimeline({ subject });
+    const animation = document.getElementById('target').animate(
+        { opacity: [0, 1] }, { timeline, rangeStart: 'entry 50%', fill: 'both' });
+    const frame = () => new Promise(requestAnimationFrame);
+    const checks = {};
+    let timer;
+    try {
+        await frame();
+        await frame();
+        checks.initiallyPending = animation.pending && timeline.currentTime === null;
+
+        // Requesting a frame here would also wake up an engine that missed the change.
+        subject.hidden = false;
+        checks.readyAfterReveal = await Promise.race([
+            animation.ready.then(() => true),
+            new Promise(resolve => { timer = setTimeout(() => resolve(false), 2000); })
+        ]);
+        clearTimeout(timer);
+
+        await new Promise(resolve => {
+            const observer = new ResizeObserver(() => {
+                observer.disconnect();
+                subject.style.height = '90px';
+                setTimeout(resolve, 0);
+            });
+            observer.observe(document.getElementById('scroller'));
+        });
+        // The cover range is 190px. At this scroll offset the timeline has
+        // advanced 80px and the midpoint of the entry range is 45px.
+        const near = (value, expected) => Math.abs(value - expected) < 0.001;
+        checks.updatedProgress = near(timeline.currentTime?.value, 100 * 80 / 190);
+        checks.realignedStart = near(animation.startTime?.value, 100 * 45 / 190);
+    } finally {
+        clearTimeout(timer);
+        animation.cancel();
+    }
+    document.getElementById('result').textContent = JSON.stringify(checks);
+})().catch(error => {
+    document.getElementById('result').textContent = JSON.stringify({ error: String(error) });
+});
+</script>

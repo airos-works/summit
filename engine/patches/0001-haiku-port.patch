@@ -22857,10 +22857,18 @@ index 27ff2f14f28c9e87747ac02ddde34549545c9aa1..98ee99135626c748c450d31254f5ba9a
      if (RefPtr focusedObject = focusedObjectForPage(page))
          postPlatformNotification(*focusedObject, AXNotification::FocusedUIElementChanged);
 diff --git a/Source/WebCore/animation/AnimationTimelinesController.cpp b/Source/WebCore/animation/AnimationTimelinesController.cpp
-index 45835a341435759d4ca9ca71a7cb9998d06bf5fe..30bd5388ca343c6cffcef66176694982000145ba 100644
+index 45835a341435759d4ca9ca71a7cb9998d06bf5fe..cd6b4183e640f56fd27720c28503642402f0d624 100644
 --- a/Source/WebCore/animation/AnimationTimelinesController.cpp
 +++ b/Source/WebCore/animation/AnimationTimelinesController.cpp
-@@ -96,6 +96,12 @@ void AnimationTimelinesController::detachFromDocument()
+@@ -47,7 +47,6 @@
+ #include "ScrollTimeline.h"
+ #include "Settings.h"
+ #include "StyleOriginatedTimelinesController.h"
+-#include "ViewTimeline.h"
+ #include "WebAnimation.h"
+ #include <ranges>
+ #include <wtf/HashSet.h>
+@@ -96,6 +95,12 @@ void AnimationTimelinesController::detachFromDocument()
          timeline->detachFromDocument();
  }
  
@@ -22873,11 +22881,60 @@ index 45835a341435759d4ca9ca71a7cb9998d06bf5fe..30bd5388ca343c6cffcef66176694982
  void AnimationTimelinesController::addPendingAnimation(WebAnimation& animation)
  {
      m_pendingAnimations.add(animation);
+@@ -131,7 +136,6 @@ void AnimationTimelinesController::updateAnimationsAndSendEvents(ReducedResoluti
+     m_frameRateAligner.beginUpdate(timestamp, previousTimelineFrameRate);
+ 
+     // 1. Update the current time of all timelines associated with document passing now as the timestamp.
+-    ASSERT(m_updatedScrollTimelines.isEmpty());
+     Vector<Ref<AnimationTimeline>> timelinesToUpdate;
+     Vector<Ref<WebAnimation>> animationsToRemove;
+     Vector<Ref<CSSTransition>> completedTransitions;
+@@ -142,10 +146,6 @@ void AnimationTimelinesController::updateAnimationsAndSendEvents(ReducedResoluti
+ 
+         timelinesToUpdate.append(timeline.copyRef());
+ 
+-        // https://drafts.csswg.org/scroll-animations-1/#event-loop
+-        if (RefPtr scrollTimeline = dynamicDowncast<ScrollTimeline>(timeline))
+-            m_updatedScrollTimelines.append(*scrollTimeline);
+-
+         for (auto& animation : copyToVector(timeline->relevantAnimations())) {
+             if (animation->isSkippedContentAnimation())
+                 continue;
+@@ -259,9 +259,18 @@ void AnimationTimelinesController::updateAnimationsAndSendEvents(ReducedResoluti
+ void AnimationTimelinesController::updateStaleScrollTimelines()
+ {
+     // https://drafts.csswg.org/scroll-animations-1/#event-loop
+-    auto scrollTimelines = std::exchange(m_updatedScrollTimelines, { });
+-    for (auto scrollTimeline : scrollTimelines)
+-        scrollTimeline->updateCurrentTimeIfStale();
++    // Layout and resize observers may have registered new timelines or made an inactive timeline usable.
++    Vector<Ref<ScrollTimeline>, 4> scrollTimelines;
++    for (auto& timeline : m_timelines) {
++        if (RefPtr scrollTimeline = dynamicDowncast<ScrollTimeline>(timeline))
++            scrollTimelines.append(scrollTimeline.releaseNonNull());
++    }
++
++    bool needsStyleUpdate = false;
++    for (auto& timeline : scrollTimelines)
++        needsStyleUpdate |= timeline->updateCurrentTimeIfStale();
++    if (needsStyleUpdate)
++        m_document->updateStyleIfNeeded();
+ }
+ 
+ bool AnimationTimelinesController::hasProgressBasedScrollDrivenAnimation() const
 diff --git a/Source/WebCore/animation/AnimationTimelinesController.h b/Source/WebCore/animation/AnimationTimelinesController.h
-index 229adb194ae991905c033c0dbebc948c58c71d96..a1a9f02ae5964ed8893b4645173c9edc8d47d5e4 100644
+index 229adb194ae991905c033c0dbebc948c58c71d96..11ed562b75550437ab78ee9cea3cd5e83a124662 100644
 --- a/Source/WebCore/animation/AnimationTimelinesController.h
 +++ b/Source/WebCore/animation/AnimationTimelinesController.h
-@@ -64,6 +64,7 @@ public:
+@@ -40,7 +40,6 @@ namespace WebCore {
+ 
+ class AnimationTimeline;
+ class Document;
+-class ScrollTimeline;
+ class WeakPtrImplWithEventTargetData;
+ class WebAnimation;
+ 
+@@ -64,6 +63,7 @@ public:
      void updateAnimationsAndSendEvents(ReducedResolutionSeconds);
      void updateStaleScrollTimelines();
      bool hasProgressBasedScrollDrivenAnimation() const;
@@ -22885,6 +22942,14 @@ index 229adb194ae991905c033c0dbebc948c58c71d96..a1a9f02ae5964ed8893b4645173c9edc
      void addPendingAnimation(WebAnimation&);
  
      std::optional<ReducedResolutionSeconds> currentTime(UseCachedCurrentTime = UseCachedCurrentTime::Yes);
+@@ -97,7 +97,6 @@ private:
+ #endif
+ 
+     Timer m_cachedCurrentTimeClearanceTimer;
+-    Vector<Ref<ScrollTimeline>> m_updatedScrollTimelines;
+     WeakHashSet<AnimationTimeline> m_timelines;
+     WeakHashSet<WebAnimation, WeakPtrImplWithEventTargetData> m_pendingAnimations;
+     TaskCancellationGroup m_pendingAnimationsProcessingTaskCancellationGroup;
 diff --git a/Source/WebCore/animation/KeyframeEffect.cpp b/Source/WebCore/animation/KeyframeEffect.cpp
 index 341ea6e69eeb97a36a3894476b45c5c27a089b43..c0041576128e6a86673dfef61ee6936cdb78266b 100644
 --- a/Source/WebCore/animation/KeyframeEffect.cpp
@@ -23128,10 +23193,76 @@ index 341ea6e69eeb97a36a3894476b45c5c27a089b43..c0041576128e6a86673dfef61ee6936c
  
  #if ENABLE(THREADED_ANIMATIONS)
 diff --git a/Source/WebCore/animation/ScrollTimeline.cpp b/Source/WebCore/animation/ScrollTimeline.cpp
-index 3ee0eec8cf361aad4c674db4342a1cc7d459325c..d82addf5f52295cf4a8473bc437bc336d22fc5ad 100644
+index 3ee0eec8cf361aad4c674db4342a1cc7d459325c..d0a9d919418772de55484766223e5fb440521a7c 100644
 --- a/Source/WebCore/animation/ScrollTimeline.cpp
 +++ b/Source/WebCore/animation/ScrollTimeline.cpp
-@@ -406,12 +406,11 @@ void ScrollTimeline::animationTimingDidChange(WebAnimation& animation)
+@@ -270,12 +270,15 @@ auto ScrollTimeline::computeCurrentTimeData() const -> CurrentTimeData
+     return { scrollOffset, maxScrollOffset };
+ }
+ 
+-void ScrollTimeline::cacheCurrentTime()
++bool ScrollTimeline::cacheCurrentTime(CachePolicy policy)
+ {
+-    auto previousMaxScrollOffset = m_cachedCurrentTimeData.maxScrollOffset;
+-    m_cachedCurrentTimeData = computeCurrentTimeData();
+-    if (previousMaxScrollOffset != m_cachedCurrentTimeData.maxScrollOffset)
++    auto data = computeCurrentTimeData();
++    bool rangeChanged = data.maxScrollOffset != m_cachedCurrentTimeData.maxScrollOffset;
++    if (policy == CachePolicy::Always || rangeChanged)
++        m_cachedCurrentTimeData = data;
++    if (rangeChanged)
+         sourceMetricsDidChange();
++    return rangeChanged;
+ }
+ 
+ void ScrollTimeline::sourceMetricsDidChange()
+@@ -297,7 +300,7 @@ AnimationTimeline::ShouldUpdateAnimationsAndSendEvents ScrollTimeline::documentW
+     return AnimationTimeline::ShouldUpdateAnimationsAndSendEvents::No;
+ }
+ 
+-void ScrollTimeline::updateCurrentTimeIfStale()
++bool ScrollTimeline::updateCurrentTimeIfStale()
+ {
+     // https://drafts.csswg.org/scroll-animations-1/#event-loop
+     // We must update timelines that became stale in the process of updating the page rendering.
+@@ -305,25 +308,26 @@ void ScrollTimeline::updateCurrentTimeIfStale()
+     // updated, requestAnimationFrame callbacks have been serviced, styles have been updated
+     // and resize observers have been run.
+     // See https://github.com/w3c/csswg-drafts/issues/12120 about clarifying this.
+-    auto source = m_source.styleable();
+-    if (!source || m_animations.isEmpty())
+-        return;
+-
+-    auto previousMaxScrollOffset = m_cachedCurrentTimeData.maxScrollOffset;
+-    cacheCurrentTime();
+-    if (previousMaxScrollOffset == m_cachedCurrentTimeData.maxScrollOffset)
+-        return;
++    if (!cacheCurrentTime(CachePolicy::IfRangeChanged))
++        return false;
+ 
+     bool needsStyleUpdate = false;
++    bool hasPendingAnimation = false;
+     for (auto& animation : m_animations) {
++        animation->autoAlignStartTime();
++        hasPendingAnimation |= animation->pending();
+         if (RefPtr effect = animation->keyframeEffect()) {
+             effect->invalidate();
+             needsStyleUpdate = true;
+         }
+     }
+ 
+-    if (needsStyleUpdate)
+-        protect(source->element.document())->updateStyleIfNeeded();
++    // A newly active timeline can now run its pending play or pause task.
++    if (hasPendingAnimation && currentTime()) {
++        if (CheckedPtr timelinesController = controller())
++            timelinesController->scheduleAnimationUpdate();
++    }
++    return needsStyleUpdate;
+ }
+ 
+ void ScrollTimeline::setTimelineScopeElement(const Element& element)
+@@ -406,12 +410,11 @@ void ScrollTimeline::animationTimingDidChange(WebAnimation& animation)
  {
      AnimationTimeline::animationTimingDidChange(animation);
  
@@ -23147,6 +23278,102 @@ index 3ee0eec8cf361aad4c674db4342a1cc7d459325c..d82addf5f52295cf4a8473bc437bc336
  }
  
  bool ScrollTimeline::matchesAnonymousScrollFunctionForSource(const Style::ScrollFunction& scrollFunction, const Styleable& source) const
+diff --git a/Source/WebCore/animation/ScrollTimeline.h b/Source/WebCore/animation/ScrollTimeline.h
+index f2bb7de9bf61e9eee0156e825fc0bd53c9bca144..82dbd68c73da94bc3f2f23b633948b6b6e0ff825 100644
+--- a/Source/WebCore/animation/ScrollTimeline.h
++++ b/Source/WebCore/animation/ScrollTimeline.h
+@@ -73,7 +73,8 @@ public:
+     bool NODELETE matchesAnonymousScrollFunctionForSource(const Style::ScrollFunction&, const Styleable&) const;
+ 
+     AnimationTimeline::ShouldUpdateAnimationsAndSendEvents documentWillUpdateAnimationsAndSendEvents() override;
+-    void updateCurrentTimeIfStale();
++    // Returns whether the updated range invalidated an animation effect.
++    bool updateCurrentTimeIfStale();
+ 
+     AnimationTimelinesController* controller() const override;
+ 
+@@ -99,6 +100,7 @@ public:
+ #endif
+ 
+ protected:
++    enum class CachePolicy : bool { Always, IfRangeChanged };
+     explicit ScrollTimeline(const Style::ScopedName&, ScrollAxis);
+ 
+     struct Data {
+@@ -137,7 +139,7 @@ private:
+     ProgressResolutionData computeProgressResolutionData() const;
+ #endif
+     CurrentTimeData computeCurrentTimeData() const;
+-    void cacheCurrentTime();
++    virtual bool cacheCurrentTime(CachePolicy = CachePolicy::Always);
+ 
+     WeakStyleable m_source;
+     ScrollAxis m_axis { ScrollAxis::Block };
+diff --git a/Source/WebCore/animation/ViewTimeline.cpp b/Source/WebCore/animation/ViewTimeline.cpp
+index 9b8f926f870a752d132f35cf719668e03513a4c6..cdf01a40cc0ab661d22b143847c99ff76ccb7512 100644
+--- a/Source/WebCore/animation/ViewTimeline.cpp
++++ b/Source/WebCore/animation/ViewTimeline.cpp
+@@ -203,10 +203,8 @@ float StickinessAdjustmentData::rangeEndAdjustment() const
+     return rangeEndAdjustment;
+ }
+ 
+-void ViewTimeline::cacheCurrentTime()
++bool ViewTimeline::cacheCurrentTime(CachePolicy policy)
+ {
+-    auto previousCurrentTimeData = m_cachedCurrentTimeData;
+-
+     auto pointForLocalToContainer = [](const ScrollableArea& area) -> FloatPoint {
+         // For subscrollers we need to ajust the point fed into localToContainerPoint as
+         // the returned value can be outside of the scroller.
+@@ -215,7 +213,7 @@ void ViewTimeline::cacheCurrentTime()
+         return { };
+     };
+ 
+-    m_cachedCurrentTimeData = [&] -> CurrentTimeData {
++    auto data = [&] -> CurrentTimeData {
+         auto subject = m_subject.styleable();
+         if (!subject)
+             return { };
+@@ -305,16 +303,19 @@ void ViewTimeline::cacheCurrentTime()
+         };
+     }();
+ 
+-    auto metricsChanged = previousCurrentTimeData.maxScrollOffset != m_cachedCurrentTimeData.maxScrollOffset
+-        || previousCurrentTimeData.scrollContainerSize != m_cachedCurrentTimeData.scrollContainerSize
+-        || previousCurrentTimeData.subjectOffset != m_cachedCurrentTimeData.subjectOffset
+-        || previousCurrentTimeData.subjectSize != m_cachedCurrentTimeData.subjectSize
+-        || previousCurrentTimeData.insetStart != m_cachedCurrentTimeData.insetStart
+-        || previousCurrentTimeData.insetEnd != m_cachedCurrentTimeData.insetEnd
+-        || previousCurrentTimeData.stickinessData != m_cachedCurrentTimeData.stickinessData;
++    auto metricsChanged = data.maxScrollOffset != m_cachedCurrentTimeData.maxScrollOffset
++        || data.scrollContainerSize != m_cachedCurrentTimeData.scrollContainerSize
++        || data.subjectOffset != m_cachedCurrentTimeData.subjectOffset
++        || data.subjectSize != m_cachedCurrentTimeData.subjectSize
++        || data.insetStart != m_cachedCurrentTimeData.insetStart
++        || data.insetEnd != m_cachedCurrentTimeData.insetEnd
++        || data.stickinessData != m_cachedCurrentTimeData.stickinessData;
+ 
++    if (policy == CachePolicy::Always || metricsChanged)
++        m_cachedCurrentTimeData = data;
+     if (metricsChanged)
+         sourceMetricsDidChange();
++    return metricsChanged;
+ }
+ 
+ WebAnimationTime ViewTimeline::epsilon() const
+diff --git a/Source/WebCore/animation/ViewTimeline.h b/Source/WebCore/animation/ViewTimeline.h
+index 7bc0870fc9313e2c8e57d1ba99c4f5032712cc3a..49087e93cb596d08009212bee4ca254af84d422d 100644
+--- a/Source/WebCore/animation/ViewTimeline.h
++++ b/Source/WebCore/animation/ViewTimeline.h
+@@ -122,7 +122,7 @@ private:
+         StickinessAdjustmentData stickinessData { };
+     };
+ 
+-    void cacheCurrentTime();
++    bool cacheCurrentTime(CachePolicy = CachePolicy::Always) final;
+ 
+     WeakStyleable m_subject;
+     ResolvableViewTimelineInsets m_insets;
 diff --git a/Source/WebCore/animation/WebAnimation.cpp b/Source/WebCore/animation/WebAnimation.cpp
 index 1b335c1831da882442b75bb17cd7806071ef1d79..2ffb4f58f4fc3db44c078972a7bbcb97e29ed07b 100644
 --- a/Source/WebCore/animation/WebAnimation.cpp
@@ -23162,6 +23389,26 @@ index 1b335c1831da882442b75bb17cd7806071ef1d79..2ffb4f58f4fc3db44c078972a7bbcb97
  }
  
  void WebAnimation::effectTimingDidChange()
+diff --git a/Source/WebCore/animation/WebAnimation.h b/Source/WebCore/animation/WebAnimation.h
+index 81eaeb0d68740a846d597153eb61feb0dabc773f..8a068c520e6577faf80b094a59bfe02056e19490 100644
+--- a/Source/WebCore/animation/WebAnimation.h
++++ b/Source/WebCore/animation/WebAnimation.h
+@@ -186,6 +186,7 @@ public:
+ 
+     std::optional<Seconds> NODELETE convertAnimationTimeToTimelineTime(Seconds) const;
+ 
++    void autoAlignStartTime();
+     void progressBasedTimelineSourceDidChangeMetrics();
+ 
+     // ContextDestructionObserver.
+@@ -229,7 +230,6 @@ private:
+     double NODELETE effectivePlaybackRate() const;
+     void applyPendingPlaybackRate();
+     void setEffectiveFrameRate(std::optional<FramesPerSecond>);
+-    void autoAlignStartTime();
+     void maybeMarkAsReady();
+     bool NODELETE isTimeValid(const std::optional<WebAnimationTime>&) const;
+ 
 diff --git a/Source/WebCore/bindings/js/CachedScriptFetcher.cpp b/Source/WebCore/bindings/js/CachedScriptFetcher.cpp
 index 2c5123cbfb5f932a5841ee92f0f2a89b8eb54ef6..7b8c8ff1fcb3693b7e54f39f2a358a559a455318 100644
 --- a/Source/WebCore/bindings/js/CachedScriptFetcher.cpp
@@ -33050,7 +33297,7 @@ index 0000000000000000000000000000000000000000..029cc6d2189f48e938cedd6235ae43a4
 +    [SecureContext] undefined unregisterProtocolHandler(DOMString scheme, USVString url);
 +};
 diff --git a/Source/WebCore/page/Page.cpp b/Source/WebCore/page/Page.cpp
-index 12c38036f87636c92b0cdde24c1ee546f36ac008..7dbc2ddc2fc32c946b8dc365cdb6f886eb24a477 100644
+index 12c38036f87636c92b0cdde24c1ee546f36ac008..1ceb344a0a0acd1aa047ed67bbcfc87f1593b9e3 100644
 --- a/Source/WebCore/page/Page.cpp
 +++ b/Source/WebCore/page/Page.cpp
 @@ -91,6 +91,10 @@
@@ -33297,7 +33544,8 @@ index 12c38036f87636c92b0cdde24c1ee546f36ac008..7dbc2ddc2fc32c946b8dc365cdb6f886
 +    SUMMIT_PAGE_UPDATE_TRACE_MARK(ResizeObservations);
  
      // https://drafts.csswg.org/scroll-animations-1/#event-loop
-     forEachDocument([] (Document& document) {
+-    forEachDocument([] (Document& document) {
++    forEachRenderableDocument([] (Document& document) {
          document.updateStaleScrollTimelines();
      });
 +    SUMMIT_PAGE_UPDATE_TRACE_MARK(ScrollTimelines);
