@@ -33,8 +33,21 @@ SSH=${SUMMIT_SSH:-ssh -F /mnt/HaikuWork/x399/ssh/config ws-haiku}
 SSH="$SSH -o ConnectTimeout=10 -o ServerAliveInterval=15"
 DIR=${SUMMIT_REMOTE_DIR:-/boot/home/interop}
 X=$DIR/${SUMMIT_REMOTE_BUILD:-xh}
-# Haiku's ps: the team id is the fourth column from the end.
-$SSH "kill \$(ps | grep -E 'WebKitWebDriver|$X/apps/Summit|summit-webkit/(WebProcess|NetworkProcess)' | grep '$DIR' | grep -v grep | awk '{print \$(NF-3)}') 2>/dev/null; true" </dev/null
-$SSH "rm -rf $DIR/profile; mkdir -p $DIR/profile; cp $DIR/profile.json.seed $DIR/profile/profile.json" </dev/null
+printf -v quotedBuild %q "$X"
+# Haiku's ps truncates the command line. Match the executable image so long
+# staging paths work and another installation of Summit can keep running.
+$SSH "bash -s -- $quotedBuild $(printf '%q' "$DIR")" <<'REMOTE' || exit 1
+build=$(cd -- "$1" && pwd -P) || exit 1
+dir=$2
+for binary in "$build/apps/Summit" "$build"/lib/summit-webkit/{WebKitWebDriver,WebProcess,NetworkProcess}; do
+  for team in $(pidof "${binary##*/}"); do
+    image=$(listimage "$team" | awk '$2 ~ /^0x/ { print substr($0, index($0, "/")); exit }')
+    if [ "$image" = "$binary" ]; then
+      kill "$team" 2>/dev/null
+    fi
+  done
+done
+rm -rf "$dir/profile" && mkdir -p "$dir/profile" && cp "$dir/profile.json.seed" "$dir/profile/profile.json"
+REMOTE
 exec $SSH -o ExitOnForwardFailure=yes -L 127.0.0.1:$port:127.0.0.1:$port \
-  "cd $X && exec env WEBKIT_EXEC_PATH=$X/lib/summit-webkit SUMMIT_WEBDRIVER_BROWSER=$X/apps/Summit ${SUMMIT_TEST_ENV-SUMMIT_OVERLAY_SCROLLBARS=0} ${SUMMIT_REMOTE_ENV:-} $X/lib/summit-webkit/WebKitWebDriver --port=$port --host=127.0.0.1" </dev/null
+  "cd $quotedBuild && exec env WEBKIT_EXEC_PATH=$quotedBuild/lib/summit-webkit SUMMIT_WEBDRIVER_BROWSER=$quotedBuild/apps/Summit ${SUMMIT_TEST_ENV-SUMMIT_OVERLAY_SCROLLBARS=0} ${SUMMIT_REMOTE_ENV:-} $quotedBuild/lib/summit-webkit/WebKitWebDriver --port=$port --host=127.0.0.1" </dev/null
