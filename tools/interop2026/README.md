@@ -133,8 +133,12 @@ passes every reftest, so check that failures and passes show real pages.
 
 ## Traps
 
-- Pop-ups are blocked in automation sessions (#187): the profile allows them
-  per origin on the fixed ports only (8000, 8001, 8443, 8444, 9000).
+- Automated top-level pages can open pop-ups (#187). The test profile also
+  allows pop-ups for each WPT origin on ports 8000, 8001, 8443, 8444 and 9000.
+  In an embedded frame, check whether `window.open()` returned `null` before
+  diagnosing a missing message from the new window. A call inside a trusted
+  click handler can succeed even when the same call after WebDriver
+  acknowledges the click is blocked.
 - The wpt host names must be in the test machine's hosts file for every
   run; without them each testharness test ends in
   `__wptrunner_process_next_event is not a function`.

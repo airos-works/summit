@@ -5,8 +5,7 @@ A Summit profile for running web-platform-tests:
 - trusts wpt's pregenerated certificate (tools/certs/web-platform.test.pem)
   for every wpt host, as if the user had pressed Continue on each warning;
   the driver ignores acceptInsecureCerts (see the README);
-- allows pop-ups for every wpt origin on the fixed ports (automation sessions
-  still block pop-ups);
+- allows pop-ups for every wpt origin on the fixed ports;
 - turns off what would change test results or open extra windows: HTTPS-First
   (it upgrades wpt's plain HTTP ports), session restore, update checks,
   password saving and spell checking; autoplay is allowed, as in wpt runs of
