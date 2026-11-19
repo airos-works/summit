@@ -31797,6 +31797,102 @@ index 12c38036f87636c92b0cdde24c1ee546f36ac008..7dbc2ddc2fc32c946b8dc365cdb6f886
      UNUSED_PARAM(context);
  
  #if USE(GRAPHICS_CONTEXT_FILTERS)
+diff --git a/Source/WebCore/page/PointerCaptureController.cpp b/Source/WebCore/page/PointerCaptureController.cpp
+index 8f6e1c689e7c8d043c84b5704a113e358c1c71bc..e9a97a0b1409adb17857cf848ef82b41449bb6c5 100644
+--- a/Source/WebCore/page/PointerCaptureController.cpp
++++ b/Source/WebCore/page/PointerCaptureController.cpp
+@@ -32,6 +32,7 @@
+ #include "DocumentQuirks.h"
+ #include "Element.h"
+ #include "EventHandler.h"
++#include "EventLoop.h"
+ #include "EventNames.h"
+ #include "EventTarget.h"
+ #include "FrameDestructionObserverInlines.h"
+@@ -44,7 +45,6 @@
+ #include "PointerEvent.h"
+ #include "Quirks.h"
+ #include "Settings.h"
+-#include "TaskSource.h"
+ #include <algorithm>
+ #include <ranges>
+ #include <wtf/CheckedArithmetic.h>
+@@ -166,19 +166,27 @@ void PointerCaptureController::elementWasRemovedSlow(Element& element)
+     ASSERT(m_haveAnyCapturingElement);
+ 
+     for (auto [pointerId, capturingData] : m_activePointerIdsToCapturingData) {
+-        if (capturingData->pendingTargetOverride == &element || capturingData->targetOverride == &element) {
+-            // https://w3c.github.io/pointerevents/#implicit-release-of-pointer-capture
+-            // When the pointer capture target override is no longer connected, the pending pointer capture target override and pointer capture target
+-            // override nodes SHOULD be cleared and also a PointerEvent named lostpointercapture corresponding to the captured pointer SHOULD be fired
+-            // at the document.
+-            ASSERT(isInBounds<PointerID>(pointerId));
+-            auto pointerType = capturingData->pointerType;
+-            releasePointerCapture(&element, pointerId);
+-            // FIXME: Spec doesn't specify which task source to use.
+-            protect(element.document())->queueTaskToDispatchEvent(TaskSource::UserInteraction, PointerEvent::create(eventNames().lostpointercaptureEvent, pointerId, pointerType));
+-            return;
++        if (capturingData->pendingTargetOverride == &element)
++            capturingData->pendingTargetOverride = nullptr;
++        if (capturingData->targetOverride != &element)
++            continue;
++
++        capturingData->targetOverride = nullptr;
++        Ref document = element.document();
++        if (capturingData->pointerType == mousePointerEventType()) {
++            if (RefPtr frame = document->frame())
++                frame->eventHandler().pointerCaptureElementDidChange(nullptr);
+         }
++
++        // Script cannot run during removal. Deliver capture loss at the
++        // checkpoint after the handler, before processing more pointer input.
++        ASSERT(isInBounds<PointerID>(pointerId));
++        auto event = PointerEvent::createForPointerCapture(eventNames().lostpointercaptureEvent, pointerId, capturingData->isPrimary, capturingData->pointerType);
++        document->eventLoop().queueMicrotask(document->vm(), [document, event = WTF::move(event)] {
++            document->dispatchEvent(event);
++        });
+     }
++    updateHaveAnyCapturingElement();
+ }
+ 
+ void PointerCaptureController::reset()
+@@ -747,28 +755,27 @@ void PointerCaptureController::processPendingPointerCapture(PointerID pointerId)
+     // 1. If the pointer capture target override for this pointer is set and is not equal to the pending pointer capture target override,
+     // then fire a pointer event named lostpointercapture at the pointer capture target override node.
+     if (auto targetOverride = capturingData->targetOverride; targetOverride && targetOverride != pendingTargetOverride) {
+-        if (capturingData->targetOverride->isConnected())
+-            protect(capturingData->targetOverride)->dispatchEvent(PointerEvent::createForPointerCapture(eventNames().lostpointercaptureEvent, pointerId, capturingData->isPrimary, capturingData->pointerType));
++        capturingData->targetOverride = nullptr;
++        if (targetOverride->isConnected())
++            targetOverride->dispatchEvent(PointerEvent::createForPointerCapture(eventNames().lostpointercaptureEvent, pointerId, capturingData->isPrimary, capturingData->pointerType));
+         if (capturingData->pointerType == mousePointerEventType()) {
+-            if (RefPtr frame = capturingData->targetOverride->document().frame())
++            if (RefPtr frame = targetOverride->document().frame())
+                 frame->eventHandler().pointerCaptureElementDidChange(nullptr);
+         }
+     }
+ 
+     // 2. If the pending pointer capture target override for this pointer is set and is not equal to the pointer capture target override,
+     // then fire a pointer event named gotpointercapture at the pending pointer capture target override.
+-    if (capturingData->pendingTargetOverride && capturingData->targetOverride != pendingTargetOverride) {
++    if (pendingTargetOverride && pendingTargetOverride->isConnected() && capturingData->targetOverride != pendingTargetOverride) {
++        capturingData->targetOverride = pendingTargetOverride;
+         if (capturingData->pointerType == mousePointerEventType()) {
+             if (RefPtr frame = pendingTargetOverride->document().frame())
+                 frame->eventHandler().pointerCaptureElementDidChange(pendingTargetOverride.get());
+         }
+-        pendingTargetOverride->dispatchEvent(PointerEvent::createForPointerCapture(eventNames().gotpointercaptureEvent, pointerId, capturingData->isPrimary, capturingData->pointerType));
++        if (capturingData->targetOverride == pendingTargetOverride)
++            pendingTargetOverride->dispatchEvent(PointerEvent::createForPointerCapture(eventNames().gotpointercaptureEvent, pointerId, capturingData->isPrimary, capturingData->pointerType));
+     }
+ 
+-    // 3. Set the pointer capture target override to the pending pointer capture target override, if set. Otherwise, clear the pointer
+-    // capture target override.
+-    capturingData->targetOverride = pendingTargetOverride;
+-
+     m_processingPendingPointerCapture = false;
+ }
+ 
 diff --git a/Source/WebCore/page/ProtocolHandlerUtilities.h b/Source/WebCore/page/ProtocolHandlerUtilities.h
 new file mode 100644
 index 0000000000000000000000000000000000000000..a98fad150b4dabf1b3429d078eef8f6227c918e6
