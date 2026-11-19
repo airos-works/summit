@@ -29585,9 +29585,37 @@ index ae292e47510d5537fe8023a85931e8c869bcaca1..098925628465e0b6b775b1697970f0e0
      }
  
 diff --git a/Source/WebCore/layout/formattingContexts/flex/FlexFormattingContext.cpp b/Source/WebCore/layout/formattingContexts/flex/FlexFormattingContext.cpp
-index dab814297af116724ee60e23c50b6427be64ed12..c951a224580abc508915373b8c32fdf9049dfe38 100644
+index dab814297af116724ee60e23c50b6427be64ed12..b5b1e6eba7c9468a45548df4451c7403e3979978 100644
 --- a/Source/WebCore/layout/formattingContexts/flex/FlexFormattingContext.cpp
 +++ b/Source/WebCore/layout/formattingContexts/flex/FlexFormattingContext.cpp
+@@ -953,6 +953,13 @@ LayoutUnit FlexFormattingContext::computeContentBasedMinMainSize(const FlexLayou
+     ASSERT(contentSize >= 0);
+     contentSize = std::min(contentSize, maxExtent.value_or(contentSize));
+ 
++    // Transferred size suggestion: a replaced item's definite cross size converted through its aspect ratio.
++    if (flexLayoutItem.isReplaced() && flexItemHasComputableAspectRatioAndCrossSizeIsConsideredDefinite(flexLayoutItem)) {
++        auto transferredSize = computeMainSizeFromAspectRatioUsing(flexLayoutItem, flexItemCrossSizeLength);
++        transferredSize = adjustFlexItemSizeForAspectRatioCrossAxisMinAndMax(flexLayoutItem, transferredSize);
++        contentSize = std::min(transferredSize, contentSize);
++    }
++
+     // Specified size suggestion: if the item's preferred main size is definite, cap the result by that size.
+     auto mainSize = flexFormattingUtils().preferredMainSizeLengthForFlexItem(flexLayoutItem);
+     if (integrationUtils().flexItemMainSizeIsDefinite(flexLayoutItem, mainSize)) {
+@@ -962,13 +969,6 @@ LayoutUnit FlexFormattingContext::computeContentBasedMinMainSize(const FlexLayou
+         return std::min(specifiedSize, contentSize);
+     }
+ 
+-    // Transferred size suggestion: a replaced item's definite cross size converted through its aspect ratio.
+-    if (flexLayoutItem.isReplaced() && flexItemHasComputableAspectRatioAndCrossSizeIsConsideredDefinite(flexLayoutItem)) {
+-        auto transferredSize = computeMainSizeFromAspectRatioUsing(flexLayoutItem, flexItemCrossSizeLength);
+-        transferredSize = adjustFlexItemSizeForAspectRatioCrossAxisMinAndMax(flexLayoutItem, transferredSize);
+-        return std::min(transferredSize, contentSize);
+-    }
+-
+     return contentSize;
+ }
+ 
 @@ -981,6 +981,8 @@ LayoutUnit FlexFormattingContext::computeMainSizeFromAspectRatioUsing(const Flex
      ASSERT(FlexFormattingUtils::flexItemHasAspectRatio(flexLayoutItem));
      auto flexItemCrossAxisBorderAndPadding = flexLayoutItem.crossAxisBorderAndPadding;
@@ -29618,6 +29646,46 @@ index dab814297af116724ee60e23c50b6427be64ed12..c951a224580abc508915373b8c32fdf9
                  : integrationUtils().adjustBorderBoxLogicalWidthForBoxSizing(Style::evaluate<LayoutUnit>(calcSizeCrossSizeLength, m_constraints.crossAxisSizeForLengthResolution, style->usedZoomForLength()));
          },
          [&](const CSS::Keyword::Auto&) -> std::optional<LayoutUnit> {
+diff --git a/Source/WebCore/layout/formattingContexts/flex/FlexFormattingUtils.cpp b/Source/WebCore/layout/formattingContexts/flex/FlexFormattingUtils.cpp
+index 691f79d59b361cb3a89ce2ef4d1ef35b0afa0442..792030f8382b02b12e382ed1860c0db974d0f265 100644
+--- a/Source/WebCore/layout/formattingContexts/flex/FlexFormattingUtils.cpp
++++ b/Source/WebCore/layout/formattingContexts/flex/FlexFormattingUtils.cpp
+@@ -470,6 +470,15 @@ bool FlexFormattingUtils::needToStretchFlexItemLogicalHeight(const FlexLayoutIte
+     return alignmentForFlexItem(flexItem) == ItemPosition::Stretch && flexItem->style().logicalHeight().isAuto();
+ }
+ 
++static std::optional<LayoutUnit> definiteBorderBoxLogicalHeightFromParentFlexLayout(const RenderFlexibleBox& flexBox)
++{
++    if (!flexBox.isFlexItem() || !flexBox.overridingBorderBoxLogicalHeight())
++        return std::nullopt;
++
++    CheckedRef parentFlexBox = downcast<RenderFlexibleBox>(*flexBox.parent());
++    return parentFlexBox->usedFlexItemOverridingLogicalHeightForPercentageResolution(flexBox);
++}
++
+ LayoutUnit FlexFormattingUtils::innerCrossSizeForFlexItem(const RenderBox& flexItem)
+ {
+     CheckedRef flexBox = downcast<RenderFlexibleBox>(*flexItem.parent());
+@@ -481,7 +490,9 @@ LayoutUnit FlexFormattingUtils::innerCrossSizeForFlexItem(const RenderBox& flexI
+         auto isHorizontal = isHorizontalFlow(flexBox);
+         auto size = isHorizontal ? flexBox->style().height() : flexBox->style().width();
+         auto innerCrossSize = LayoutUnit { };
+-        if (auto fixedSize = size.tryFixed())
++        if (auto height = definiteBorderBoxLogicalHeightFromParentFlexLayout(flexBox))
++            innerCrossSize = flexBox->contentBoxLogicalHeight(*height);
++        else if (auto fixedSize = size.tryFixed())
+             innerCrossSize = flexBox->adjustContentBoxLogicalHeightForBoxSizing(LayoutUnit { fixedSize->resolveZoom(flexBox->style().usedZoomForLength()) });
+         else if (size.isPercent())
+             innerCrossSize = flexBox->availableLogicalHeightForPercentageComputation().value_or(0_lu);
+@@ -720,7 +731,7 @@ bool FlexFormattingUtils::hasDefiniteCrossSizeForFlexItem(const RenderBox& flexI
+             return true;
+         // This must be kept in sync with computeMainSizeFromAspectRatioUsing().
+         auto& crossSize = isHorizontalFlow(flexBox) ? flexBox->style().height() : flexBox->style().width();
+-        if (crossSize.isFixed())
++        if (definiteBorderBoxLogicalHeightFromParentFlexLayout(flexBox) || crossSize.isFixed())
+             return true;
+         if (crossSize.isPercent() && flexBox->availableLogicalHeightForPercentageComputation())
+             return true;
 diff --git a/Source/WebCore/layout/formattingContexts/grid/GridFormattingContext.cpp b/Source/WebCore/layout/formattingContexts/grid/GridFormattingContext.cpp
 index 1e32526022d7299e8ba3b5f4f82c59d5244267af..42eba71cd13dd736fde5b3ca949bddba0595983b 100644
 --- a/Source/WebCore/layout/formattingContexts/grid/GridFormattingContext.cpp
