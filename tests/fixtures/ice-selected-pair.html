@@ -1,0 +1,66 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Selected ICE candidate pair identity and lifetime</title>
+<pre id="result"></pre>
+<script>
+function gatheringComplete(peer) {
+    if (peer.iceGatheringState === 'complete')
+        return Promise.resolve();
+    return new Promise(resolve => {
+        function changed() {
+            if (peer.iceGatheringState === 'complete') {
+                peer.removeEventListener('icegatheringstatechange', changed);
+                resolve();
+            }
+        }
+        peer.addEventListener('icegatheringstatechange', changed);
+    });
+}
+
+async function check(offerer, answerer) {
+    const channel = offerer.createDataChannel('pair');
+    const opened = new Promise(resolve => channel.addEventListener('open', resolve, { once: true }));
+    await offerer.setLocalDescription();
+    const first = offerer.sctp.transport.iceTransport;
+    const initiallyEmpty = first.getSelectedCandidatePair() === null;
+    await gatheringComplete(offerer);
+    await answerer.setRemoteDescription(offerer.localDescription);
+    await answerer.setLocalDescription();
+    await gatheringComplete(answerer);
+    await offerer.setRemoteDescription(answerer.localDescription);
+    await opened;
+
+    const transports = [first, answerer.sctp.transport.iceTransport];
+    const pairs = transports.map(ice => ice.getSelectedCandidatePair());
+    const typed = typeof RTCIceCandidatePair === 'function' && pairs.every(pair => pair instanceof RTCIceCandidatePair);
+    const candidates = pairs.map(pair => [pair.local, pair.remote]);
+    await offerer.getStats();
+    const samePair = transports.every((ice, i) => ice.getSelectedCandidatePair() === pairs[i]);
+    offerer.close();
+    answerer.close();
+    const closed = transports.every(ice => ice.getSelectedCandidatePair() === null);
+    const retained = pairs.every((pair, i) =>
+        pair.local === candidates[i][0] && pair.remote === candidates[i][1]
+        && pair.local instanceof RTCIceCandidate && pair.remote instanceof RTCIceCandidate);
+    return { initiallyEmpty, typed, samePair, closed, retained };
+}
+
+(async () => {
+    const offerer = new RTCPeerConnection({ iceServers: [] });
+    const answerer = new RTCPeerConnection({ iceServers: [] });
+    let timer;
+    try {
+        const result = await Promise.race([
+            check(offerer, answerer),
+            new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('ICE negotiation timed out')), 15000); })
+        ]);
+        document.getElementById('result').textContent = JSON.stringify(result);
+    } catch (error) {
+        document.getElementById('result').textContent = String(error);
+    } finally {
+        clearTimeout(timer);
+        offerer.close();
+        answerer.close();
+    }
+})();
+</script>
