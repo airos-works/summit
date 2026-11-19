@@ -99542,10 +99542,69 @@ index 16eb9a0deaa13b9747f9d287d385e507dd41489a..19ede88a03733a025b6c18c1e4b25fb9
  
  #include <errno.h>
  #include <fcntl.h>
+diff --git a/Source/WebCore/rendering/BaselineAlignment.cpp b/Source/WebCore/rendering/BaselineAlignment.cpp
+index 01bfeb69ffb435b0d60443493e7b270d5271f3a0..e5861f4bcc9c87a0943ba496c0f73d35efec1902 100644
+--- a/Source/WebCore/rendering/BaselineAlignment.cpp
++++ b/Source/WebCore/rendering/BaselineAlignment.cpp
+@@ -27,7 +27,7 @@
+ #include "BaselineAlignment.h"
+ 
+ #include "BaselineAlignmentInlines.h"
+-#include "RenderBox.h"
++#include "RenderBoxInlines.h"
+ #include "RenderBoxModelObjectInlines.h"
+ #include "StyleComputedStyle+GettersInlines.h"
+ #include <wtf/TZoneMallocInlines.h>
+@@ -91,6 +91,15 @@ size_t BaselineAlignmentState::sharedGroupIndex(WritingMode alignmentSubjectWrit
+     return const_cast<BaselineAlignmentState*>(this)->findCompatibleSharedGroup(alignmentSubjectWritingMode, preference);
+ }
+ 
++std::optional<LayoutUnit> BaselineAlignment::lineBaselineForAlignment(const RenderBox& box, ItemPosition preference)
++{
++    ASSERT(preference == ItemPosition::Baseline || preference == ItemPosition::LastBaseline);
++    auto baseline = preference == ItemPosition::Baseline ? box.firstLineBaseline() : box.lastLineBaseline();
++    if (baseline && (box.isHorizontalWritingMode() ? box.isScrollContainerY() : box.isScrollContainerX()))
++        return std::clamp(*baseline, 0_lu, box.logicalHeight());
++    return baseline;
++}
++
+ FontBaseline BaselineAlignment::dominantBaseline(WritingMode writingMode)
+ {
+     // https://drafts.csswg.org/css-inline-3/#alignment-baseline-property
+diff --git a/Source/WebCore/rendering/BaselineAlignment.h b/Source/WebCore/rendering/BaselineAlignment.h
+index f5ee0f9e3eb648511c17a30fd82846e3fb0fb96d..6c47213b070607acb00097b78d8aea08e1a364b9 100644
+--- a/Source/WebCore/rendering/BaselineAlignment.h
++++ b/Source/WebCore/rendering/BaselineAlignment.h
+@@ -40,6 +40,7 @@ class RenderBox;
+ // flex/grid to query a box's baseline outside any alignment context. They keep no per-context state, so
+ // they live apart from the BaselineAlignmentState grouping machinery.
+ struct BaselineAlignment {
++    static std::optional<LayoutUnit> lineBaselineForAlignment(const RenderBox&, ItemPosition);
+     static FontBaseline NODELETE dominantBaseline(WritingMode);
+     static WritingMode usedWritingModeForBaselineAlignment(LogicalBoxAxis alignmentContextAxis, WritingMode alignmentContainerWritingMode, WritingMode alignmentSubjectWritingMode);
+     static LayoutUnit synthesizedBaseline(const RenderBox&, FontBaseline baselineType, WritingMode writingModeForSynthesis, LineDirection, BaselineSynthesisEdge);
 diff --git a/Source/WebCore/rendering/GridBaselineAlignment.cpp b/Source/WebCore/rendering/GridBaselineAlignment.cpp
-index 5304b89173ccf53c17f575fbfe4c051e5bd634a9..4fe8bcf176911ba9e81db9899296f6885fb7eb77 100644
+index 5304b89173ccf53c17f575fbfe4c051e5bd634a9..adfa77b46da82d162cc2a5e8f97b80f344ae6cad 100644
 --- a/Source/WebCore/rendering/GridBaselineAlignment.cpp
 +++ b/Source/WebCore/rendering/GridBaselineAlignment.cpp
+@@ -74,7 +74,7 @@ LayoutUnit GridBaselineAlignment::ascentForGridItem(const RenderBox& gridItem, S
+             return gridItemMargin + BaselineAlignment::synthesizedBaseline(gridItem, BaselineAlignment::dominantBaseline(gridWritingMode),
+                 gridWritingMode, alignmentContextDirection(), BaselineSynthesisEdge::BorderBox);
+         }
+-        auto ascent = position == ItemPosition::Baseline ? gridItem.firstLineBaseline() : gridItem.lastLineBaseline();
++        auto ascent = BaselineAlignment::lineBaselineForAlignment(gridItem, position);
+         if (!ascent) {
+             auto gridWritingMode = gridStyle->writingMode();
+             return gridItemMargin + BaselineAlignment::synthesizedBaseline(gridItem, BaselineAlignment::dominantBaseline(gridWritingMode),
+@@ -84,7 +84,7 @@ LayoutUnit GridBaselineAlignment::ascentForGridItem(const RenderBox& gridItem, S
+     } else {
+         auto firstOrLastLineBaseline = std::optional<LayoutUnit> { };
+         if (isParallelToAlignmentAxisForGridItem(gridItem, alignmentContextType))
+-            firstOrLastLineBaseline = position == ItemPosition::Baseline ? gridItem.firstLineBaseline() : gridItem.lastLineBaseline();
++            firstOrLastLineBaseline = BaselineAlignment::lineBaselineForAlignment(gridItem, position);
+ 
+         // We take border-box's under edge if no valid baseline.
+         if (!firstOrLastLineBaseline) {
 @@ -153,7 +153,7 @@ void GridBaselineAlignment::updateBaselineAlignmentContext(ItemPosition preferen
      alignment.maxAscent = std::max(alignment.maxAscent, ascent);
  }
@@ -102038,7 +102097,7 @@ index 4fcb18c274244e25bf227cffde32fff4b80dc15a..62cd236ac0264fce597f1f8cd38e75c7
              flexItem.repaintDuringLayoutIfMoved(oldFlexItemRects[index]);
          ++index;
 diff --git a/Source/WebCore/rendering/RenderGrid.cpp b/Source/WebCore/rendering/RenderGrid.cpp
-index e4016aa11263c14ff1ece803b6abdb2d697c2f75..46a1f762fe54205796e89fe387425aa0aecb9ebf 100644
+index e4016aa11263c14ff1ece803b6abdb2d697c2f75..9bf1666ece23ed52c20c02f71f4c9598180ee29a 100644
 --- a/Source/WebCore/rendering/RenderGrid.cpp
 +++ b/Source/WebCore/rendering/RenderGrid.cpp
 @@ -48,12 +48,24 @@
@@ -102150,6 +102209,24 @@ index e4016aa11263c14ff1ece803b6abdb2d697c2f75..46a1f762fe54205796e89fe387425aa0
  }
  
  // FIXME: This logic is shared by RenderFlexibleBox, so it should be moved to RenderBox.
+@@ -1989,7 +2037,7 @@ std::optional<LayoutUnit> RenderGrid::firstLineBaseline() const
+ 
+     auto baseline = std::optional<LayoutUnit> { };
+     if (!GridLayoutFunctions::isOrthogonalGridItem(*this, *baselineGridItem))
+-        baseline = baselineGridItem->firstLineBaseline();
++        baseline = BaselineAlignment::lineBaselineForAlignment(*baselineGridItem, ItemPosition::Baseline);
+ 
+     if (!baseline) {
+         // We take border-box's bottom if no valid baseline.
+@@ -2014,7 +2062,7 @@ std::optional<LayoutUnit> RenderGrid::lastLineBaseline() const
+ 
+     auto baseline = std::optional<LayoutUnit> { };
+     if (!GridLayoutFunctions::isOrthogonalGridItem(*this, *baselineGridItem))
+-        baseline = baselineGridItem->lastLineBaseline();
++        baseline = BaselineAlignment::lineBaselineForAlignment(*baselineGridItem, ItemPosition::LastBaseline);
+ 
+     if (!baseline) {
+         auto direction = isHorizontalWritingMode() ? LineDirection::Horizontal : LineDirection::Vertical;
 @@ -2051,12 +2099,12 @@ const RenderBox* RenderGrid::baselineGridItem(ItemPosition alignment) const
      return baselineGridItem;
  }
