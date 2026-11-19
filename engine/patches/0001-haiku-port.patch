@@ -105739,7 +105739,7 @@ index b91cd6776229ae7d04e7619f00b014682f0bf252..a9c1dbea67e073db25d3c15be81f6d07
      auto push = [&](Element& element) {
          if constexpr (scope == TeardownScope::DescendantsOnly) {
 diff --git a/Source/WebCore/style/AnchorPositionEvaluator.cpp b/Source/WebCore/style/AnchorPositionEvaluator.cpp
-index a32360d9a24a2d8974cffa52369ca6a8da963999..d1d0a5b897c2b1d1e8837ffcccdb909e92aee089 100644
+index a32360d9a24a2d8974cffa52369ca6a8da963999..5ec77bb09e5e1939ac22c20ca02f328045693e0a 100644
 --- a/Source/WebCore/style/AnchorPositionEvaluator.cpp
 +++ b/Source/WebCore/style/AnchorPositionEvaluator.cpp
 @@ -474,13 +474,20 @@ static bool NODELETE anchorSideMatchesInsetProperty(CSSValueID anchorSideID, Box
@@ -105769,6 +105769,33 @@ index a32360d9a24a2d8974cffa52369ca6a8da963999..d1d0a5b897c2b1d1e8837ffcccdb909e
      LayoutRect boundingBox { boxQuadInContainer.boundingBox() };
  
      if (wasFixed) {
+@@ -521,6 +528,26 @@ void AnchorPositionEvaluator::addAnchorFunctionScrollCompensatedAxis(Style::Comp
+ 
+ static LayoutRect boundingRectForFragmentedAnchor(const RenderBoxModelObject& anchorBox, const RenderLayerModelObject& containingBlock, const RenderFragmentedFlow& fragmentedFlow)
+ {
++    if (anchorBox.isInlineBox()) {
++        // Each line may occupy a different part of its column. Cross the fragmentation
++        // boundary before combining the line rectangles in the containing block.
++        constexpr OptionSet coordinateModes { MapCoordinatesMode::UseTransforms, MapCoordinatesMode::ClampOverscroll };
++        auto fragmentBounds = [&](const FloatRect& rect) {
++            auto absoluteQuad = anchorBox.localToAbsoluteQuad(FloatQuad { rect }, coordinateModes);
++            return containingBlock.absoluteToLocalQuad(absoluteQuad, coordinateModes).boundingBox();
++        };
++        auto fragments = anchorBox.localBorderBoxRects();
++        if (fragments.isEmpty())
++            return { };
++        auto bounds = fragmentBounds(fragments.first());
++        for (auto& fragment : fragments.span().subspan(1))
++            bounds.uniteEvenIfEmpty(fragmentBounds(fragment));
++        LayoutRect result { bounds };
++        if (auto* box = dynamicDowncast<RenderBox>(containingBlock))
++            result.moveBy(box->constrainedScrollPosition());
++        return result;
++    }
++
+     // Compute the bounding box of the fragments.
+     // Location is relative to the fragmented flow.
+     CheckedPtr anchorRenderBox = dynamicDowncast<RenderBox>(&anchorBox);
 diff --git a/Source/WebCore/style/RuleSetBuilder.cpp b/Source/WebCore/style/RuleSetBuilder.cpp
 index b37af82d2bcf05a0d43b905a9231510b172ad917..e2f2b9bcddbbbd99e5bcf2068e0b4cbe0003e123 100644
 --- a/Source/WebCore/style/RuleSetBuilder.cpp
