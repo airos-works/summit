@@ -22856,6 +22856,35 @@ index 27ff2f14f28c9e87747ac02ddde34549545c9aa1..98ee99135626c748c450d31254f5ba9a
  
      if (RefPtr focusedObject = focusedObjectForPage(page))
          postPlatformNotification(*focusedObject, AXNotification::FocusedUIElementChanged);
+diff --git a/Source/WebCore/animation/AnimationTimelinesController.cpp b/Source/WebCore/animation/AnimationTimelinesController.cpp
+index 45835a341435759d4ca9ca71a7cb9998d06bf5fe..30bd5388ca343c6cffcef66176694982000145ba 100644
+--- a/Source/WebCore/animation/AnimationTimelinesController.cpp
++++ b/Source/WebCore/animation/AnimationTimelinesController.cpp
+@@ -96,6 +96,12 @@ void AnimationTimelinesController::detachFromDocument()
+         timeline->detachFromDocument();
+ }
+ 
++void AnimationTimelinesController::scheduleAnimationUpdate()
++{
++    if (RefPtr page = m_document->page())
++        page->scheduleRenderingUpdate(RenderingUpdateStep::Animations);
++}
++
+ void AnimationTimelinesController::addPendingAnimation(WebAnimation& animation)
+ {
+     m_pendingAnimations.add(animation);
+diff --git a/Source/WebCore/animation/AnimationTimelinesController.h b/Source/WebCore/animation/AnimationTimelinesController.h
+index 229adb194ae991905c033c0dbebc948c58c71d96..a1a9f02ae5964ed8893b4645173c9edc8d47d5e4 100644
+--- a/Source/WebCore/animation/AnimationTimelinesController.h
++++ b/Source/WebCore/animation/AnimationTimelinesController.h
+@@ -64,6 +64,7 @@ public:
+     void updateAnimationsAndSendEvents(ReducedResolutionSeconds);
+     void updateStaleScrollTimelines();
+     bool hasProgressBasedScrollDrivenAnimation() const;
++    void scheduleAnimationUpdate();
+     void addPendingAnimation(WebAnimation&);
+ 
+     std::optional<ReducedResolutionSeconds> currentTime(UseCachedCurrentTime = UseCachedCurrentTime::Yes);
 diff --git a/Source/WebCore/animation/KeyframeEffect.cpp b/Source/WebCore/animation/KeyframeEffect.cpp
 index 341ea6e69eeb97a36a3894476b45c5c27a089b43..c0041576128e6a86673dfef61ee6936cdb78266b 100644
 --- a/Source/WebCore/animation/KeyframeEffect.cpp
@@ -23098,6 +23127,26 @@ index 341ea6e69eeb97a36a3894476b45c5c27a089b43..c0041576128e6a86673dfef61ee6936c
      updateAcceleratedActions();
  
  #if ENABLE(THREADED_ANIMATIONS)
+diff --git a/Source/WebCore/animation/ScrollTimeline.cpp b/Source/WebCore/animation/ScrollTimeline.cpp
+index 3ee0eec8cf361aad4c674db4342a1cc7d459325c..d82addf5f52295cf4a8473bc437bc336d22fc5ad 100644
+--- a/Source/WebCore/animation/ScrollTimeline.cpp
++++ b/Source/WebCore/animation/ScrollTimeline.cpp
+@@ -406,12 +406,11 @@ void ScrollTimeline::animationTimingDidChange(WebAnimation& animation)
+ {
+     AnimationTimeline::animationTimingDidChange(animation);
+ 
+-    auto source = m_source.styleable();
+-    if (!source || !animation.pending() || animation.isEffectInvalidationSuspended())
++    if (!animation.pending() || animation.isEffectInvalidationSuspended())
+         return;
+ 
+-    if (RefPtr page = source->element.document().page())
+-        page->scheduleRenderingUpdate(RenderingUpdateStep::Animations);
++    if (CheckedPtr timelinesController = controller())
++        timelinesController->scheduleAnimationUpdate();
+ }
+ 
+ bool ScrollTimeline::matchesAnonymousScrollFunctionForSource(const Style::ScrollFunction& scrollFunction, const Styleable& source) const
 diff --git a/Source/WebCore/animation/WebAnimation.cpp b/Source/WebCore/animation/WebAnimation.cpp
 index 1b335c1831da882442b75bb17cd7806071ef1d79..2ffb4f58f4fc3db44c078972a7bbcb97e29ed07b 100644
 --- a/Source/WebCore/animation/WebAnimation.cpp
