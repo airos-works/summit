@@ -135194,10 +135194,125 @@ index 0000000000000000000000000000000000000000..76c801492fff9daa106e386dcfeb1ae1
 +};
 +
 diff --git a/Source/WebKit/UIProcess/Automation/SimulatedInputDispatcher.cpp b/Source/WebKit/UIProcess/Automation/SimulatedInputDispatcher.cpp
-index 4e548d8d71bfce1544da7cc41f3b6417c1f6b321..64033090572a02846d55797bb5342e7c7c79472c 100644
+index 4e548d8d71bfce1544da7cc41f3b6417c1f6b321..da5ddebac0d4b360cc8499577c8e1e841a06d354 100644
 --- a/Source/WebKit/UIProcess/Automation/SimulatedInputDispatcher.cpp
 +++ b/Source/WebKit/UIProcess/Automation/SimulatedInputDispatcher.cpp
-@@ -470,7 +470,7 @@ void SimulatedInputDispatcher::transitionInputSourceToState(SimulatedInputSource
+@@ -36,6 +36,7 @@
+ #include "WebAutomationSessionMacros.h"
+ #include "WebPageProxy.h"
+ #include <WebCore/PointerEventTypeNames.h>
++#include <ranges>
+ 
+ #if ENABLE(WEBDRIVER_KEYBOARD_GRAPHEME_CLUSTERS)
+ #include <wtf/text/TextBreakIterator.h>
+@@ -91,16 +92,45 @@ SimulatedInputKeyFrame SimulatedInputKeyFrame::keyFrameFromStateOfInputSources(c
+     return SimulatedInputKeyFrame(WTF::move(entries));
+ }
+ 
+-SimulatedInputKeyFrame SimulatedInputKeyFrame::keyFrameToResetInputSources(const HashMap<String, Ref<SimulatedInputSource>>& inputSources)
++// WebDriver releases held inputs in reverse press order. Record transitions after
++// delivery so a partially executed sequence only releases inputs actually pressed.
++AutomationCompletionHandler SimulatedInputDispatcher::recordInputTransition(SimulatedInputSource& source, PressedInput input, bool pressed, AutomationCompletionHandler&& completionHandler)
+ {
+-    auto& values = inputSources.values();
+-    auto entries = WTF::map(values, [](auto& inputSource) {
+-        return std::pair<SimulatedInputSource&, SimulatedInputSourceState> { inputSource.get(), SimulatedInputSourceState::emptyStateForSourceType(inputSource->type) };
+-    });
++    return [this, protectedThis = Ref { *this }, held = HeldInput { Ref { source }, WTF::move(input) }, pressed, completionHandler = WTF::move(completionHandler)](std::optional<AutomationCommandError> error) mutable {
++        if (!error) {
++            if (!pressed)
++                m_heldInputs.removeFirst(held);
++            else if (!m_heldInputs.contains(held))
++                m_heldInputs.append(WTF::move(held));
++        }
++        completionHandler(error);
++    };
++}
+ 
+-    return SimulatedInputKeyFrame(WTF::move(entries));
++Vector<SimulatedInputKeyFrame> SimulatedInputDispatcher::keyFramesForRelease() const
++{
++    Vector<SimulatedInputKeyFrame> frames;
++    HashMap<SimulatedInputSource*, SimulatedInputSourceState> states;
++    for (const auto& [source, input] : m_heldInputs | std::views::reverse) {
++        auto& state = states.ensure(source.ptr(), [&] { return source->state; }).iterator->value;
++        WTF::switchOn(input, [&](MouseButton button) {
++            // An omitted location uses the pointer's last resolved position.
++            state = { };
++            state.mouseInteraction = MouseInteraction::Up;
++            state.pressedMouseButton = button;
++        }, [&](VirtualKey key) {
++            state.pressedVirtualKeys.remove(key);
++        }, [&](const CharKey& key) {
++            state.pressedCharKeys.remove(key);
++        });
++        state.duration = std::nullopt;
++        Vector<SimulatedInputKeyFrame::StateEntry> entries;
++        entries.append({ source.get(), state });
++        frames.append(SimulatedInputKeyFrame(WTF::move(entries)));
++    }
++    return frames;
+ }
+-    
++
+ SimulatedInputDispatcher::SimulatedInputDispatcher(WebPageProxy& page, SimulatedInputDispatcher::Client& client)
+     : m_page(page)
+     , m_client(client)
+@@ -323,7 +353,7 @@ void SimulatedInputDispatcher::transitionInputSourceToState(SimulatedInputSource
+ #elif !ENABLE(WEBDRIVER_TOUCH_INTERACTIONS)
+         RELEASE_ASSERT(!isTouch);
+ #endif
+-        resolveLocation(valueOrDefault(a.location), b.location, b.origin.value_or(isTouch ? MouseMoveOrigin::Viewport : MouseMoveOrigin::Pointer), b.nodeHandle, [this, protectedThis = Ref { *this }, &a, &b, pointerType = pointerTypeForInputSource(inputSource.type), isTouch, eventDispatchFinished = WTF::move(eventDispatchFinished)](std::optional<WebCore::IntPoint> location, std::optional<AutomationCommandError> error) mutable {
++        resolveLocation(valueOrDefault(a.location), b.location, b.origin.value_or(isTouch ? MouseMoveOrigin::Viewport : MouseMoveOrigin::Pointer), b.nodeHandle, [this, protectedThis = Ref { *this }, &a, &b, source = Ref { inputSource }, pointerType = pointerTypeForInputSource(inputSource.type), isTouch, eventDispatchFinished = WTF::move(eventDispatchFinished)](std::optional<WebCore::IntPoint> location, std::optional<AutomationCommandError> error) mutable {
+             if (error) {
+                 eventDispatchFinished(error);
+                 return;
+@@ -353,6 +383,8 @@ void SimulatedInputDispatcher::transitionInputSourceToState(SimulatedInputSource
+                     LOG_WITH_STREAM(Automation, stream << "SimulatedInputDispatcher["_s << this << "]: simulating "_s << pointerType << " "_s << interactionName << "[button="_s << mouseButtonName << "] @ ("_s << b.location.value().x() << ", "_s << b.location.value().y() << ") for transition to "_s << m_keyframeIndex << "."_s << m_inputSourceStateIndex);
+ #endif
+ 
++                    if (b.mouseInteraction == MouseInteraction::Down || b.mouseInteraction == MouseInteraction::Up)
++                        eventDispatchFinished = recordInputTransition(source.get(), b.pressedMouseButton.value_or(MouseButton::Left), b.mouseInteraction == MouseInteraction::Down, WTF::move(eventDispatchFinished));
+                     if (isTouch) {
+ #if ENABLE(WEBDRIVER_TOUCH_INTERACTIONS)
+                         auto touchInteraction = touchInteractionForMouseInteraction(b.mouseInteraction.value());
+@@ -411,7 +443,7 @@ void SimulatedInputDispatcher::transitionInputSourceToState(SimulatedInputSource
+ #else
+                     LOG(Automation, "SimulatedInputDispatcher[%p]: simulating KeyPress[key=%c] for transition to %d.%d", this, charKey, m_keyframeIndex, m_inputSourceStateIndex);
+ #endif
+-                    m_client.simulateKeyboardInteraction(protect(m_page), KeyboardInteraction::KeyPress, charKey, WTF::move(eventDispatchFinished));
++                    m_client.simulateKeyboardInteraction(protect(m_page), KeyboardInteraction::KeyPress, charKey, recordInputTransition(inputSource, CharKey { charKey }, true, WTF::move(eventDispatchFinished)));
+                 }
+             }
+ 
+@@ -429,7 +461,7 @@ void SimulatedInputDispatcher::transitionInputSourceToState(SimulatedInputSource
+ #else
+                     LOG(Automation, "SimulatedInputDispatcher[%p]: simulating KeyRelease[key=%c] for transition to %d.%d", this, charKey, m_keyframeIndex, m_inputSourceStateIndex);
+ #endif
+-                    m_client.simulateKeyboardInteraction(protect(m_page), KeyboardInteraction::KeyRelease, charKey, WTF::move(eventDispatchFinished));
++                    m_client.simulateKeyboardInteraction(protect(m_page), KeyboardInteraction::KeyRelease, charKey, recordInputTransition(inputSource, CharKey { charKey }, false, WTF::move(eventDispatchFinished)));
+                 }
+             }
+         } else if (a.pressedVirtualKeys != b.pressedVirtualKeys) {
+@@ -444,7 +476,7 @@ void SimulatedInputDispatcher::transitionInputSourceToState(SimulatedInputSource
+                     String virtualKeyName = Inspector::Protocol::AutomationHelpers::getEnumConstantValue(iter.value);
+                     LOG_WITH_STREAM(Automation, stream << "SimulatedInputDispatcher["_s << this << "]: simulating KeyPress[key="_s << virtualKeyName << "] for transition to "_s << m_keyframeIndex << "."_s << m_inputSourceStateIndex);
+ #endif
+-                    m_client.simulateKeyboardInteraction(protect(m_page), KeyboardInteraction::KeyPress, iter.value, WTF::move(eventDispatchFinished));
++                    m_client.simulateKeyboardInteraction(protect(m_page), KeyboardInteraction::KeyPress, iter.value, recordInputTransition(inputSource, iter.key, true, WTF::move(eventDispatchFinished)));
+                 }
+             }
+ 
+@@ -458,7 +490,7 @@ void SimulatedInputDispatcher::transitionInputSourceToState(SimulatedInputSource
+                     String virtualKeyName = Inspector::Protocol::AutomationHelpers::getEnumConstantValue(iter.value);
+                     LOG_WITH_STREAM(Automation, stream << "SimulatedInputDispatcher["_s << this << "]: simulating KeyRelease[key="_s << virtualKeyName << "] for transition to "_s << m_keyframeIndex << "."_s << m_inputSourceStateIndex);
+ #endif
+-                    m_client.simulateKeyboardInteraction(protect(m_page), KeyboardInteraction::KeyRelease, iter.value, WTF::move(eventDispatchFinished));
++                    m_client.simulateKeyboardInteraction(protect(m_page), KeyboardInteraction::KeyRelease, iter.value, recordInputTransition(inputSource, iter.key, false, WTF::move(eventDispatchFinished)));
+                 }
+             }
+         } else
+@@ -470,7 +502,7 @@ void SimulatedInputDispatcher::transitionInputSourceToState(SimulatedInputSource
  #if !ENABLE(WEBDRIVER_WHEEL_INTERACTIONS)
          RELEASE_ASSERT_NOT_REACHED();
  #else
@@ -135206,7 +135321,7 @@ index 4e548d8d71bfce1544da7cc41f3b6417c1f6b321..64033090572a02846d55797bb5342e7c
              if (error) {
                  eventDispatchFinished(error);
                  return;
-@@ -483,16 +483,11 @@ void SimulatedInputDispatcher::transitionInputSourceToState(SimulatedInputSource
+@@ -483,16 +515,11 @@ void SimulatedInputDispatcher::transitionInputSourceToState(SimulatedInputSource
  
              b.location = location;
  
@@ -135227,8 +135342,48 @@ index 4e548d8d71bfce1544da7cc41f3b6417c1f6b321..64033090572a02846d55797bb5342e7c
              } else
                  eventDispatchFinished(std::nullopt);
          });
+diff --git a/Source/WebKit/UIProcess/Automation/SimulatedInputDispatcher.h b/Source/WebKit/UIProcess/Automation/SimulatedInputDispatcher.h
+index 865206d7f0784ce1c1b0965ca788fa9371fe1a6e..f1c4ac24b9c50dba23d296c15552f0e5d7dd8551 100644
+--- a/Source/WebKit/UIProcess/Automation/SimulatedInputDispatcher.h
++++ b/Source/WebKit/UIProcess/Automation/SimulatedInputDispatcher.h
+@@ -34,6 +34,7 @@
+ #include <wtf/RefCountedAndCanMakeWeakPtr.h>
+ #include <wtf/RunLoop.h>
+ #include <wtf/Seconds.h>
++#include <wtf/Variant.h>
+ #include <wtf/Vector.h>
+ #include <wtf/text/WTFString.h>
+ 
+@@ -124,7 +125,6 @@ public:
+     Seconds maximumDuration() const;
+ 
+     static SimulatedInputKeyFrame keyFrameFromStateOfInputSources(const HashMap<String, Ref<SimulatedInputSource>>&);
+-    static SimulatedInputKeyFrame keyFrameToResetInputSources(const HashMap<String, Ref<SimulatedInputSource>>&);
+ 
+     Vector<StateEntry> states;
+ };
+@@ -160,6 +160,7 @@ public:
+ 
+     void run(std::optional<WebCore::FrameIdentifier>, Vector<SimulatedInputKeyFrame>&& keyFrames, const HashMap<String, Ref<SimulatedInputSource>>& inputSources, AutomationCompletionHandler&&);
+     void cancel();
++    Vector<SimulatedInputKeyFrame> keyFramesForRelease() const;
+ 
+     bool NODELETE isActive() const;
+ 
+@@ -186,6 +187,11 @@ private:
+     AutomationCompletionHandler m_keyFrameTransitionCompletionHandler;
+     RunLoop::Timer m_keyFrameTransitionDurationTimer;
+ 
++    using PressedInput = Variant<MouseButton, VirtualKey, CharKey>;
++    using HeldInput = std::pair<Ref<SimulatedInputSource>, PressedInput>;
++    AutomationCompletionHandler recordInputTransition(SimulatedInputSource&, PressedInput, bool pressed, AutomationCompletionHandler&&);
++
++    Vector<HeldInput> m_heldInputs;
+     Vector<SimulatedInputKeyFrame> m_keyframes;
+ 
+     // The position within m_keyframes.
 diff --git a/Source/WebKit/UIProcess/Automation/WebAutomationSession.cpp b/Source/WebKit/UIProcess/Automation/WebAutomationSession.cpp
-index 599cc694a716da0c05e7104be0ec919146f99913..2bf6d2fbb383673a8c2e10bb3fe3e2bbc2fa6ff2 100644
+index 599cc694a716da0c05e7104be0ec919146f99913..71ce2cbadc405953b85ed29ad1056871fcc4a5fa 100644
 --- a/Source/WebKit/UIProcess/Automation/WebAutomationSession.cpp
 +++ b/Source/WebKit/UIProcess/Automation/WebAutomationSession.cpp
 @@ -68,7 +68,7 @@
@@ -135334,7 +135489,26 @@ index 599cc694a716da0c05e7104be0ec919146f99913..2bf6d2fbb383673a8c2e10bb3fe3e2bb
      auto page = webPageProxyForHandle(browsingContextHandle);
      SYNC_FAIL_WITH_PREDEFINED_ERROR_IF(!page, WindowNotFound);
  
-@@ -3131,6 +3164,10 @@ void WebAutomationSession::cancelInteractionSequence(const Inspector::Protocol::
+@@ -3117,20 +3150,24 @@ void WebAutomationSession::cancelInteractionSequence(const Inspector::Protocol::
+     auto frameID = webFrameIDForHandle(frameHandle, frameNotFound);
+     ASYNC_FAIL_WITH_PREDEFINED_ERROR_IF(frameNotFound, WindowNotFound);
+ 
+-    Vector<SimulatedInputKeyFrame> keyFrames({ SimulatedInputKeyFrame::keyFrameToResetInputSources(m_inputSources) });
+     Ref inputDispatcher = inputDispatcherForPage(*page);
+     inputDispatcher->cancel();
+     
+-    inputDispatcher->run(frameID, WTF::move(keyFrames), m_inputSources, [this, protectedThis = Ref { *this }, callback = WTF::move(callback)](std::optional<AutomationCommandError> error) {
+-        if (error)
++    inputDispatcher->run(frameID, inputDispatcher->keyFramesForRelease(), m_inputSources, [this, protectedThis = Ref { *this }, callback = WTF::move(callback)](std::optional<AutomationCommandError> error) {
++        if (error) {
+             callback(makeUnexpected(error.value().toProtocolString()));
+-        else
+-            callback({ });
++            return;
++        }
+         m_inputSources.clear();
++        callback({ });
+     });
  #endif // ENABLE(WEBDRIVER_ACTIONS_API)
  }
  
