@@ -70146,7 +70146,7 @@ index 9fd560e16a7e8b8b5cdf0ef54b46ab2dddc32e4f..37b7905e18e26b577ae0ec335352ae63
  
      // Y-axis should be inverted only when painting into the window.
 diff --git a/Source/WebCore/platform/graphics/texmap/TextureMapper.cpp b/Source/WebCore/platform/graphics/texmap/TextureMapper.cpp
-index 1b88532103dfc26c2a90aedce768e19f2e7059e6..f7d88330c9732e991e5fc604172a35ab3a74bc75 100644
+index 1b88532103dfc26c2a90aedce768e19f2e7059e6..806f5161a9435eb4ffc7891ce597a579841837da 100644
 --- a/Source/WebCore/platform/graphics/texmap/TextureMapper.cpp
 +++ b/Source/WebCore/platform/graphics/texmap/TextureMapper.cpp
 @@ -41,9 +41,18 @@
@@ -70702,17 +70702,26 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..f7d88330c9732e991e5fc604172a35ab
  
      glUseProgram(program->programID());
  
-@@ -987,11 +1352,19 @@ void TextureMapper::drawTextureCopy(const BitmapTexture& sourceTexture, const Fl
+@@ -985,13 +1350,24 @@ void TextureMapper::drawTextureCopy(const BitmapTexture& sourceTexture, const Fl
+     draw(targetRect, TransformationMatrix(), program.get(), GL_TRIANGLE_FAN, { });
+ }
  
- void TextureMapper::drawBlurred(const BitmapTexture& sourceTexture, const FloatRect& rect, float radius, Direction direction, bool alphaBlur)
+-void TextureMapper::drawBlurred(const BitmapTexture& sourceTexture, const FloatRect& rect, float radius, Direction direction, bool alphaBlur)
++void TextureMapper::drawBlurred(const BitmapTexture& sourceTexture, const FloatRect& rect, float radius, Direction direction, BlurMode mode)
  {
+-    Ref<TextureMapperShaderProgram> program = data().getShaderProgram({
+-        alphaBlur ? TextureMapperShaderProgram::AlphaBlur : TextureMapperShaderProgram::BlurFilter,
+-    });
 +#if PLATFORM(HAIKU)
 +    if (s_countsDraws)
 +        ++s_drawStats.blurPasses;
 +#endif
-     Ref<TextureMapperShaderProgram> program = data().getShaderProgram({
-         alphaBlur ? TextureMapperShaderProgram::AlphaBlur : TextureMapperShaderProgram::BlurFilter,
-     });
++    TextureMapperShaderProgram::Options options {
++        mode == BlurMode::Alpha ? TextureMapperShaderProgram::AlphaBlur : TextureMapperShaderProgram::BlurFilter
++    };
++    if (mode == BlurMode::Backdrop)
++        options.add(TextureMapperShaderProgram::MirrorBlurEdges);
++    Ref<TextureMapperShaderProgram> program = data().getShaderProgram(options);
  
 +#if PLATFORM(HAIKU)
 +    const auto textureSize = sourceTexture.allocatedSize();
@@ -70722,7 +70731,16 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..f7d88330c9732e991e5fc604172a35ab
  
      glUseProgram(program->programID());
  
-@@ -1038,7 +1411,13 @@ RefPtr<BitmapTexture> TextureMapper::applyBlurFilter(RefPtr<BitmapTexture>& sour
+@@ -1029,7 +1405,7 @@ void TextureMapper::drawBlurred(const BitmapTexture& sourceTexture, const FloatR
+     draw(rect, TransformationMatrix(), program.get(), GL_TRIANGLE_FAN, { });
+ }
+ 
+-RefPtr<BitmapTexture> TextureMapper::applyBlurFilter(RefPtr<BitmapTexture>& sourceTexture, const BlurFilterOperation& blurFilter)
++RefPtr<BitmapTexture> TextureMapper::applyBlurFilter(RefPtr<BitmapTexture>& sourceTexture, const BlurFilterOperation& blurFilter, bool isBackdrop)
+ {
+     const auto& textureSize = sourceTexture->size();
+     float radiusX = blurFilter.stdDeviation();
+@@ -1038,7 +1414,13 @@ RefPtr<BitmapTexture> TextureMapper::applyBlurFilter(RefPtr<BitmapTexture>& sour
      if (radiusX < MinBlurRadius && radiusY < MinBlurRadius)
          return sourceTexture;
  
@@ -70736,7 +70754,16 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..f7d88330c9732e991e5fc604172a35ab
      IntSize currentSize = textureSize;
      IntSize targetSize = currentSize;
      Vector<Direction> blurDirections;
-@@ -1115,8 +1494,16 @@ RefPtr<BitmapTexture> TextureMapper::applyDropShadowFilter(RefPtr<BitmapTexture>
+@@ -1092,7 +1474,7 @@ RefPtr<BitmapTexture> TextureMapper::applyBlurFilter(RefPtr<BitmapTexture>& sour
+ 
+         float radius = direction == Direction::X ? radiusX : radiusY;
+ 
+-        drawBlurred(*sourceTexture, rect, radius, direction);
++        drawBlurred(*sourceTexture, rect, radius, direction, isBackdrop ? BlurMode::Backdrop : BlurMode::Normal);
+ 
+         std::swap(resultTexture, sourceTexture);
+     }
+@@ -1115,8 +1497,16 @@ RefPtr<BitmapTexture> TextureMapper::applyDropShadowFilter(RefPtr<BitmapTexture>
  {
      const auto& textureSize = sourceTexture->size();
      auto& texturePool = BitmapTexturePool::singleton();
@@ -70753,7 +70780,16 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..f7d88330c9732e991e5fc604172a35ab
      IntSize currentSize = textureSize;
      IntSize targetSize = currentSize;
      float radius = float(dropShadowFilter.stdDeviation());
-@@ -1221,7 +1608,14 @@ RefPtr<BitmapTexture> TextureMapper::applyDropShadowFilter(RefPtr<BitmapTexture>
+@@ -1190,7 +1580,7 @@ RefPtr<BitmapTexture> TextureMapper::applyDropShadowFilter(RefPtr<BitmapTexture>
+ 
+             FloatRect rect(FloatPoint::zero(), currentSize);
+ 
+-            drawBlurred(*sourceTexture, rect, radius, direction, true);
++            drawBlurred(*sourceTexture, rect, radius, direction, BlurMode::Alpha);
+ 
+             std::swap(resultTexture, sourceTexture);
+         }
+@@ -1221,7 +1611,14 @@ RefPtr<BitmapTexture> TextureMapper::applyDropShadowFilter(RefPtr<BitmapTexture>
          auto [r, g, b, a] = premultiplied(dropShadowFilter.color().toColorTypeLossy<SRGBA<float>>()).resolved();
          glUniform4f(program->colorLocation(), r, g, b, a);
  
@@ -70768,7 +70804,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..f7d88330c9732e991e5fc604172a35ab
  
          glActiveTexture(GL_TEXTURE1);
          glBindTexture(GL_TEXTURE_2D, contentTexture->id());
-@@ -1241,7 +1635,11 @@ RefPtr<BitmapTexture> TextureMapper::applySinglePassFilter(RefPtr<BitmapTexture>
+@@ -1241,7 +1638,11 @@ RefPtr<BitmapTexture> TextureMapper::applySinglePassFilter(RefPtr<BitmapTexture>
          return sourceTexture;
      }
  
@@ -70780,7 +70816,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..f7d88330c9732e991e5fc604172a35ab
  
      bindSurface(resultTexture.get());
  
-@@ -1251,6 +1649,13 @@ RefPtr<BitmapTexture> TextureMapper::applySinglePassFilter(RefPtr<BitmapTexture>
+@@ -1251,12 +1652,19 @@ RefPtr<BitmapTexture> TextureMapper::applySinglePassFilter(RefPtr<BitmapTexture>
  
      prepareFilterProgram(program.get(), filter);
      FloatRect targetRect(FloatPoint::zero(), sourceTexture->size());
@@ -70794,10 +70830,30 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..f7d88330c9732e991e5fc604172a35ab
      drawTexturedQuadWithProgram(program.get(), sourceTexture->id(), { }, targetRect, TransformationMatrix(), 1);
  
      return resultTexture;
-@@ -1278,6 +1683,28 @@ RefPtr<BitmapTexture> TextureMapper::applyFilters(RefPtr<BitmapTexture>& sourceT
+ }
  
- RefPtr<BitmapTexture> TextureMapper::applyFilter(RefPtr<BitmapTexture>& sourceTexture, const Ref<const FilterOperation>& filter, bool defersLastPass)
+-RefPtr<BitmapTexture> TextureMapper::applyFilters(RefPtr<BitmapTexture>& sourceTexture, const FilterOperations& filters, bool defersLastPass)
++RefPtr<BitmapTexture> TextureMapper::applyFilters(RefPtr<BitmapTexture>& sourceTexture, const FilterOperations& filters, bool defersLastPass, bool isBackdrop)
  {
+     if (filters.isEmpty())
+         return sourceTexture;
+@@ -1268,7 +1676,7 @@ RefPtr<BitmapTexture> TextureMapper::applyFilters(RefPtr<BitmapTexture>& sourceT
+     size_t i = 0;
+     for (const auto& filter : filters) {
+         bool lastFilter = lastFilterIndex == i;
+-        surface = applyFilter(surface, filter, defersLastPass && lastFilter);
++        surface = applyFilter(surface, filter, defersLastPass && lastFilter, isBackdrop);
+         ++i;
+     }
+ 
+@@ -1276,8 +1684,30 @@ RefPtr<BitmapTexture> TextureMapper::applyFilters(RefPtr<BitmapTexture>& sourceT
+     return surface;
+ }
+ 
+-RefPtr<BitmapTexture> TextureMapper::applyFilter(RefPtr<BitmapTexture>& sourceTexture, const Ref<const FilterOperation>& filter, bool defersLastPass)
+-{
++RefPtr<BitmapTexture> TextureMapper::applyFilter(RefPtr<BitmapTexture>& sourceTexture, const Ref<const FilterOperation>& filter, bool defersLastPass, bool isBackdrop)
++{
 +#if PLATFORM(HAIKU)
 +    // SUMMIT_LAYER_PAINT_TRACE: which filters a page has the compositor
 +    // apply, how large and how often; one line a second for each kind.
@@ -70823,7 +70879,16 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..f7d88330c9732e991e5fc604172a35ab
      switch (filter->type()) {
      case FilterOperation::Type::Grayscale:
      case FilterOperation::Type::Sepia:
-@@ -1330,6 +1757,10 @@ void TextureMapper::bindDefaultSurface()
+@@ -1289,7 +1719,7 @@ RefPtr<BitmapTexture> TextureMapper::applyFilter(RefPtr<BitmapTexture>& sourceTe
+     case FilterOperation::Type::Opacity:
+         return applySinglePassFilter(sourceTexture, filter, defersLastPass);
+     case FilterOperation::Type::Blur:
+-        return applyBlurFilter(sourceTexture, static_cast<const BlurFilterOperation&>(filter.get()));
++        return applyBlurFilter(sourceTexture, static_cast<const BlurFilterOperation&>(filter.get()), isBackdrop);
+     case FilterOperation::Type::DropShadow:
+         return applyDropShadowFilter(sourceTexture, static_cast<const DropShadowFilterOperation&>(filter.get()));
+     default:
+@@ -1330,6 +1760,10 @@ void TextureMapper::bindDefaultSurface()
  
  void TextureMapper::bindSurface(BitmapTexture *surface)
  {
@@ -70834,7 +70899,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..f7d88330c9732e991e5fc604172a35ab
      if (!surface) {
          bindDefaultSurface();
          return;
-@@ -1385,6 +1816,18 @@ bool TextureMapper::beginRoundedRectClip(const TransformationMatrix& modelViewMa
+@@ -1385,6 +1819,18 @@ bool TextureMapper::beginRoundedRectClip(const TransformationMatrix& modelViewMa
      FloatQuad quad = modelViewMatrix.projectQuad(targetRect.rect());
      IntRect rect = quad.enclosingBoundingBox();
  
@@ -70853,7 +70918,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..f7d88330c9732e991e5fc604172a35ab
      clipStack().addRoundedRect(targetRect, modelViewMatrix.inverse().value());
      clipStack().intersect(rect);
      clipStack().applyIfNeeded();
-@@ -1402,6 +1845,10 @@ void TextureMapper::beginClip(const TransformationMatrix& modelViewMatrix, const
+@@ -1402,6 +1848,10 @@ void TextureMapper::beginClip(const TransformationMatrix& modelViewMatrix, const
          return;
  
      data().initializeStencil();
@@ -70865,7 +70930,7 @@ index 1b88532103dfc26c2a90aedce768e19f2e7059e6..f7d88330c9732e991e5fc604172a35ab
      Ref<TextureMapperShaderProgram> program = data().getShaderProgram(TextureMapperShaderProgram::SolidColor);
  
 diff --git a/Source/WebCore/platform/graphics/texmap/TextureMapper.h b/Source/WebCore/platform/graphics/texmap/TextureMapper.h
-index fbe7a8f854a5951881368122c9958ca62cf8617b..7595e372848b47d0bfc0a3de1b452d0520245b42 100644
+index fbe7a8f854a5951881368122c9958ca62cf8617b..a3a4e398767e890185e0b88afc827e1ad5c409af 100644
 --- a/Source/WebCore/platform/graphics/texmap/TextureMapper.h
 +++ b/Source/WebCore/platform/graphics/texmap/TextureMapper.h
 @@ -31,6 +31,7 @@
@@ -70920,7 +70985,35 @@ index fbe7a8f854a5951881368122c9958ca62cf8617b..7595e372848b47d0bfc0a3de1b452d05
      IntSize maxTextureSize() const;
      void setDepthRange(double zNear, double zFar);
      std::pair<double, double> depthRange() const;
-@@ -148,6 +186,11 @@ private:
+@@ -107,7 +145,7 @@ public:
+     void setWrapMode(WrapMode m) { m_wrapMode = m; }
+     void setPatternTransform(const TransformationMatrix& p) { m_patternTransform = p; }
+ 
+-    RefPtr<BitmapTexture> applyFilters(RefPtr<BitmapTexture>&, const FilterOperations&, bool defersLastPass);
++    RefPtr<BitmapTexture> applyFilters(RefPtr<BitmapTexture>&, const FilterOperations&, bool defersLastPass, bool isBackdrop = false);
+ 
+ #if USE(GRAPHICS_LAYER_WC)
+     WEBCORE_EXPORT void releaseUnusedTexturesNow();
+@@ -125,14 +163,15 @@ private:
+     const TransformationMatrix& patternTransform() const LIFETIME_BOUND { return m_patternTransform; }
+ 
+     enum class Direction { X, Y };
++    enum class BlurMode { Normal, Backdrop, Alpha };
+ 
+-    RefPtr<BitmapTexture> applyFilter(RefPtr<BitmapTexture>&, const Ref<const FilterOperation>&, bool defersLastPass);
+-    RefPtr<BitmapTexture> applyBlurFilter(RefPtr<BitmapTexture>&, const BlurFilterOperation&);
++    RefPtr<BitmapTexture> applyFilter(RefPtr<BitmapTexture>&, const Ref<const FilterOperation>&, bool defersLastPass, bool isBackdrop);
++    RefPtr<BitmapTexture> applyBlurFilter(RefPtr<BitmapTexture>&, const BlurFilterOperation&, bool isBackdrop);
+     RefPtr<BitmapTexture> applyDropShadowFilter(RefPtr<BitmapTexture>&, const DropShadowFilterOperation&);
+     RefPtr<BitmapTexture> applySinglePassFilter(RefPtr<BitmapTexture>&, const Ref<const FilterOperation>&, bool shouldDefer);
+ 
+     void drawTextureCopy(const BitmapTexture& sourceTexture, const FloatRect& sourceRect, const FloatRect& targetRect);
+-    void drawBlurred(const BitmapTexture& sourceTexture, const FloatRect&, float radius, Direction, bool alphaBlur = false);
++    void drawBlurred(const BitmapTexture& sourceTexture, const FloatRect&, float radius, Direction, BlurMode);
+     void drawTexturedQuadWithProgram(TextureMapperShaderProgram&, uint32_t texture, OptionSet<TextureMapperFlags>, const FloatRect&, const TransformationMatrix& modelViewMatrix, float opacity);
+     void drawTexturedQuadWithProgram(TextureMapperShaderProgram&, const Vector<std::pair<GLuint, GLuint> >& texturesAndSamplers, OptionSet<TextureMapperFlags>, const FloatRect&, const TransformationMatrix& modelViewMatrix, float opacity);
+     void draw(const FloatRect&, const TransformationMatrix& modelViewMatrix, TextureMapperShaderProgram&, GLenum drawingMode, OptionSet<TextureMapperFlags>);
+@@ -148,6 +187,11 @@ private:
      void updateProjectionMatrix();
  
      bool m_isMaskMode { false };
@@ -71023,7 +71116,7 @@ index 57adb06b0d3bf385a76bae2729c5e04dd5e7b268..cf25d7f33b561e652d9d051e47cf9fba
  
      size_t m_size;
 diff --git a/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.cpp b/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.cpp
-index 112d19b1676c297b0168941b1db5b619cd535a29..9a4c1e6c225f6f1a2e81fa6faaa5d73027b452e0 100644
+index 112d19b1676c297b0168941b1db5b619cd535a29..77d8a1f16e547541e5555be320b12b050c8b41f6 100644
 --- a/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.cpp
 +++ b/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.cpp
 @@ -21,6 +21,17 @@
@@ -72546,10 +72639,11 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..9a4c1e6c225f6f1a2e81fa6faaa5d730
      bool hasMask = !!m_state.maskLayer;
      bool hasReplicaMask = options.replicaLayer == this && m_state.replicaLayer->m_state.maskLayer;
      bool defersLastFilterPass = !hasMask && !hasReplicaMask;
+-    options.surface = options.textureMapper.applyFilters(options.surface, m_currentFilters, defersLastFilterPass);
 +#if PLATFORM(HAIKU)
-+    options.surface = options.textureMapper.applyFilters(options.surface, filtersInSurfacePixelsHaiku(m_currentFilters, m_layerTransforms.combined), defersLastFilterPass);
++    options.surface = options.textureMapper.applyFilters(options.surface, filtersInSurfacePixelsHaiku(m_currentFilters, m_layerTransforms.combined), defersLastFilterPass, m_isBackdrop);
 +#else
-     options.surface = options.textureMapper.applyFilters(options.surface, m_currentFilters, defersLastFilterPass);
++    options.surface = options.textureMapper.applyFilters(options.surface, m_currentFilters, defersLastFilterPass, m_isBackdrop);
 +#endif
      options.textureMapper.bindSurface(options.surface.get());
      if (hasMask)
@@ -72921,7 +73015,7 @@ index 271b076b101e307f8e4dc09ec7450da3c7bc898e..456d4f10287f138ba068510b504fcb6d
      void setClient(TextureMapperPlatformLayer::Client* client) { m_client = client; }
  
 diff --git a/Source/WebCore/platform/graphics/texmap/TextureMapperShaderProgram.cpp b/Source/WebCore/platform/graphics/texmap/TextureMapperShaderProgram.cpp
-index 9cc95ada9f61a23ec22e73313ea6bb16de4b062d..2e06e5bd357e55e6b37c91f673a79027b9e06c9f 100644
+index 9cc95ada9f61a23ec22e73313ea6bb16de4b062d..ac5b9b9fae26162c8ce6536ee358eeec062dc1b5 100644
 --- a/Source/WebCore/platform/graphics/texmap/TextureMapperShaderProgram.cpp
 +++ b/Source/WebCore/platform/graphics/texmap/TextureMapperShaderProgram.cpp
 @@ -21,6 +21,9 @@
@@ -72943,7 +73037,32 @@ index 9cc95ada9f61a23ec22e73313ea6bb16de4b062d..2e06e5bd357e55e6b37c91f673a79027
  
          void applyPremultiply(inout vec4 color) { color = vec4(color.rgb * color.a, color.a); }
  
-@@ -575,10 +580,14 @@ static const char* fragmentTemplateCommon =
+@@ -501,6 +506,13 @@ static const char* fragmentTemplateCommon =
+             color = texture2D(s_sampler, coord);
+         }
+ 
++        vec2 mirrorBlurCoord(vec2 coord, vec2 low, vec2 high)
++        {
++            vec2 origin = low - u_texelSize * 0.5;
++            vec2 extent = high - low + u_texelSize;
++            return clamp(origin + extent - abs(mod(coord - origin, 2.0 * extent) - extent), low, high);
++        }
++
+         void applyBlurFilter(inout vec4 color, vec2 texCoord)
+         {
+             vec2 step = u_blurDirection * u_texelSize;
+@@ -511,8 +523,8 @@ static const char* fragmentTemplateCommon =
+ 
+             for (int i = 1; i < GaussianKernelHalfSize; i++) {
+                 vec2 offset = step * u_gaussianKernelOffset[i];
+-                total += texture2D(s_sampler, clamp(texCoord + offset, min, max)) * u_gaussianKernel[i];
+-                total += texture2D(s_sampler, clamp(texCoord - offset, min, max)) * u_gaussianKernel[i];
++                total += texture2D(s_sampler, blurCoord(texCoord + offset, min, max)) * u_gaussianKernel[i];
++                total += texture2D(s_sampler, blurCoord(texCoord - offset, min, max)) * u_gaussianKernel[i];
+             }
+ 
+             color = total;
+@@ -575,10 +587,14 @@ static const char* fragmentTemplateCommon =
              return clamp(0.5 - d, 0.0, 1.0);
          }
  
@@ -72960,7 +73079,7 @@ index 9cc95ada9f61a23ec22e73313ea6bb16de4b062d..2e06e5bd357e55e6b37c91f673a79027
  
              highp vec2 topLeftCenter = bounds.xy + topLeftRadii;
              highp vec2 topRightCenter = bounds.zy + (topRightRadii * vec2(-1, 1));
-@@ -586,18 +595,18 @@ static const char* fragmentTemplateCommon =
+@@ -586,18 +602,18 @@ static const char* fragmentTemplateCommon =
              highp vec2 bottomRightCenter = bounds.zw + (bottomRightRadii * vec2(-1, -1));
  
              if (p.x < topLeftCenter.x && p.y < topLeftCenter.y)
@@ -72984,7 +73103,7 @@ index 9cc95ada9f61a23ec22e73313ea6bb16de4b062d..2e06e5bd357e55e6b37c91f673a79027
          }
  
          void applyRoundedRectClip(inout vec4 color)
-@@ -629,7 +638,8 @@ static const char* fragmentTemplateCommon =
+@@ -629,7 +645,8 @@ static const char* fragmentTemplateCommon =
                  highp vec2 topRightRadii = u_roundedRect[(rectIndex * 3) + 1].zw;
                  highp vec2 bottomLeftRadii = u_roundedRect[(rectIndex * 3) + 2].xy;
                  highp vec2 bottomRightRadii = u_roundedRect[(rectIndex * 3) + 2].zw;
@@ -72994,7 +73113,7 @@ index 9cc95ada9f61a23ec22e73313ea6bb16de4b062d..2e06e5bd357e55e6b37c91f673a79027
  
                  // Pixels outside the rect have coverage 0.0.
                  // Pixels inside the rect have coverage 1.0.
-@@ -697,6 +707,14 @@ Ref<TextureMapperShaderProgram> TextureMapperShaderProgram::create(TextureMapper
+@@ -697,6 +714,14 @@ Ref<TextureMapperShaderProgram> TextureMapperShaderProgram::create(TextureMapper
  
      StringBuilder optionsApplierBuilder;
      SET_APPLIER_FROM_OPTIONS(TextureRGB);
@@ -73009,7 +73128,17 @@ index 9cc95ada9f61a23ec22e73313ea6bb16de4b062d..2e06e5bd357e55e6b37c91f673a79027
      SET_APPLIER_FROM_OPTIONS(TextureYUV);
      SET_APPLIER_FROM_OPTIONS(TextureYUVA);
      SET_APPLIER_FROM_OPTIONS(TextureNV12);
-@@ -818,6 +836,9 @@ static UTF8CString getProgramLog(GLuint program)
+@@ -757,6 +782,9 @@ Ref<TextureMapperShaderProgram> TextureMapperShaderProgram::create(TextureMapper
+     else
+         fragmentShaderBuilder.append(unsafeSpan(GLSL_DIRECTIVE(define GaussianKernelHalfSize GAUSSIAN_KERNEL_MAX_HALF_SIZE)));
+ 
++    fragmentShaderBuilder.append(options.contains(TextureMapperShaderProgram::MirrorBlurEdges)
++        ? "#define blurCoord mirrorBlurCoord\n"_s : "#define blurCoord clamp\n"_s);
++
+     // Append the common header.
+     fragmentShaderBuilder.append(unsafeSpan(fragmentTemplateHeaderCommon));
+ 
+@@ -818,6 +846,9 @@ static UTF8CString getProgramLog(GLuint program)
  
  TextureMapperShaderProgram::TextureMapperShaderProgram(const String& vertex, const String& fragment)
  {
@@ -73019,7 +73148,7 @@ index 9cc95ada9f61a23ec22e73313ea6bb16de4b062d..2e06e5bd357e55e6b37c91f673a79027
      m_vertexShader = glCreateShader(GL_VERTEX_SHADER);
      {
          auto vertexCString = vertex.utf8();
-@@ -851,6 +872,10 @@ TextureMapperShaderProgram::TextureMapperShaderProgram(const String& vertex, con
+@@ -851,6 +882,10 @@ TextureMapperShaderProgram::TextureMapperShaderProgram(const String& vertex, con
  
  TextureMapperShaderProgram::~TextureMapperShaderProgram()
  {
@@ -73031,7 +73160,7 @@ index 9cc95ada9f61a23ec22e73313ea6bb16de4b062d..2e06e5bd357e55e6b37c91f673a79027
          return;
  
 diff --git a/Source/WebCore/platform/graphics/texmap/TextureMapperShaderProgram.h b/Source/WebCore/platform/graphics/texmap/TextureMapperShaderProgram.h
-index f4510ce2501dd8b7577ceb994e9090da9e649dda..874f59b9469cc9b1bf8d1d20a4775e06ced40b9f 100644
+index f4510ce2501dd8b7577ceb994e9090da9e649dda..bb8bc8e57fc28386540433a1af2b31bb7349a195 100644
 --- a/Source/WebCore/platform/graphics/texmap/TextureMapperShaderProgram.h
 +++ b/Source/WebCore/platform/graphics/texmap/TextureMapperShaderProgram.h
 @@ -28,10 +28,15 @@
@@ -73066,7 +73195,15 @@ index f4510ce2501dd8b7577ceb994e9090da9e649dda..874f59b9469cc9b1bf8d1d20a4775e06
          SolidColor       = 1L << 2,
          Opacity          = 1L << 3,
          Antialiasing     = 1L << 5,
-@@ -134,6 +148,9 @@ public:
+@@ -113,6 +127,7 @@ public:
+         ToneMapPQ        = 1L << 28,
+         ClampUVBounds    = 1L << 29,
+         TextureExternalOESYUV = 1L << 30,
++        MirrorBlurEdges  = 1U << 31,
+     };
+ 
+     enum class VariableID {
+@@ -134,6 +149,9 @@ public:
      void setMatrix(GLuint, const TransformationMatrix&);
  
  private:
@@ -101175,7 +101312,7 @@ index 1e30286a668e800d272ca12deeadb625631465ec..0d6a6e3058c34cecaeb18e90134d79da
      bool hitTest(const HitTestRequest&, const HitTestLocation&, HitTestResult&);
  
 diff --git a/Source/WebCore/rendering/RenderLayerBacking.cpp b/Source/WebCore/rendering/RenderLayerBacking.cpp
-index 95122a10cacc10b498c40d3447599bd2cd4d2795..631ecbbf7da1afed6e8ba3dd63077ccaf64b35a9 100644
+index 95122a10cacc10b498c40d3447599bd2cd4d2795..c812deacad63c56d95a54d14cb9bc3fd46cbe43e 100644
 --- a/Source/WebCore/rendering/RenderLayerBacking.cpp
 +++ b/Source/WebCore/rendering/RenderLayerBacking.cpp
 @@ -137,6 +137,15 @@
@@ -101304,7 +101441,20 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..631ecbbf7da1afed6e8ba3dd63077cca
      m_canCompositeBackdropFilters = !style.backdropFilter().hasReferenceFilter() && m_graphicsLayer->setBackdropFilters(Style::toPlatform(style.backdropFilter(), style));
  }
  
-@@ -1218,6 +1316,10 @@ void RenderLayerBacking::updateAfterLayout(bool needsClippingUpdate, bool needsF
+@@ -1129,6 +1227,12 @@ bool RenderLayerBacking::updateCompositedBounds()
+         LayoutPoint delta = m_owningLayer.convertToLayerCoords(rootLayer, LayoutPoint(), RenderLayer::AdjustForColumns);
+         clippingBounds.move(-delta.x(), -delta.y());
+ 
++        // The clip limits the filtered output. Retain the input pixels outside it
++        // that can contribute to that output, including an offset shadow's source.
++        if (renderer().hasFilter() && !clippingBounds.isEmpty()) {
++            auto outsets = m_owningLayer.filterOutsets();
++            clippingBounds.expand(LayoutBoxExtent { outsets.bottom(), outsets.left(), outsets.top(), outsets.right() });
++        }
+         layerBounds.intersect(clippingBounds);
+     }
+ 
+@@ -1218,6 +1322,10 @@ void RenderLayerBacking::updateAfterLayout(bool needsClippingUpdate, bool needsF
          m_owningLayer.setNeedsCompositingGeometryUpdate();
      }
      
@@ -101315,7 +101465,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..631ecbbf7da1afed6e8ba3dd63077cca
      if (needsFullRepaint && canIssueSetNeedsDisplay())
          setContentsNeedDisplay();
  }
-@@ -1581,6 +1683,44 @@ private:
+@@ -1581,6 +1689,44 @@ private:
  LayoutRect RenderLayerBacking::computePrimaryGraphicsLayerRect(const RenderLayer* compositedAncestor, const LayoutRect& parentGraphicsLayerRect) const
  {
      ComputedOffsets compositedBoundsOffset(m_owningLayer, compositedAncestor, compositedBounds(), parentGraphicsLayerRect, { });
@@ -101360,7 +101510,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..631ecbbf7da1afed6e8ba3dd63077cca
      return LayoutRect(encloseRectToDevicePixels(LayoutRect(toLayoutPoint(compositedBoundsOffset.fromParentGraphicsLayer()), compositedBounds().size()),
          pixelSnappingScaleFactor()));
  }
-@@ -1678,6 +1818,22 @@ void RenderLayerBacking::updateGeometry(const RenderLayer* compositedAncestor)
+@@ -1678,6 +1824,22 @@ void RenderLayerBacking::updateGeometry(const RenderLayer* compositedAncestor)
      updateBackdropRoot();
      updateBlendMode(style);
      updateContentsScalingFilters(style);
@@ -101383,7 +101533,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..631ecbbf7da1afed6e8ba3dd63077cca
  
  #if ENABLE(VIDEO)
      updateVideoGravity(style);
-@@ -1935,8 +2091,18 @@ void RenderLayerBacking::updateGeometry(const RenderLayer* compositedAncestor)
+@@ -1935,8 +2097,18 @@ void RenderLayerBacking::updateGeometry(const RenderLayer* compositedAncestor)
  
      positionOverflowControlsLayers();
  
@@ -101403,7 +101553,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..631ecbbf7da1afed6e8ba3dd63077cca
  
  #if ENABLE(MODEL_ELEMENT)
      if (is<RenderModel>(renderer()))
-@@ -3543,6 +3709,56 @@ void RenderLayerBacking::updateDirectlyCompositedBackgroundColor(PaintedContents
+@@ -3543,6 +3715,56 @@ void RenderLayerBacking::updateDirectlyCompositedBackgroundColor(PaintedContents
      didUpdateContentsRect = true;
  }
  
@@ -101460,7 +101610,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..631ecbbf7da1afed6e8ba3dd63077cca
  // Only bitmap images are directly composited, so the layer shows the image's current frame at its natural size.
  static RefPtr<NativeImage> nativeImageForDirectlyCompositedImage(Image& image)
  {
-@@ -3585,7 +3801,14 @@ void RenderLayerBacking::updateDirectlyCompositedBackgroundImage(PaintedContents
+@@ -3585,7 +3807,14 @@ void RenderLayerBacking::updateDirectlyCompositedBackgroundImage(PaintedContents
      m_graphicsLayer->setContentsTilePhase(geometry.phase);
      m_graphicsLayer->setContentsRect(geometry.destinationRect);
      m_graphicsLayer->setContentsClippingRect(FloatRoundedRect(geometry.destinationRect));
@@ -101476,7 +101626,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..631ecbbf7da1afed6e8ba3dd63077cca
          m_graphicsLayer->setContentsToNativeImage(nativeImage.get());
  
      didUpdateContentsRect = true;
-@@ -3955,6 +4178,29 @@ bool RenderLayerBacking::isDirectlyCompositedImage() const
+@@ -3955,6 +4184,29 @@ bool RenderLayerBacking::isDirectlyCompositedImage() const
          if (image->currentFrameOrientation() != ImageOrientation::Orientation::None)
              return false;
  
@@ -101506,7 +101656,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..631ecbbf7da1afed6e8ba3dd63077cca
          return m_graphicsLayer->canDirectlyCompositeNativeImage();
      }
  
-@@ -4093,6 +4339,11 @@ void RenderLayerBacking::updateImageContents(PaintedContentsInfo& contentsInfo)
+@@ -4093,6 +4345,11 @@ void RenderLayerBacking::updateImageContents(PaintedContentsInfo& contentsInfo)
          if (!cachedImage->isLoaded())
              return;
  
@@ -101518,7 +101668,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..631ecbbf7da1afed6e8ba3dd63077cca
          if (RefPtr nativeImage = nativeImageForDirectlyCompositedImage(*image))
              m_graphicsLayer->setContentsToNativeImage(nativeImage.get());
  
-@@ -4133,7 +4384,11 @@ LayoutRect RenderLayerBacking::contentsBox() const
+@@ -4133,7 +4390,11 @@ LayoutRect RenderLayerBacking::contentsBox() const
  #endif
  
      if (CheckedPtr renderViewTransitionCapture = dynamicDowncast<RenderViewTransitionCapture>(*renderBox))
