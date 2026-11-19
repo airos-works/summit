@@ -42997,7 +42997,7 @@ index a743e3db140fdd0202145f0c59c13379044127a1..c17b4cbf572a94501e6fdcff0c4e6d22
      IntRect m_visibleRect;
      IntRect m_coverRect;
 diff --git a/Source/WebCore/platform/graphics/coordinated/CoordinatedPlatformLayer.cpp b/Source/WebCore/platform/graphics/coordinated/CoordinatedPlatformLayer.cpp
-index 63ec41fac1fe1f6d4b7606555093bc4bed44d365..14e605ae006f6c825653f8a4ced67faf60247b95 100644
+index 63ec41fac1fe1f6d4b7606555093bc4bed44d365..82411a0f8bc964eff9b44df6f8e698211b98d4eb 100644
 --- a/Source/WebCore/platform/graphics/coordinated/CoordinatedPlatformLayer.cpp
 +++ b/Source/WebCore/platform/graphics/coordinated/CoordinatedPlatformLayer.cpp
 @@ -166,6 +166,52 @@ void CoordinatedPlatformLayer::invalidateTarget()
@@ -43199,7 +43199,19 @@ index 63ec41fac1fe1f6d4b7606555093bc4bed44d365..14e605ae006f6c825653f8a4ced67faf
              }
              m_pendingChanges.remove(Change::BackingStore);
          }
-@@ -1290,6 +1424,18 @@ void CoordinatedPlatformLayer::flushCompositingStateOnTarget(const OptionSet<Com
+@@ -1233,6 +1367,11 @@ void CoordinatedPlatformLayer::flushCompositingStateOnTarget(const OptionSet<Com
+             m_pendingChanges.remove(Change::Replica);
+         }
+ 
++        if (m_pendingChanges.contains(Change::BackdropRoot)) {
++            layer.setIsBackdropRoot(m_isBackdropRoot);
++            m_pendingChanges.remove(Change::BackdropRoot);
++        }
++
+         if (m_pendingChanges.contains(Change::Backdrop)) {
+             layer.setBackdropLayer(m_backdrop ? &m_backdrop->ensureTarget() : nullptr);
+             m_pendingChanges.remove(Change::Backdrop);
+@@ -1290,6 +1429,18 @@ void CoordinatedPlatformLayer::flushCompositingStateOnTarget(const OptionSet<Com
              m_contentsBuffer.committed = WTF::move(m_contentsBuffer.pending);
              m_contentsBuffer.hasCommitted = !!m_contentsBuffer.committed;
              m_pendingChanges.remove(Change::ContentsBuffer);
@@ -73431,7 +73443,7 @@ index 112d19b1676c297b0168941b1db5b619cd535a29..77d8a1f16e547541e5555be320b12b05
              m_collectDamageDespiteBeingInvisible = true;
      }
 diff --git a/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.h b/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.h
-index 385b7808e97fada2a7e26a56172004da71b87c1c..5aac595f64f97c2a22c0a1de28619b54e94fd853 100644
+index 385b7808e97fada2a7e26a56172004da71b87c1c..6d7e3ee3b269d6231f7e8c1e0a71850ecf1b6620 100644
 --- a/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.h
 +++ b/Source/WebCore/platform/graphics/texmap/TextureMapperLayer.h
 @@ -21,6 +21,7 @@
@@ -73442,7 +73454,15 @@ index 385b7808e97fada2a7e26a56172004da71b87c1c..5aac595f64f97c2a22c0a1de28619b54
  #include "TextureMapperAnimation.h"
  #include "TextureMapperSolidColorLayer.h"
  #include <wtf/TZoneMalloc.h>
-@@ -82,6 +83,9 @@ public:
+@@ -61,6 +62,7 @@ public:
+     WEBCORE_EXPORT void setMaskLayer(TextureMapperLayer*);
+     WEBCORE_EXPORT void setReplicaLayer(TextureMapperLayer*);
+     WEBCORE_EXPORT void setBackdropLayer(TextureMapperLayer*);
++    void setIsBackdropRoot(bool isBackdropRoot) { m_state.isBackdropRoot = isBackdropRoot; }
+     WEBCORE_EXPORT void setBackdropFiltersRect(const FloatRoundedRect&);
+     WEBCORE_EXPORT void setPosition(const FloatPoint&);
+     WEBCORE_EXPORT void setBoundsOrigin(const FloatPoint&);
+@@ -82,6 +84,9 @@ public:
      WEBCORE_EXPORT void setContentsOpaque(bool);
      WEBCORE_EXPORT void setBackfaceVisibility(bool);
      WEBCORE_EXPORT void setOpacity(float);
@@ -73452,7 +73472,7 @@ index 385b7808e97fada2a7e26a56172004da71b87c1c..5aac595f64f97c2a22c0a1de28619b54
      WEBCORE_EXPORT void setSolidColor(const Color&);
      WEBCORE_EXPORT void setBackgroundColor(const Color&);
      WEBCORE_EXPORT void setContentsTileSize(const FloatSize&);
-@@ -127,6 +131,22 @@ public:
+@@ -127,13 +132,30 @@ public:
  
      FloatRect effectiveLayerRect() const;
  
@@ -73475,7 +73495,16 @@ index 385b7808e97fada2a7e26a56172004da71b87c1c..5aac595f64f97c2a22c0a1de28619b54
  private:
      TextureMapperLayer& backdropRootLayer() const
      {
-@@ -186,6 +206,20 @@ private:
+         if (m_effectTarget)
+             return m_effectTarget->backdropRootLayer();
+         if (m_parent) {
+-            if (m_parent->flattensAsLeafOf3DSceneOr3DPerspective()
++            if (m_parent->m_state.isBackdropRoot
++                || m_parent->flattensAsLeafOf3DSceneOr3DPerspective()
+                 || m_parent->m_state.opacity < 1
+                 || m_parent->hasMask()
+                 || m_parent->hasFilters()) {
+@@ -186,6 +208,20 @@ private:
      void paintBackdrop(TextureMapperPaintOptions&);
      void applyMask(TextureMapperPaintOptions&);
      void collect3DRenderingContextLayers(Vector<TextureMapperLayer*>&);
@@ -73496,7 +73525,7 @@ index 385b7808e97fada2a7e26a56172004da71b87c1c..5aac595f64f97c2a22c0a1de28619b54
  
  #if ENABLE(DAMAGE_TRACKING)
      void collectDamageRecursive(TextureMapperPaintOptions&, Damage&);
-@@ -197,9 +231,17 @@ private:
+@@ -197,9 +233,17 @@ private:
      ALWAYS_INLINE Damage& NODELETE ensureDamageInLayerCoordinateSpace();
      inline void damageWholeLayer();
      void damageWholeLayerIncludingItsRectFromPreviousFrame();
@@ -73514,7 +73543,7 @@ index 385b7808e97fada2a7e26a56172004da71b87c1c..5aac595f64f97c2a22c0a1de28619b54
  
      bool shouldBlend() const;
  
-@@ -224,6 +266,15 @@ private:
+@@ -224,6 +268,15 @@ private:
      std::unique_ptr<TextureMapperFlattenedLayer> m_flattenedLayer;
      float m_currentOpacity { 1.0 };
      FilterOperations m_currentFilters;
@@ -73530,7 +73559,7 @@ index 385b7808e97fada2a7e26a56172004da71b87c1c..5aac595f64f97c2a22c0a1de28619b54
  
      struct State {
          FloatPoint pos;
-@@ -244,6 +295,9 @@ private:
+@@ -244,6 +297,9 @@ private:
          Color solidColor;
          Color backgroundColor;
          FilterOperations filters;
@@ -73540,6 +73569,22 @@ index 385b7808e97fada2a7e26a56172004da71b87c1c..5aac595f64f97c2a22c0a1de28619b54
          Color debugBorderColor;
          float debugBorderWidth;
          int repaintCount;
+@@ -258,6 +314,7 @@ private:
+         bool visible : 1;
+         bool showDebugBorders : 1;
+         bool showRepaintCounter : 1;
++        bool isBackdropRoot : 1;
+ 
+         State()
+             : anchorPoint(0.5, 0.5, 0)
+@@ -274,6 +331,7 @@ private:
+             , visible(true)
+             , showDebugBorders(false)
+             , showRepaintCounter(false)
++            , isBackdropRoot(false)
+         {
+         }
+     };
 diff --git a/Source/WebCore/platform/graphics/texmap/TextureMapperPlatformLayer.h b/Source/WebCore/platform/graphics/texmap/TextureMapperPlatformLayer.h
 index 271b076b101e307f8e4dc09ec7450da3c7bc898e..456d4f10287f138ba068510b504fcb6d566f20e7 100644
 --- a/Source/WebCore/platform/graphics/texmap/TextureMapperPlatformLayer.h
@@ -102095,7 +102140,7 @@ index d4011dc069a914499be7b756d26e1fc39e5d1905..ce4ef579e84cee961e36272773e02b03
      unsigned NODELETE nonCollapsedTracks(Style::GridTrackSizingDirection) const;
  
 diff --git a/Source/WebCore/rendering/RenderLayer.cpp b/Source/WebCore/rendering/RenderLayer.cpp
-index 4bd303aa17e5da8a780da294d7a1337b8978d6ea..46d843be01f4444e7b076dbeed9213074d28486b 100644
+index 4bd303aa17e5da8a780da294d7a1337b8978d6ea..541b73c603d6df7283e0dcca23d9ec16518836ad 100644
 --- a/Source/WebCore/rendering/RenderLayer.cpp
 +++ b/Source/WebCore/rendering/RenderLayer.cpp
 @@ -173,6 +173,9 @@
@@ -102122,7 +102167,17 @@ index 4bd303aa17e5da8a780da294d7a1337b8978d6ea..46d843be01f4444e7b076dbeed921307
  namespace WebCore {
  
  using namespace HTMLNames;
-@@ -1363,6 +1373,11 @@ void RenderLayer::recursiveUpdateLayerPositions(OptionSet<UpdateLayerPositionsFl
+@@ -680,7 +690,8 @@ bool RenderLayer::computeCanBeBackdropRoot() const
+         || renderer().hasBlendMode()
+         || renderer().hasMask()
+         || (renderer().requiresRenderingConsolidationForViewTransition() && !renderer().isDocumentElementRenderer())
+-        || renderer().style().willChange().canBeBackdropRoot();
++        || renderer().style().willChange().canBeBackdropRoot()
++        || renderer().style().hasBackdropRootAnimation();
+ }
+ 
+ bool RenderLayer::setIsNormalFlowOnly(bool isNormalFlowOnly)
+@@ -1363,6 +1374,11 @@ void RenderLayer::recursiveUpdateLayerPositions(OptionSet<UpdateLayerPositionsFl
  
          if (checkForRepaint && shouldRepaintAfterLayout() && newRects) {
              auto needsFullRepaint = repaintStatus() == RepaintStatus::NeedsFullRepaint ? RequiresFullRepaint::Yes : RequiresFullRepaint::No;
@@ -102134,7 +102189,7 @@ index 4bd303aa17e5da8a780da294d7a1337b8978d6ea..46d843be01f4444e7b076dbeed921307
              auto resolvedOldRects = valueOrDefault(oldRects);
              renderer().repaintAfterLayoutIfNeeded(WTF::move(repaintContainer), needsFullRepaint, resolvedOldRects, *newRects);
          }
-@@ -3276,6 +3291,15 @@ void RenderLayer::paint(GraphicsContext& context, const LayoutRect& damageRect,
+@@ -3276,6 +3292,15 @@ void RenderLayer::paint(GraphicsContext& context, const LayoutRect& damageRect,
          widget->setOverlapTestResult(false);
  }
  
@@ -102150,7 +102205,7 @@ index 4bd303aa17e5da8a780da294d7a1337b8978d6ea..46d843be01f4444e7b076dbeed921307
  void RenderLayer::clipToRect(GraphicsContext& context, GraphicsContextStateSaver& stateSaver, RegionContextStateSaver& regionContextStateSaver, const LayerPaintingInfo& paintingInfo, OptionSet<PaintBehavior> paintBehavior, const ClipRect& clipRect, BorderRadiusClippingRule rule)
  {
      bool needsClipping = !clipRect.isInfinite() && clipRect.rect() != paintingInfo.paintDirtyRect;
-@@ -3570,6 +3594,20 @@ RenderLayerFilters* RenderLayer::filtersForPainting(GraphicsContext& context, Op
+@@ -3570,6 +3595,20 @@ RenderLayerFilters* RenderLayer::filtersForPainting(GraphicsContext& context, Op
      return &ensureLayerFilters();
  }
  
@@ -102171,7 +102226,7 @@ index 4bd303aa17e5da8a780da294d7a1337b8978d6ea..46d843be01f4444e7b076dbeed921307
  GraphicsContext* RenderLayer::setupFilters(GraphicsContext& destinationContext, LayerPaintingInfo& paintingInfo, OptionSet<PaintLayerFlag>& paintFlags, const LayoutSize& offsetFromRoot, const ClipRect& backgroundRect)
  {
      auto* paintingFilters = filtersForPainting(destinationContext, paintFlags, paintingInfo.paintBehavior);
-@@ -3579,6 +3617,13 @@ GraphicsContext* RenderLayer::setupFilters(GraphicsContext& destinationContext,
+@@ -3579,6 +3618,13 @@ GraphicsContext* RenderLayer::setupFilters(GraphicsContext& destinationContext,
      LayoutRect filterRepaintRect = paintingFilters->dirtySourceRect();
      filterRepaintRect.move(offsetFromRoot);
  
@@ -102185,7 +102240,22 @@ index 4bd303aa17e5da8a780da294d7a1337b8978d6ea..46d843be01f4444e7b076dbeed921307
      auto rootRelativeBounds = calculateLayerBounds(paintingInfo.rootLayer, offsetFromRoot, { });
  
      // When the filter is applied via a transparency layer directly on the destination context (e.g. CG drop-shadow),
-@@ -5752,6 +5797,14 @@ LayoutRect RenderLayer::calculateLayerBounds(const RenderLayer* ancestorLayer, c
+@@ -3999,8 +4045,12 @@ void RenderLayer::paintLayerContents(GraphicsContext& context, const LayerPainti
+         }
+ 
+         if (applySVGClippingMask || (!(paintFlags & PaintLayerFlag::PaintingCompositingMaskPhase) && (paintFlags & PaintLayerFlag::PaintingCompositingClipPathPhase))) {
+-            // Re-use paintChildClippingMaskForFragments to paint black for the compositing clipping mask.
+-            paintChildClippingMaskForFragments(layerFragments, context, paintingInfo, paintBehavior, subtreePaintRootForRenderer);
++            if (clipPathScope && !applySVGClippingMask && !WTF::holdsAlternative<Style::ReferencePath>(renderer().style().clipPath())) {
++                // The shape already clips the context. Cover the entire visible mask,
++                // including overflowing descendants outside the element's border box.
++                context.fillRect(snappedIntRect(paintingInfo.paintDirtyRect), Color::black);
++            } else
++                paintChildClippingMaskForFragments(layerFragments, context, paintingInfo, paintBehavior, subtreePaintRootForRenderer);
+         }
+ 
+         if (localPaintFlags & PaintLayerFlag::PaintingChildClippingMaskPhase) {
+@@ -5752,6 +5802,14 @@ LayoutRect RenderLayer::calculateLayerBounds(const RenderLayer* ancestorLayer, c
          // FIXME: border-radius not accounted for.
          // FIXME: Regions not accounted for.
          const RenderLayer* clippingRootLayer = flags & UseLocalClipRectExcludingCompositingIfPossible ? this : clippingRootForPainting();
@@ -102200,6 +102270,18 @@ index 4bd303aa17e5da8a780da294d7a1337b8978d6ea..46d843be01f4444e7b076dbeed921307
          LayoutSize offsetFromRoot = offsetFromAncestor(clippingRootLayer);
          LayoutRect clipRect = clipRectRelativeToAncestor(clippingRootLayer, offsetFromRoot, infiniteRect);
          if (clipRect.isInfinite())
+@@ -6299,7 +6357,10 @@ bool RenderLayer::isVisuallyNonEmpty(PaintedContentRequest* request) const
+ void RenderLayer::styleChanged(Style::Difference diff, const Style::ComputedStyle* oldStyle)
+ {
+     setIsNormalFlowOnly(shouldBeNormalFlowOnly());
+-    setCanBeBackdropRoot(computeCanBeBackdropRoot());
++    if (setCanBeBackdropRoot(computeCanBeBackdropRoot())) {
++        setNeedsPostLayoutCompositingUpdate();
++        setNeedsCompositingConfigurationUpdate();
++    }
+ 
+     // Make every SVG layer a stacking context, so a composited child ("anchor") stays in this layer's
+     // own paint-order lists rather than escaping to an ancestor's, which the paint-order segmentation
 diff --git a/Source/WebCore/rendering/RenderLayer.h b/Source/WebCore/rendering/RenderLayer.h
 index 1e30286a668e800d272ca12deeadb625631465ec..0d6a6e3058c34cecaeb18e90134d79daf6fd1336 100644
 --- a/Source/WebCore/rendering/RenderLayer.h
@@ -102217,7 +102299,7 @@ index 1e30286a668e800d272ca12deeadb625631465ec..0d6a6e3058c34cecaeb18e90134d79da
      bool hitTest(const HitTestRequest&, const HitTestLocation&, HitTestResult&);
  
 diff --git a/Source/WebCore/rendering/RenderLayerBacking.cpp b/Source/WebCore/rendering/RenderLayerBacking.cpp
-index 95122a10cacc10b498c40d3447599bd2cd4d2795..c812deacad63c56d95a54d14cb9bc3fd46cbe43e 100644
+index 95122a10cacc10b498c40d3447599bd2cd4d2795..af7050e71fc58b3e1200343a115e0540c18a74bb 100644
 --- a/Source/WebCore/rendering/RenderLayerBacking.cpp
 +++ b/Source/WebCore/rendering/RenderLayerBacking.cpp
 @@ -137,6 +137,15 @@
@@ -102346,7 +102428,28 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..c812deacad63c56d95a54d14cb9bc3fd
      m_canCompositeBackdropFilters = !style.backdropFilter().hasReferenceFilter() && m_graphicsLayer->setBackdropFilters(Style::toPlatform(style.backdropFilter(), style));
  }
  
-@@ -1129,6 +1227,12 @@ bool RenderLayerBacking::updateCompositedBounds()
+@@ -1109,7 +1207,19 @@ static bool NODELETE hasNonZeroTransformOrigin(const RenderLayerModelObject& ren
+ 
+ bool RenderLayerBacking::updateCompositedBounds()
+ {
+-    LayoutRect layerBounds = m_owningLayer.calculateLayerBounds(&m_owningLayer, { }, RenderLayer::defaultCalculateLayerBoundsFlags() | RenderLayer::ExcludeHiddenDescendants | RenderLayer::DontConstrainForMask);
++    auto flags = RenderLayer::defaultCalculateLayerBoundsFlags() | RenderLayer::ExcludeHiddenDescendants | RenderLayer::DontConstrainForMask;
++    LayoutRect layerBounds = m_owningLayer.calculateLayerBounds(&m_owningLayer, { }, flags);
++    // A rasterized clip-path mask also clips the layer's composited children.
++    // Its backing must cover their visible pixels even outside the reference box.
++    if (renderer().hasClipPath() && m_owningLayer.hasCompositingDescendant()
++        && !GraphicsLayer::supportsLayerType(GraphicsLayer::Type::Shape)
++        && !WTF::holdsAlternative<Style::ReferencePath>(renderer().style().clipPath())) {
++        auto clipBounds = enclosingLayoutRect(ClipPathPaintScope::computeClipPath(renderer(), { }, m_owningLayer.boundingBox(&m_owningLayer)).first.boundingRect());
++        if (!layerBounds.contains(clipBounds)) {
++            auto subtreeBounds = m_owningLayer.calculateLayerBounds(&m_owningLayer, { }, flags | RenderLayer::IncludeCompositedDescendants);
++            layerBounds.unite(intersection(clipBounds, subtreeBounds));
++        }
++    }
+     // Clip to the size of the document or enclosing overflow-scroll layer.
+     // If this or an ancestor is transformed, we can't currently compute the correct rect to intersect with.
+     // We'd need RenderObject::convertContainerToLocalQuad(), which doesn't yet exist.
+@@ -1129,6 +1239,12 @@ bool RenderLayerBacking::updateCompositedBounds()
          LayoutPoint delta = m_owningLayer.convertToLayerCoords(rootLayer, LayoutPoint(), RenderLayer::AdjustForColumns);
          clippingBounds.move(-delta.x(), -delta.y());
  
@@ -102359,7 +102462,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..c812deacad63c56d95a54d14cb9bc3fd
          layerBounds.intersect(clippingBounds);
      }
  
-@@ -1218,6 +1322,10 @@ void RenderLayerBacking::updateAfterLayout(bool needsClippingUpdate, bool needsF
+@@ -1218,6 +1334,10 @@ void RenderLayerBacking::updateAfterLayout(bool needsClippingUpdate, bool needsF
          m_owningLayer.setNeedsCompositingGeometryUpdate();
      }
      
@@ -102370,7 +102473,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..c812deacad63c56d95a54d14cb9bc3fd
      if (needsFullRepaint && canIssueSetNeedsDisplay())
          setContentsNeedDisplay();
  }
-@@ -1581,6 +1689,44 @@ private:
+@@ -1581,6 +1701,44 @@ private:
  LayoutRect RenderLayerBacking::computePrimaryGraphicsLayerRect(const RenderLayer* compositedAncestor, const LayoutRect& parentGraphicsLayerRect) const
  {
      ComputedOffsets compositedBoundsOffset(m_owningLayer, compositedAncestor, compositedBounds(), parentGraphicsLayerRect, { });
@@ -102415,7 +102518,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..c812deacad63c56d95a54d14cb9bc3fd
      return LayoutRect(encloseRectToDevicePixels(LayoutRect(toLayoutPoint(compositedBoundsOffset.fromParentGraphicsLayer()), compositedBounds().size()),
          pixelSnappingScaleFactor()));
  }
-@@ -1678,6 +1824,22 @@ void RenderLayerBacking::updateGeometry(const RenderLayer* compositedAncestor)
+@@ -1678,6 +1836,22 @@ void RenderLayerBacking::updateGeometry(const RenderLayer* compositedAncestor)
      updateBackdropRoot();
      updateBlendMode(style);
      updateContentsScalingFilters(style);
@@ -102438,7 +102541,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..c812deacad63c56d95a54d14cb9bc3fd
  
  #if ENABLE(VIDEO)
      updateVideoGravity(style);
-@@ -1935,8 +2097,18 @@ void RenderLayerBacking::updateGeometry(const RenderLayer* compositedAncestor)
+@@ -1935,8 +2109,18 @@ void RenderLayerBacking::updateGeometry(const RenderLayer* compositedAncestor)
  
      positionOverflowControlsLayers();
  
@@ -102458,7 +102561,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..c812deacad63c56d95a54d14cb9bc3fd
  
  #if ENABLE(MODEL_ELEMENT)
      if (is<RenderModel>(renderer()))
-@@ -3543,6 +3715,56 @@ void RenderLayerBacking::updateDirectlyCompositedBackgroundColor(PaintedContents
+@@ -3543,6 +3727,56 @@ void RenderLayerBacking::updateDirectlyCompositedBackgroundColor(PaintedContents
      didUpdateContentsRect = true;
  }
  
@@ -102515,7 +102618,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..c812deacad63c56d95a54d14cb9bc3fd
  // Only bitmap images are directly composited, so the layer shows the image's current frame at its natural size.
  static RefPtr<NativeImage> nativeImageForDirectlyCompositedImage(Image& image)
  {
-@@ -3585,7 +3807,14 @@ void RenderLayerBacking::updateDirectlyCompositedBackgroundImage(PaintedContents
+@@ -3585,7 +3819,14 @@ void RenderLayerBacking::updateDirectlyCompositedBackgroundImage(PaintedContents
      m_graphicsLayer->setContentsTilePhase(geometry.phase);
      m_graphicsLayer->setContentsRect(geometry.destinationRect);
      m_graphicsLayer->setContentsClippingRect(FloatRoundedRect(geometry.destinationRect));
@@ -102531,7 +102634,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..c812deacad63c56d95a54d14cb9bc3fd
          m_graphicsLayer->setContentsToNativeImage(nativeImage.get());
  
      didUpdateContentsRect = true;
-@@ -3955,6 +4184,29 @@ bool RenderLayerBacking::isDirectlyCompositedImage() const
+@@ -3955,6 +4196,29 @@ bool RenderLayerBacking::isDirectlyCompositedImage() const
          if (image->currentFrameOrientation() != ImageOrientation::Orientation::None)
              return false;
  
@@ -102561,7 +102664,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..c812deacad63c56d95a54d14cb9bc3fd
          return m_graphicsLayer->canDirectlyCompositeNativeImage();
      }
  
-@@ -4093,6 +4345,11 @@ void RenderLayerBacking::updateImageContents(PaintedContentsInfo& contentsInfo)
+@@ -4093,6 +4357,11 @@ void RenderLayerBacking::updateImageContents(PaintedContentsInfo& contentsInfo)
          if (!cachedImage->isLoaded())
              return;
  
@@ -102573,7 +102676,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..c812deacad63c56d95a54d14cb9bc3fd
          if (RefPtr nativeImage = nativeImageForDirectlyCompositedImage(*image))
              m_graphicsLayer->setContentsToNativeImage(nativeImage.get());
  
-@@ -4133,7 +4390,11 @@ LayoutRect RenderLayerBacking::contentsBox() const
+@@ -4133,7 +4402,11 @@ LayoutRect RenderLayerBacking::contentsBox() const
  #endif
  
      if (CheckedPtr renderViewTransitionCapture = dynamicDowncast<RenderViewTransitionCapture>(*renderBox))
@@ -105009,10 +105112,18 @@ index 8c5e827bd714f453f1f0404786f8b5ed848b3f04..7bf9d246f2e968b2715a513c1945c15a
      void resetUserAgentMediaQueryStyle();
  
 diff --git a/Source/WebCore/style/StyleTreeResolver.cpp b/Source/WebCore/style/StyleTreeResolver.cpp
-index e641504e4e70e439c7aa08b6bf795b8c711aba05..044ef9c7f3fe8ea090e8ed4a0b1424e69047086b 100644
+index e641504e4e70e439c7aa08b6bf795b8c711aba05..0e9ecb3d0365d0d2ef0b7af33fb590c08504e163 100644
 --- a/Source/WebCore/style/StyleTreeResolver.cpp
 +++ b/Source/WebCore/style/StyleTreeResolver.cpp
-@@ -80,8 +80,155 @@
+@@ -72,6 +72,7 @@
+ #include "StylePositionTryFallbackTactic.h"
+ #include "StyleResolver.h"
+ #include "StyleTreeResolverInlines.h"
++#include "StyleWillChange.h"
+ #include "SVGElement.h"
+ #include "Text.h"
+ #include "TypedElementDescendantIteratorInlines.h"
+@@ -80,8 +81,155 @@
  #include "WebAnimationUtilities.h"
  #include <ranges>
  
@@ -105168,7 +105279,7 @@ index e641504e4e70e439c7aa08b6bf795b8c711aba05..044ef9c7f3fe8ea090e8ed4a0b1424e6
  namespace Style {
  
  DEFINE_ALLOCATOR_WITH_HEAP_IDENTIFIER(TreeResolverScope);
-@@ -323,6 +470,9 @@ auto TreeResolver::resolveElement(Element& element, const Style::ComputedStyle*
+@@ -323,6 +471,9 @@ auto TreeResolver::resolveElement(Element& element, const Style::ComputedStyle*
  {
      if (m_didSeePendingStylesheet && !element.renderOrDisplayContentsStyle() && !m_document->isIgnoringPendingStylesheets()) {
          m_document->setHasNodesWithMissingStyle();
@@ -105178,6 +105289,72 @@ index e641504e4e70e439c7aa08b6bf795b8c711aba05..044ef9c7f3fe8ea090e8ed4a0b1424e6
          return { };
      }
  
+@@ -920,6 +1071,10 @@ ElementUpdate TreeResolver::createAnimatedElementUpdate(ResolvedStyle&& resolved
+ 
+         auto animationImpact = styleable.applyKeyframeEffects(*animatedStyle, animatedProperties, previousLastStyleChangeEventStyle.get(), resolutionContext);
+ 
++        // Current and filling effects imply will-change for their animated properties.
++        if (std::ranges::any_of(WillChangeAnimatableFeature::backdropRootProperties, [&](auto property) { return animatedProperties.contains(property); }))
++            animatedStyle->setHasBackdropRootAnimation();
++
+         if (*resolvedStyle.style == *animatedStyle && animationImpact.isEmpty() && previousLastStyleChangeEventStyle)
+             return { WTF::move(resolvedStyle.style), animationImpact };
+ 
+@@ -997,7 +1152,8 @@ ElementUpdate TreeResolver::createAnimatedElementUpdate(ResolvedStyle&& resolved
+     if (animationsAffectedDisplay)
+         newStyle->setHasDisplayAffectedByAnimations();
+ 
+-    bool shouldRecompositeLayer = animationImpact.contains(AnimationImpact::RequiresRecomposite) || element->styleResolutionShouldRecompositeLayer();
++    bool shouldRecompositeLayer = animationImpact.contains(AnimationImpact::RequiresRecomposite) || element->styleResolutionShouldRecompositeLayer()
++        || (currentStyle && currentStyle->hasBackdropRootAnimation() != newStyle->hasBackdropRootAnimation());
+ 
+     auto mayNeedRebuildRoot = [&, newStyle = newStyle.get()] {
+         if (changes.contains(Change::Renderer))
+diff --git a/Source/WebCore/style/computed/StyleComputedStyleBase+GettersInlines.h b/Source/WebCore/style/computed/StyleComputedStyleBase+GettersInlines.h
+index 43368feb3426ae59c90c406e219b7203cc54e68c..c491dd1efd624bdde1f40f0f2a42591d9f1d3a1f 100644
+--- a/Source/WebCore/style/computed/StyleComputedStyleBase+GettersInlines.h
++++ b/Source/WebCore/style/computed/StyleComputedStyleBase+GettersInlines.h
+@@ -201,6 +201,11 @@ inline bool ComputedStyleBase::hasDisplayAffectedByAnimations() const
+     return m_nonInheritedData->miscData->hasDisplayAffectedByAnimations;
+ }
+ 
++inline bool ComputedStyleBase::hasBackdropRootAnimation() const
++{
++    return m_nonInheritedData->miscData->hasBackdropRootAnimation;
++}
++
+ inline bool ComputedStyleBase::transformStyleForcedToFlat() const
+ {
+     return static_cast<bool>(m_nonInheritedData->rareData->transformStyleForcedToFlat);
+diff --git a/Source/WebCore/style/computed/StyleComputedStyleBase+SettersInlines.h b/Source/WebCore/style/computed/StyleComputedStyleBase+SettersInlines.h
+index cc254e175b6e78a170a8d1eb3d682ec03df96116..4412ae9731bdb4126da9861f0f4671e04efd58f5 100644
+--- a/Source/WebCore/style/computed/StyleComputedStyleBase+SettersInlines.h
++++ b/Source/WebCore/style/computed/StyleComputedStyleBase+SettersInlines.h
+@@ -147,6 +147,11 @@ inline void ComputedStyleBase::setHasDisplayAffectedByAnimations()
+     SET_NESTED(m_nonInheritedData, miscData, hasDisplayAffectedByAnimations, true);
+ }
+ 
++inline void ComputedStyleBase::setHasBackdropRootAnimation()
++{
++    SET_NESTED(m_nonInheritedData, miscData, hasBackdropRootAnimation, true);
++}
++
+ inline void ComputedStyleBase::setTransformStyleForcedToFlat(bool b)
+ {
+     SET_NESTED(m_nonInheritedData, rareData, transformStyleForcedToFlat, static_cast<unsigned>(b));
+diff --git a/Source/WebCore/style/computed/StyleComputedStyleBase.h b/Source/WebCore/style/computed/StyleComputedStyleBase.h
+index b15cb2703a24d12aa2f254e3525aa61971bf1c04..53ca22576f1e5e433167d8e14d6722a23c6cfcb2 100644
+--- a/Source/WebCore/style/computed/StyleComputedStyleBase.h
++++ b/Source/WebCore/style/computed/StyleComputedStyleBase.h
+@@ -504,6 +504,8 @@ public:
+ 
+     inline bool hasDisplayAffectedByAnimations() const;
+     inline void setHasDisplayAffectedByAnimations();
++    inline bool hasBackdropRootAnimation() const;
++    inline void setHasBackdropRootAnimation();
+ 
+     inline bool transformStyleForcedToFlat() const;
+     inline void setTransformStyleForcedToFlat(bool);
 diff --git a/Source/WebCore/style/computed/StyleComputedStyleProperties+GettersCustomInlines.h b/Source/WebCore/style/computed/StyleComputedStyleProperties+GettersCustomInlines.h
 index 0e05f23e393b338f3244ca037e6bbb04b7b0f37a..94bd803258010d7db8114ebf42d532d7c00484f0 100644
 --- a/Source/WebCore/style/computed/StyleComputedStyleProperties+GettersCustomInlines.h
@@ -105201,6 +105378,48 @@ index 0e05f23e393b338f3244ca037e6bbb04b7b0f37a..94bd803258010d7db8114ebf42d532d7
  // FIXME: Support writing mode properties.
  
  inline TextDirection ComputedStyleProperties::computedDirection() const
+diff --git a/Source/WebCore/style/computed/data/StyleNonInheritedMiscData.cpp b/Source/WebCore/style/computed/data/StyleNonInheritedMiscData.cpp
+index 5b2a8f228e87a4579736236f1a1ec9fb74ea6509..19006466e3fe988591c666dae59d0a404a8048e0 100644
+--- a/Source/WebCore/style/computed/data/StyleNonInheritedMiscData.cpp
++++ b/Source/WebCore/style/computed/data/StyleNonInheritedMiscData.cpp
+@@ -112,6 +112,7 @@ NonInheritedMiscData::NonInheritedMiscData(const NonInheritedMiscData& o)
+     , userDrag(o.userDrag)
+     , objectFit(o.objectFit)
+     , resize(o.resize)
++    , hasBackdropRootAnimation(o.hasBackdropRootAnimation)
+ {
+ }
+ 
+@@ -162,7 +163,8 @@ bool NonInheritedMiscData::operator==(const NonInheritedMiscData& o) const
+         && userSelect == o.userSelect
+         && userDrag == o.userDrag
+         && objectFit == o.objectFit
+-        && resize == o.resize;
++        && resize == o.resize
++        && hasBackdropRootAnimation == o.hasBackdropRootAnimation;
+ }
+ 
+ bool NonInheritedMiscData::hasFilters() const
+@@ -224,6 +226,7 @@ void NonInheritedMiscData::dumpDifferences(TextStream& ts, const NonInheritedMis
+     LOG_IF_DIFFERENT_WITH_CAST(UserDrag, userDrag);
+     LOG_IF_DIFFERENT_WITH_CAST(ObjectFit, objectFit);
+     LOG_IF_DIFFERENT_WITH_CAST(Resize, resize);
++    LOG_IF_DIFFERENT_WITH_CAST(bool, hasBackdropRootAnimation);
+ }
+ #endif // !LOG_DISABLED
+ 
+diff --git a/Source/WebCore/style/computed/data/StyleNonInheritedMiscData.h b/Source/WebCore/style/computed/data/StyleNonInheritedMiscData.h
+index a66c0dbc915d76b2d3fffd71cf486682f4f230e7..4f0fb789c6ffdc02a919d65b8da9ddfa066ae24e 100644
+--- a/Source/WebCore/style/computed/data/StyleNonInheritedMiscData.h
++++ b/Source/WebCore/style/computed/data/StyleNonInheritedMiscData.h
+@@ -120,6 +120,7 @@ public:
+     PREFERRED_TYPE(UserDrag) unsigned userDrag : 2;
+     PREFERRED_TYPE(ObjectFit) unsigned objectFit : 3;
+     PREFERRED_TYPE(Resize) unsigned resize : 3;
++    PREFERRED_TYPE(bool) unsigned hasBackdropRootAnimation : 1 { false };
+ 
+ private:
+     NonInheritedMiscData();
 diff --git a/Source/WebCore/style/values/align/StyleAlignContent.cpp b/Source/WebCore/style/values/align/StyleAlignContent.cpp
 index 65c527609d4f9853714e732ce9bd5e10ae49ea15..ce7f580e36a29392ce0367e2911d10996a1c6578 100644
 --- a/Source/WebCore/style/values/align/StyleAlignContent.cpp
@@ -105493,6 +105712,46 @@ index 8c2140820809b4cca9a71529340875995dd059e8..1a02ba3d3a0e5130247a53f72d8e9560
  }
  
  ImageDrawResult Image::drawTiledUsingImpl(GraphicsContext& ctxt, NaturalDimensions naturalDimensions, const ScopedLambda<TiledDraw>& draw, const ScopedLambda<TiledDrawPattern>& drawPattern, ConcreteObjectSize concreteObjectSize, const FloatRect& destRect, const FloatPoint& srcPoint, const FloatSize& scaledTileSize, const FloatSize& spacing, ImagePaintingOptions options)
+diff --git a/Source/WebCore/style/values/will-change/StyleWillChange.cpp b/Source/WebCore/style/values/will-change/StyleWillChange.cpp
+index 0dd2e767a47a231c67f0a2e4d257f9f876568cab..2f23a5a4d9f129a026a96ab83e894605639133bd 100644
+--- a/Source/WebCore/style/values/will-change/StyleWillChange.cpp
++++ b/Source/WebCore/style/values/will-change/StyleWillChange.cpp
+@@ -182,14 +182,9 @@ bool WillChangeAnimatableFeatures::Data::createsContainingBlockForOutOfFlowPosit
+ 
+ bool WillChangeAnimatableFeatures::Data::canBeBackdropRoot() const
+ {
+-    return containsProperty(CSSPropertyOpacity)
+-        || containsProperty(CSSPropertyBackdropFilter)
+-        || containsProperty(CSSPropertyWebkitBackdropFilter)
+-        || containsProperty(CSSPropertyClipPath)
+-        || containsProperty(CSSPropertyFilter)
+-        || containsProperty(CSSPropertyMixBlendMode)
+-        || containsProperty(CSSPropertyMask)
+-        || containsProperty(CSSPropertyViewTransitionName);
++    return std::ranges::any_of(WillChangeAnimatableFeature::backdropRootProperties, [this](auto property) {
++        return containsProperty(property);
++    });
+ }
+ 
+ // MARK: - Conversion
+diff --git a/Source/WebCore/style/values/will-change/StyleWillChange.h b/Source/WebCore/style/values/will-change/StyleWillChange.h
+index 09157397434a3b8be47ca214db284c726e878693..517120285158ab416a825d3d70804e221b9b067b 100644
+--- a/Source/WebCore/style/values/will-change/StyleWillChange.h
++++ b/Source/WebCore/style/values/will-change/StyleWillChange.h
+@@ -78,6 +78,13 @@ struct WillChangeAnimatableFeature {
+     {
+     }
+ 
++    static constexpr std::array backdropRootProperties {
++        CSSPropertyOpacity, CSSPropertyBackdropFilter, CSSPropertyWebkitBackdropFilter,
++        CSSPropertyClipPath, CSSPropertyFilter, CSSPropertyMixBlendMode,
++        CSSPropertyMask, CSSPropertyMaskImage, CSSPropertyMaskBorder, CSSPropertyMaskBorderSource,
++        CSSPropertyViewTransitionName
++    };
++
+     static bool NODELETE propertyCreatesStackingContext(CSSPropertyID);
+     static bool NODELETE propertyTriggersCompositing(CSSPropertyID);
+     static bool NODELETE propertyTriggersCompositingOnBoxesOnly(CSSPropertyID);
 diff --git a/Source/WebCore/testing/Internals.idl b/Source/WebCore/testing/Internals.idl
 index 004110288068340109f3dd98a57123c0779675aa..e468ceb71c006aaf5a037d127c3d66695f7af617 100644
 --- a/Source/WebCore/testing/Internals.idl
