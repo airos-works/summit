@@ -12,7 +12,7 @@
     const entries = new Map();
     let byNode = new WeakMap();
     let nextID = 0, epoch = 0, active = false, dirty = true, observer = null;
-    let source = '', target = '', originalLang = null, changedLang = false;
+    let source = '', target = '', originalLang = null, changedLangElement = null;
     let totalBytes = 0, translatedCount = 0, truncated = false;
     const limits = {visit: 50000, entries: 20000, retained: 4000000, node: 50000, batch: 24000, group: 6000};
     const escape = text => text.replace(/[&<>"']/g,
@@ -64,7 +64,7 @@
         // A page that says it is in the language translations go to is not
         // read at all: the walk calls getComputedStyle for every element, 12
         // to 18 ms on the ROCK 5 at the end of every load (#219).
-        const declared = (document.documentElement.getAttribute('lang') || '').trim().toLowerCase().split(/[-_]/)[0];
+        const declared = (document.documentElement?.getAttribute('lang') || '').trim().toLowerCase().split(/[-_]/)[0];
         const wanted = (target || navigator.languages[0] || '').toLowerCase().split(/[-_]/)[0];
         if (target && !/[-_]/.test(target) && declared && declared === wanted)
             return {url: document.URL, text: '', declaredTarget: true, languages: [...navigator.languages], ...state()};
@@ -95,7 +95,6 @@
             throw Error('This document cannot be translated.');
         restore();
         active = true; source = from; target = to; dirty = true;
-        originalLang = document.documentElement.getAttribute('lang');
         observer = new MutationObserver(changes => {
             if (!active) return;
             for (const change of changes) {
@@ -178,9 +177,10 @@
             node.data = value.text;
             ++applied; ++translatedCount;
         }
-        if (applied && !changedLang) {
-            document.documentElement.setAttribute('lang', target);
-            changedLang = true;
+        if (applied && !changedLangElement) {
+            changedLangElement = document.documentElement;
+            originalLang = changedLangElement.getAttribute('lang');
+            changedLangElement.setAttribute('lang', target);
         }
         dirty = true;
         return {...state(), applied};
@@ -204,12 +204,12 @@
             entry.node.data = entry.original;
             ++restored;
         }
-        if (changedLang && document.documentElement.getAttribute('lang') === target) {
-            if (originalLang === null) document.documentElement.removeAttribute('lang');
-            else document.documentElement.setAttribute('lang', originalLang);
+        if (changedLangElement?.getAttribute('lang') === target) {
+            if (originalLang === null) changedLangElement.removeAttribute('lang');
+            else changedLangElement.setAttribute('lang', originalLang);
         }
         entries.clear(); byNode = new WeakMap(); totalBytes = 0;
-        changedLang = false; translatedCount = 0; truncated = false; dirty = true;
+        changedLangElement = null; translatedCount = 0; truncated = false; dirty = true;
         return {...state(), restored};
     }
 
