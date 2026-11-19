@@ -30374,7 +30374,7 @@ index 0767e8c6ac89de2e79bcf9e6279a242d2a44b543..ac14c1c86718156ec1893f25d06bbb31
  }
 -
 diff --git a/Source/WebCore/layout/integration/flex/FlexIntegrationUtils.cpp b/Source/WebCore/layout/integration/flex/FlexIntegrationUtils.cpp
-index c13a0e3bb1faf7b85e398e990867c4407b752256..06c5801739a51a772aa7ad6ad18f1194c9849655 100644
+index c13a0e3bb1faf7b85e398e990867c4407b752256..a160d94db1173af40f72976e1cf9c03a7c87b48c 100644
 --- a/Source/WebCore/layout/integration/flex/FlexIntegrationUtils.cpp
 +++ b/Source/WebCore/layout/integration/flex/FlexIntegrationUtils.cpp
 @@ -26,6 +26,12 @@
@@ -30509,20 +30509,47 @@ index c13a0e3bb1faf7b85e398e990867c4407b752256..06c5801739a51a772aa7ad6ad18f1194
  
  std::optional<bool> FlexIntegrationUtils::isFlexBoxBlockSizeDefiniteForFlexItem(const FlexLayoutItem& flexLayoutItem) const
  {
-@@ -733,6 +798,16 @@ FlexItemDefiniteCrossSizeScope::FlexItemDefiniteCrossSizeScope(RenderBox& flexIt
+@@ -708,6 +773,26 @@ static void setOrClearOverridingBorderBoxLogicalHeight(RenderBox& box, std::opti
+         box.clearOverridingBorderBoxLogicalHeight();
+ }
+ 
++static void invalidateWidthsDependingOnFlexItemHeight(RenderBox& flexItem, std::optional<LayoutUnit> stretchedHeight = std::nullopt)
++{
++    auto* block = dynamicDowncast<RenderBlock>(flexItem);
++    if (!block || (!stretchedHeight && !block->style().logicalHeight().isPercentOrCalculated()))
++        return;
++    auto* descendants = block->percentHeightDescendants();
++    if (!descendants)
++        return;
++
++    // A descendant can transfer its percentage block size back into the item's
++    // intrinsic inline size through its aspect ratio before child layout runs.
++    auto newHeight = stretchedHeight ? *stretchedHeight : block->computeLogicalHeight(block->logicalHeight(), block->logicalTop()).extent;
++    if (block->logicalHeight() == newHeight)
++        return;
++    for (CheckedRef descendant : *descendants) {
++        if (descendant->hasIntrinsicAspectRatio() || descendant->style().aspectRatio().hasRatio())
++            descendant->invalidateContentLogicalWidths(MarkingBehavior::MarkContainingBlockChain, block);
++    }
++}
++
+ FlexItemDefiniteCrossSizeScope::FlexItemDefiniteCrossSizeScope(RenderBox& flexItem, InvalidateContentWidths invalidateContentWidths)
+     : m_flexItem(flexItem)
+ {
+@@ -726,6 +811,8 @@ FlexItemDefiniteCrossSizeScope::FlexItemDefiniteCrossSizeScope(RenderBox& flexIt
+         // No definite cross size to measure against, so make sure no stale overriding size is left in either axis.
+         saveAndSetInlineSize({ });
+         saveAndSetBlockSize({ });
++        if (FlexFormattingUtils::mainAxisIsFlexItemInlineAxis(flexItem))
++            invalidateWidthsDependingOnFlexItemHeight(flexItem);
+         return;
+     }
+ 
+@@ -733,6 +820,7 @@ FlexItemDefiniteCrossSizeScope::FlexItemDefiniteCrossSizeScope(RenderBox& flexIt
      if (FlexFormattingUtils::mainAxisIsFlexItemInlineAxis(flexItem)) {
          saveAndSetInlineSize({ });
          saveAndSetBlockSize(crossSize);
-+        // A percentage-height descendant can transfer this height back into the
-+        // item's intrinsic width through its ratio, before the next child layout.
-+        if (auto* block = dynamicDowncast<RenderBlock>(flexItem); block && flexItem.logicalHeight() != crossSize) {
-+            if (auto* descendants = block->percentHeightDescendants()) {
-+                for (CheckedRef descendant : *descendants) {
-+                    if (descendant->hasIntrinsicAspectRatio() || descendant->style().aspectRatio().hasRatio())
-+                        descendant->invalidateContentLogicalWidths(MarkingBehavior::MarkContainingBlockChain, block);
-+                }
-+            }
-+        }
++        invalidateWidthsDependingOnFlexItemHeight(flexItem, crossSize);
      } else {
          saveAndSetInlineSize(crossSize);
          saveAndSetBlockSize({ });
@@ -99888,7 +99915,7 @@ index 9f59456b209a8efee7ac61a0cf9104df138dc6fe..8de2232fac46c87a7f910d62e30bf37c
  bool NODELETE hasAutoMarginsInColumnAxis(const RenderBox&, WritingMode parentWritingMode);
  bool NODELETE hasAutoMarginsInRowAxis(const RenderBox&, WritingMode parentWritingMode);
 diff --git a/Source/WebCore/rendering/GridTrackSizingAlgorithm.cpp b/Source/WebCore/rendering/GridTrackSizingAlgorithm.cpp
-index 8004ec61378fe96a582562ae1a9a6253f8a9c198..554e604cda65b8d3c9f0d6413b63f0922802db39 100644
+index 8004ec61378fe96a582562ae1a9a6253f8a9c198..fead52e2d618670dc414a608153103513e8544ca 100644
 --- a/Source/WebCore/rendering/GridTrackSizingAlgorithm.cpp
 +++ b/Source/WebCore/rendering/GridTrackSizingAlgorithm.cpp
 @@ -40,6 +40,10 @@
@@ -99955,7 +99982,21 @@ index 8004ec61378fe96a582562ae1a9a6253f8a9c198..554e604cda65b8d3c9f0d6413b63f092
      if (intrinsicLogicalHeightsForRowSizingFirstPass && sizingState() == GridTrackSizingAlgorithm::SizingState::RowSizingFirstIteration)
          intrinsicLogicalHeightsForRowSizingFirstPass->setSizeForGridItem(gridItem, gridItemLogicalHeight);
  
-@@ -1145,11 +1176,15 @@ LayoutUnit GridTrackSizingAlgorithmStrategy::minContentContributionForGridItem(R
+@@ -1117,10 +1148,9 @@ LayoutUnit GridTrackSizingAlgorithmStrategy::minContentContributionForGridItem(R
+         // - second-column-pass min-content: stretched row size as the item's content size.
+         auto minContentLogicalWidth = [&] {
+             if (isComputingColumnIntrinsicWidthForNonOrthogonalItem) {
+-                if (auto rowsEstimate = m_algorithm.estimatedGridAreaBreadthForGridItem(gridItem, Style::GridTrackSizingDirection::Rows)) {
+-                    ScopedGridAreaContentLogicalHeight scope(gridItem, rowsEstimate);
+-                    return gridItem.minContentLogicalWidthContribution();
+-                }
++                auto rowsEstimate = m_algorithm.estimatedGridAreaBreadthForGridItem(gridItem, Style::GridTrackSizingDirection::Rows);
++                ScopedGridAreaContentLogicalHeight scope(gridItem, rowsEstimate);
++                return gridItem.minContentLogicalWidthContribution();
+             } else if (needsGridItemMinContentContributionForSecondColumnPass) {
+                 auto rowSize = renderGrid()->gridAreaBreadthForGridItemIncludingAlignmentOffsets(gridItem, Style::GridTrackSizingDirection::Rows);
+                 auto stretchedSize = !GridLayoutFunctions::isOrthogonalGridItem(*renderGrid(), gridItem) ? gridItem.constrainLogicalHeightByMinMax(rowSize, { }) : gridItem.constrainLogicalWidthByMinMax(rowSize, renderGrid()->contentBoxWidth(), *renderGrid());
+@@ -1145,11 +1175,15 @@ LayoutUnit GridTrackSizingAlgorithmStrategy::minContentContributionForGridItem(R
              return 0_lu;
          }();
  
@@ -99972,7 +100013,21 @@ index 8004ec61378fe96a582562ae1a9a6253f8a9c198..554e604cda65b8d3c9f0d6413b63f092
  
          if (auto& intrinsicLogicalHeightsForRowSizingFirstPass = renderGrid()->intrinsicLogicalHeightsForRowSizingFirstPass())
              intrinsicLogicalHeightsForRowSizingFirstPass->invalidateSizeForItem(gridItem);
-@@ -1193,13 +1228,17 @@ LayoutUnit GridTrackSizingAlgorithmStrategy::maxContentContributionForGridItem(R
+@@ -1182,10 +1216,9 @@ LayoutUnit GridTrackSizingAlgorithmStrategy::maxContentContributionForGridItem(R
+         // sum of definite max row tracks (https://drafts.csswg.org/css-grid-2/#algo-track-sizing).
+         auto maxContentLogicalWidth = [&] {
+             if (isComputingColumnIntrinsicWidthForNonOrthogonalItem) {
+-                if (auto rowsEstimate = m_algorithm.estimatedGridAreaBreadthForGridItem(gridItem, Style::GridTrackSizingDirection::Rows)) {
+-                    ScopedGridAreaContentLogicalHeight scope(gridItem, rowsEstimate);
+-                    return gridItem.maxContentLogicalWidthContribution();
+-                }
++                auto rowsEstimate = m_algorithm.estimatedGridAreaBreadthForGridItem(gridItem, Style::GridTrackSizingDirection::Rows);
++                ScopedGridAreaContentLogicalHeight scope(gridItem, rowsEstimate);
++                return gridItem.maxContentLogicalWidthContribution();
+             } else if (shouldTreatGridAreaBlockSizeAsIndefinite(gridItem)) {
+                 ScopedGridAreaContentLogicalHeight scope(gridItem, std::nullopt);
+                 return gridItem.maxContentLogicalWidthContribution();
+@@ -1193,13 +1226,17 @@ LayoutUnit GridTrackSizingAlgorithmStrategy::maxContentContributionForGridItem(R
              return gridItem.maxContentLogicalWidthContribution();
          }();
  
@@ -99991,7 +100046,7 @@ index 8004ec61378fe96a582562ae1a9a6253f8a9c198..554e604cda65b8d3c9f0d6413b63f092
      }
      return logicalHeightForGridItem(gridItem, gridLayoutState);
  }
-@@ -1245,7 +1284,7 @@ LayoutUnit GridTrackSizingAlgorithmStrategy::minContributionForGridItem(RenderBo
+@@ -1245,7 +1282,7 @@ LayoutUnit GridTrackSizingAlgorithmStrategy::minContributionForGridItem(RenderBo
          return overflow == Overflow::Visible || overflow == Overflow::Clip;
      };
  
@@ -100000,7 +100055,7 @@ index 8004ec61378fe96a582562ae1a9a6253f8a9c198..554e604cda65b8d3c9f0d6413b63f092
  
      if (gridItemMinSize.isAuto()) {
          if (!computedOverflowIsNotScrollable())
-@@ -1316,26 +1355,22 @@ void GridTrackSizingAlgorithm::updateBaselineAlignmentContext(const RenderBox& g
+@@ -1316,26 +1353,22 @@ void GridTrackSizingAlgorithm::updateBaselineAlignmentContext(const RenderBox& g
      ASSERT(wasSetup());
      ASSERT(canParticipateInBaselineAlignment(gridItem, alignmentContextType));
  
@@ -100032,7 +100087,7 @@ index 8004ec61378fe96a582562ae1a9a6253f8a9c198..554e604cda65b8d3c9f0d6413b63f092
      return m_baselineAlignment.baselineOffsetForGridItem(align, alignmentContext, gridItem, alignmentContextType);
  }
  
-@@ -1460,7 +1495,11 @@ private:
+@@ -1460,7 +1493,11 @@ private:
  void IndefiniteSizeStrategy::layoutGridItemForMinSizeComputation(RenderBox& gridItem, bool overrideSizeHasChanged) const
  {
      if (overrideSizeHasChanged && direction() != Style::GridTrackSizingDirection::Columns)
@@ -100044,7 +100099,7 @@ index 8004ec61378fe96a582562ae1a9a6253f8a9c198..554e604cda65b8d3c9f0d6413b63f092
      gridItem.layoutIfNeeded();
  }
  
-@@ -1666,7 +1705,11 @@ void DefiniteSizeStrategy::maximizeTracks(Vector<UniqueRef<GridTrack>>& tracks,
+@@ -1666,7 +1703,11 @@ void DefiniteSizeStrategy::maximizeTracks(Vector<UniqueRef<GridTrack>>& tracks,
  void DefiniteSizeStrategy::layoutGridItemForMinSizeComputation(RenderBox& gridItem, bool overrideSizeHasChanged) const
  {
      if (overrideSizeHasChanged)
