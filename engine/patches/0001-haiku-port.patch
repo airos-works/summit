@@ -104010,7 +104010,7 @@ index 0000000000000000000000000000000000000000..f32a1c303300b70614a2b227d27dc96e
 +    network
 +)
 diff --git a/Source/WebDriver/Session.cpp b/Source/WebDriver/Session.cpp
-index 950353c0d08c2b76cd70b754e719d8c4b8009d28..1de9292e41ea4d30ae5fe51b31c82ac92a026d55 100644
+index 950353c0d08c2b76cd70b754e719d8c4b8009d28..4ce456e0aea42799e24909f48e33646cc8cea96d 100644
 --- a/Source/WebDriver/Session.cpp
 +++ b/Source/WebDriver/Session.cpp
 @@ -2400,6 +2400,15 @@ void Session::elementSendKeys(const String& elementID, const String& text, Funct
@@ -104029,6 +104029,46 @@ index 950353c0d08c2b76cd70b754e719d8c4b8009d28..1de9292e41ea4d30ae5fe51b31c82ac9
                      "    let elementRootNode = element.getRootNode();"
                      "    if (elementRootNode.activeElement !== element && prevActiveElement)"
                      "        prevActiveElement.blur();"
+@@ -2782,6 +2791,26 @@ static Ref<JSON::Object> serializeCookie(const Session::Cookie& cookie)
+     return cookieObject;
+ }
+ 
++void Session::setStorageAccessPermission(const String& state, Function<void(CommandResult&&)>&& completionHandler)
++{
++    if (!m_currentBrowsingContext) {
++        completionHandler(CommandResult::fail(CommandResult::ErrorCode::NoSuchWindow));
++        return;
++    }
++
++    auto parameters = JSON::Object::create();
++    parameters->setString("browsingContextHandle"_s, uncheckedTopLevelBrowsingContext());
++    parameters->setString("frameHandle"_s, m_currentBrowsingContext.value());
++    parameters->setString("state"_s, state);
++    m_host->sendCommandToBackend("setStorageAccessPermissionState"_s, WTF::move(parameters), [protectedThis = Ref { *this }, completionHandler = WTF::move(completionHandler)](SessionHost::CommandResponse&& response) {
++        if (response.isError) {
++            completionHandler(CommandResult::fail(WTF::move(response.responseObject)));
++            return;
++        }
++        completionHandler(CommandResult::success());
++    });
++}
++
+ void Session::getAllCookies(Function<void(CommandResult&&)>&& completionHandler)
+ {
+     if (!m_currentBrowsingContext) {
+diff --git a/Source/WebDriver/Session.h b/Source/WebDriver/Session.h
+index f998209d4d5cea50ae43da7f2a0ed42c1927f669..6580e033f96a8345e436df4063e370450d3c53ab 100644
+--- a/Source/WebDriver/Session.h
++++ b/Source/WebDriver/Session.h
+@@ -146,6 +146,8 @@ public:
+     void elementSendKeys(const String& elementID, const String& text, Function<void(CommandResult&&)>&&);
+     void getPageSource(Function<void(CommandResult&&)>&&);
+     void executeScript(const String& script, RefPtr<JSON::Array>&& arguments, ExecuteScriptMode, Function<void(CommandResult&&)>&&);
++    void setStorageAccessPermission(const String& state, Function<void(CommandResult&&)>&&);
++
+     void getAllCookies(Function<void(CommandResult&&)>&&);
+     void getNamedCookie(const String& name, Function<void(CommandResult&&)>&&);
+     void addCookie(const Cookie&, Function<void(CommandResult&&)>&&);
 diff --git a/Source/WebDriver/SessionHost.h b/Source/WebDriver/SessionHost.h
 index 464e50d5a70645d78b8316b42cc37c4a0e84dc50..96f7dfadb76922b64235c7db6e2065d133e2a40f 100644
 --- a/Source/WebDriver/SessionHost.h
@@ -104066,6 +104106,59 @@ index 464e50d5a70645d78b8316b42cc37c4a0e84dc50..96f7dfadb76922b64235c7db6e2065d1
  #endif
  };
  
+diff --git a/Source/WebDriver/WebDriverService.cpp b/Source/WebDriver/WebDriverService.cpp
+index a4852d7abff8b41b6aae3df50739961bf6cd385a..47e0763b42d16c137fe710deda7f1e99b4d129fc 100644
+--- a/Source/WebDriver/WebDriverService.cpp
++++ b/Source/WebDriver/WebDriverService.cpp
+@@ -312,6 +312,8 @@ const WebDriverService::Command WebDriverService::s_commands[] = {
+     { HTTPMethod::Post, "/session/$sessionId/execute/sync", &WebDriverService::executeScript },
+     { HTTPMethod::Post, "/session/$sessionId/execute/async", &WebDriverService::executeAsyncScript },
+ 
++    { HTTPMethod::Post, "/session/$sessionId/permissions", &WebDriverService::setPermission },
++
+     { HTTPMethod::Get, "/session/$sessionId/cookie", &WebDriverService::getAllCookies },
+     { HTTPMethod::Get, "/session/$sessionId/cookie/$name", &WebDriverService::getNamedCookie },
+     { HTTPMethod::Post, "/session/$sessionId/cookie", &WebDriverService::addCookie },
+@@ -2168,6 +2170,26 @@ void WebDriverService::executeAsyncScript(RefPtr<JSON::Object>&& parameters, Fun
+     });
+ }
+ 
++void WebDriverService::setPermission(RefPtr<JSON::Object>&& parameters, Function<void(CommandResult&&)>&& completionHandler)
++{
++    if (!findSessionOrCompleteWithError(*parameters, completionHandler))
++        return;
++
++    auto descriptor = parameters->getObject("descriptor"_s);
++    if (!descriptor || descriptor->getString("name"_s) != "storage-access"_s) {
++        completionHandler(CommandResult::fail(CommandResult::ErrorCode::InvalidArgument, "Expected a storage-access permission descriptor"_s));
++        return;
++    }
++
++    auto state = parameters->getString("state"_s);
++    if (state != "granted"_s && state != "denied"_s && state != "prompt"_s) {
++        completionHandler(CommandResult::fail(CommandResult::ErrorCode::InvalidArgument, "Invalid permission state"_s));
++        return;
++    }
++
++    protect(m_session)->setStorageAccessPermission(state, WTF::move(completionHandler));
++}
++
+ void WebDriverService::getAllCookies(RefPtr<JSON::Object>&& parameters, Function<void (CommandResult&&)>&& completionHandler)
+ {
+     // §16.1 Get All Cookies.
+diff --git a/Source/WebDriver/WebDriverService.h b/Source/WebDriver/WebDriverService.h
+index 7decddf67bb99415a063207075d27acdb330486e..fa1134d583004078fe261ca48d7650024c1d7170 100644
+--- a/Source/WebDriver/WebDriverService.h
++++ b/Source/WebDriver/WebDriverService.h
+@@ -126,6 +126,8 @@ private:
+     void getPageSource(RefPtr<JSON::Object>&&, Function<void (CommandResult&&)>&&);
+     void executeScript(RefPtr<JSON::Object>&&, Function<void (CommandResult&&)>&&);
+     void executeAsyncScript(RefPtr<JSON::Object>&&, Function<void (CommandResult&&)>&&);
++    void setPermission(RefPtr<JSON::Object>&&, Function<void(CommandResult&&)>&&);
++
+     void getAllCookies(RefPtr<JSON::Object>&&, Function<void (CommandResult&&)>&&);
+     void getNamedCookie(RefPtr<JSON::Object>&&, Function<void (CommandResult&&)>&&);
+     void addCookie(RefPtr<JSON::Object>&&, Function<void (CommandResult&&)>&&);
 diff --git a/Source/WebDriver/haiku/WebDriverServiceHaiku.cpp b/Source/WebDriver/haiku/WebDriverServiceHaiku.cpp
 new file mode 100644
 index 0000000000000000000000000000000000000000..a76bf51c195cde1e861efeaad8c358cf7e21bfad
