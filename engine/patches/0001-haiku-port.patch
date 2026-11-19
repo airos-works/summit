@@ -26583,10 +26583,20 @@ index 57ed58ea282bf389d919eebe11d6fbcdca3d0ea3..7e3f8018af67fe986dc19dbfe5b47014
      Vector<Ref<MouseEvent>> m_coalescedEvents;
      Vector<Ref<MouseEvent>> m_predictedEvents;
 diff --git a/Source/WebCore/dom/MouseEvent.idl b/Source/WebCore/dom/MouseEvent.idl
-index b5eee711d88f7d13c02fba2e0c7889a5b30c0806..1cd111c2602f69756e84ff3f8b7ddbeceed2803f 100644
+index b5eee711d88f7d13c02fba2e0c7889a5b30c0806..74888ce68b52133e55406a38659d5965c332ecbd 100644
 --- a/Source/WebCore/dom/MouseEvent.idl
 +++ b/Source/WebCore/dom/MouseEvent.idl
-@@ -37,6 +37,7 @@
+@@ -30,6 +30,9 @@
+     readonly attribute unrestricted double screenY;
+     readonly attribute unrestricted double clientX;
+     readonly attribute unrestricted double clientY;
++    // UIEvent also exposes these coordinates on legacy event types.
++    readonly attribute long layerX;
++    readonly attribute long layerY;
+     readonly attribute boolean ctrlKey;
+     readonly attribute boolean shiftKey;
+     readonly attribute boolean altKey;
+@@ -37,6 +40,7 @@
      [ImplementedAs=buttonAsShort] readonly attribute short button;
      readonly attribute unsigned short buttons;
      readonly attribute EventTarget? relatedTarget;
@@ -27260,6 +27270,74 @@ index 7343de611c685b18a4c283f0930787054cd725be..15480aa30de2c0d77709680d1e4f2fc1
  
      // Set on the old document's transition while a cross-document navigation waits for it to capture.
      OutboundPostCaptureSteps m_outboundPostCaptureSteps;
+diff --git a/Source/WebCore/dom/WheelEvent.cpp b/Source/WebCore/dom/WheelEvent.cpp
+index bd4b77ffcd44bb40e7b0347dcef96cd56257a45d..5c7e9e7a8fa54af9326268e1663683c1b9336480 100644
+--- a/Source/WebCore/dom/WheelEvent.cpp
++++ b/Source/WebCore/dom/WheelEvent.cpp
+@@ -60,6 +60,7 @@ inline WheelEvent::WheelEvent(const AtomString& type, const Init& initializer)
+     , m_deltaY(initializer.deltaY ? initializer.deltaY : wheelDeltaToDelta(initializer.wheelDeltaY))
+     , m_deltaZ(initializer.deltaZ)
+     , m_deltaMode(initializer.deltaMode)
++    , m_momentum(initializer.momentum)
+ {
+ }
+ 
+@@ -93,6 +94,7 @@ inline WheelEvent::WheelEvent(const PlatformWheelEvent& event, RefPtr<WindowProx
+     , m_deltaX(-event.deltaX())
+     , m_deltaY(-event.deltaY())
+     , m_deltaMode(determineDeltaMode(event))
++    , m_momentum(event.isMomentumEvent())
+     , m_underlyingPlatformEvent(event)
+ {
+ }
+diff --git a/Source/WebCore/dom/WheelEvent.h b/Source/WebCore/dom/WheelEvent.h
+index d105b231f894b652fe01100dd0cd3cd0e0f98c9b..5b092fede1ced8f2a2af132536bbe243c022a6f7 100644
+--- a/Source/WebCore/dom/WheelEvent.h
++++ b/Source/WebCore/dom/WheelEvent.h
+@@ -49,6 +49,7 @@ public:
+         double deltaY { 0 };
+         double deltaZ { 0 };
+         unsigned deltaMode { DOM_DELTA_PIXEL };
++        bool momentum { false };
+         int wheelDeltaX { 0 }; // Deprecated.
+         int wheelDeltaY { 0 }; // Deprecated.
+     };
+@@ -64,6 +65,7 @@ public:
+     int wheelDeltaX() const { return m_wheelDelta.x(); } // Deprecated, negative when scrolling right.
+     int wheelDeltaY() const { return m_wheelDelta.y(); } // Deprecated, negative when scrolling down.
+     unsigned deltaMode() const { return m_deltaMode; }
++    bool momentum() const { return m_momentum; }
+ 
+     bool webkitDirectionInvertedFromDevice() const { return m_underlyingPlatformEvent && m_underlyingPlatformEvent.value().directionInvertedFromDevice(); }
+ 
+@@ -82,6 +84,7 @@ private:
+     double m_deltaY { 0 };
+     double m_deltaZ { 0 };
+     unsigned m_deltaMode { DOM_DELTA_PIXEL };
++    bool m_momentum { false };
+     std::optional<PlatformWheelEvent> m_underlyingPlatformEvent;
+ };
+ 
+diff --git a/Source/WebCore/dom/WheelEvent.idl b/Source/WebCore/dom/WheelEvent.idl
+index 656012cd3345b608929312613048d4bef51ffc6f..c98ade0aba1f9a42651c29638a2ed2970a102c71 100644
+--- a/Source/WebCore/dom/WheelEvent.idl
++++ b/Source/WebCore/dom/WheelEvent.idl
+@@ -35,6 +35,7 @@
+     readonly attribute double deltaY;
+     readonly attribute double deltaZ;
+     readonly attribute unsigned long deltaMode;
++    readonly attribute boolean momentum;
+ 
+     // Legacy MouseWheelEvent API replaced by standard WheelEvent API.
+     readonly attribute long wheelDeltaX;
+@@ -50,6 +51,7 @@ dictionary WheelEventInit : MouseEventInit {
+     double deltaY = 0.0;
+     double deltaZ = 0.0;
+     unsigned long deltaMode = 0;
++    boolean momentum = false;
+ 
+     // Legacy members that we still support for backward compatibility.
+     long wheelDeltaX = 0;
 diff --git a/Source/WebCore/dom/make_names.pl b/Source/WebCore/dom/make_names.pl
 index 7f18cb986d1972948b04893b511de16598d7f103..68525703b1263997f5100c89a1c31dd939c8245f 100755
 --- a/Source/WebCore/dom/make_names.pl
@@ -35317,6 +35395,38 @@ index bcb9ed9de7654fe6beb7a8fbc6eaa84e6c542585..fa13748ab6c245b8c34a45e6bc746d83
  #endif
  };
  
+diff --git a/Source/WebCore/platform/PlatformWheelEvent.h b/Source/WebCore/platform/PlatformWheelEvent.h
+index be910bd9116b897ca2ae721204c41751bd937b86..4b85b06bef29227e6c4f62b1c53624d68a675ddb 100644
+--- a/Source/WebCore/platform/PlatformWheelEvent.h
++++ b/Source/WebCore/platform/PlatformWheelEvent.h
+@@ -177,13 +177,17 @@ public:
+     bool isGestureContinuation() const; // The fingers-down part of the gesture excluding momentum.
+     bool shouldResetLatching() const;
+     bool isEndOfMomentumScroll() const;
+-    bool isMomentumEvent() const;
+ #else
+     bool useLatchedEventElement() const { return false; }
+ #endif
+ 
+     PlatformWheelEventPhase phase() const { return m_phase; }
+     PlatformWheelEventPhase momentumPhase() const { return m_momentumPhase; }
++#if ENABLE(ASYNC_SCROLLING) || ENABLE(KINETIC_SCROLLING)
++    bool isMomentumEvent() const { return momentumPhase() != PlatformWheelEventPhase::None && momentumPhase() != PlatformWheelEventPhase::WillBegin; }
++#else
++    bool isMomentumEvent() const { return false; }
++#endif
+ 
+ #if ENABLE(KINETIC_SCROLLING)
+     bool isGestureStart() const;
+@@ -256,8 +260,6 @@ inline bool PlatformWheelEvent::isEndOfMomentumScroll() const
+     return m_phase == PlatformWheelEventPhase::None && m_momentumPhase == PlatformWheelEventPhase::Ended;
+ }
+ 
+-inline bool PlatformWheelEvent::isMomentumEvent() const { return momentumPhase() != PlatformWheelEventPhase::None && momentumPhase() != PlatformWheelEventPhase::WillBegin; }
+-
+ #endif // ENABLE(ASYNC_SCROLLING)
+ 
+ #if ENABLE(KINETIC_SCROLLING)
 diff --git a/Source/WebCore/platform/RunLoopObserver.cpp b/Source/WebCore/platform/RunLoopObserver.cpp
 index 7896afc9dadf5595dc274c19b102d9957c69f4f3..e5573f5ab8efeb4cdcdfe950fb85967ca014f5c5 100644
 --- a/Source/WebCore/platform/RunLoopObserver.cpp
