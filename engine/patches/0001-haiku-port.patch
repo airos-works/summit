@@ -100164,7 +100164,7 @@ index 455aef736779facc0f165ddf7495622cc59b6160..c0a99de127da8efd90265687d52a1c37
  
  inline bool PositionedLayoutConstraints::isOpposing() const
 diff --git a/Source/WebCore/rendering/RenderBlock.cpp b/Source/WebCore/rendering/RenderBlock.cpp
-index 0ff11fddb608c1b65d17189a08c8ffa40c284e90..315849253f7bcf1ef95a998f6b4bbfd08c661287 100644
+index 0ff11fddb608c1b65d17189a08c8ffa40c284e90..69c6a3a9d4b580b57d2dc9ae92e25d227b11a597 100644
 --- a/Source/WebCore/rendering/RenderBlock.cpp
 +++ b/Source/WebCore/rendering/RenderBlock.cpp
 @@ -93,6 +93,11 @@
@@ -100179,6 +100179,15 @@ index 0ff11fddb608c1b65d17189a08c8ffa40c284e90..315849253f7bcf1ef95a998f6b4bbfd0
  #include <wtf/SetForScope.h>
  #include <wtf/StackStats.h>
  #include <wtf/TZoneMallocInlines.h>
+@@ -512,7 +517,7 @@ static inline bool NODELETE isDelayingUpdateScrollInfoAfterLayout(const RenderBl
+     // Workaround for now. We cannot delay the scroll info for overflow
+     // for items with opposite writing directions, as the contents needs
+     // to overflow in that direction
+-    return transaction && transaction->nestedCount && !renderer.writingMode().isBlockFlipped();
++    return transaction && transaction->nestedCount && !renderer.writingMode().isBlockFlipped() && !renderer.scrollbarChangesMayAffectFlexBaseline();
+ };
+ 
+ std::optional<ScrollbarUpdateScope> RenderBlock::updateScrollInfoAfterLayout()
 @@ -583,9 +588,955 @@ static bool canContainDescendantScrollbarChanges(const RenderBlock& renderBlock,
      return layoutContext.subtreeScrollbarChangesState().has_value() && renderBlock.style().logicalWidth().isFixed();
  }
@@ -101613,10 +101622,18 @@ index 820170c9ccbad7e487a557bcd6549aaeaeb0d9b0..7996a4aa1830960e51de28b8e426f715
  }
  
 diff --git a/Source/WebCore/rendering/RenderBox.cpp b/Source/WebCore/rendering/RenderBox.cpp
-index b69c7bf9751cc17db10467583c079ebdedd9f1ae..44f56e34a5a40acf526632f5aa7fc1f49a87b69d 100644
+index b69c7bf9751cc17db10467583c079ebdedd9f1ae..fd5f01e2d608ccff2fa9da4f72279168bb267bae 100644
 --- a/Source/WebCore/rendering/RenderBox.cpp
 +++ b/Source/WebCore/rendering/RenderBox.cpp
-@@ -132,6 +132,24 @@
+@@ -28,6 +28,7 @@
+ 
+ #include "AnchorPositionEvaluator.h"
+ #include "BackgroundPainter.h"
++#include "BaselineAlignmentInlines.h"
+ #include "BorderPainter.h"
+ #include "BorderShape.h"
+ #include "ContainerNodeInlines.h"
+@@ -132,6 +133,24 @@
  #include <WebKitAdditions/RenderBoxAdditions.cpp>
  #endif
  
@@ -101641,7 +101658,7 @@ index b69c7bf9751cc17db10467583c079ebdedd9f1ae..44f56e34a5a40acf526632f5aa7fc1f4
  namespace WebCore {
  
  WTF_MAKE_TZONE_ALLOCATED_IMPL(RenderBox);
-@@ -296,6 +314,127 @@ void RenderBox::removeFloatingOrOutOfFlowChildFromBlockLists()
+@@ -296,6 +315,127 @@ void RenderBox::removeFloatingOrOutOfFlowChildFromBlockLists()
      ASSERT_NOT_REACHED();
  }
  
@@ -101769,7 +101786,7 @@ index b69c7bf9751cc17db10467583c079ebdedd9f1ae..44f56e34a5a40acf526632f5aa7fc1f4
  void RenderBox::styleWillChange(Style::Difference diff, const Style::ComputedStyle& newStyle)
  {
      s_hadNonVisibleOverflow = hasNonVisibleOverflow();
-@@ -304,7 +443,18 @@ void RenderBox::styleWillChange(Style::Difference diff, const Style::ComputedSty
+@@ -304,7 +444,18 @@ void RenderBox::styleWillChange(Style::Difference diff, const Style::ComputedSty
      if (oldStyle) {
          // The background of the root element or the body element could propagate up to
          // the canvas. Issue full repaint, when our style changes substantially.
@@ -101788,7 +101805,7 @@ index b69c7bf9751cc17db10467583c079ebdedd9f1ae..44f56e34a5a40acf526632f5aa7fc1f4
              view().repaintRootContents();
              if (Style::hasEntirelyFixedBackground(oldStyle->backgroundLayers()) != Style::hasEntirelyFixedBackground(newStyle.backgroundLayers()))
                  view().compositor().rootLayerConfigurationChanged();
-@@ -464,6 +614,19 @@ void RenderBox::styleDidChange(Style::Difference diff, const Style::ComputedStyl
+@@ -464,6 +615,19 @@ void RenderBox::styleDidChange(Style::Difference diff, const Style::ComputedStyl
  
      RenderBoxModelObject::styleDidChange(diff, oldStyle);
  
@@ -101808,7 +101825,7 @@ index b69c7bf9751cc17db10467583c079ebdedd9f1ae..44f56e34a5a40acf526632f5aa7fc1f4
      const Style::ComputedStyle& newStyle = style();
      if (needsLayout() && oldStyle) {
          RenderBlock::removePercentHeightDescendant(*this);
-@@ -3474,6 +3637,12 @@ RenderBox::LogicalExtentComputedValues RenderBox::computeLogicalHeight(LayoutUni
+@@ -3474,6 +3638,12 @@ RenderBox::LogicalExtentComputedValues RenderBox::computeLogicalHeight(LayoutUni
  
          if (intrinsicHeight)
              *intrinsicHeight -= borderAndPaddingLogicalHeight();
@@ -101821,7 +101838,7 @@ index b69c7bf9751cc17db10467583c079ebdedd9f1ae..44f56e34a5a40acf526632f5aa7fc1f4
          auto mainOrPreferredHeight = computeLogicalHeightUsing(computedLogicalHeight, intrinsicHeight).value_or(computedValues.extent);
          return constrainLogicalHeightByMinMax(mainOrPreferredHeight, intrinsicHeight, isComputingIntrinsicSize);
      };
-@@ -3559,7 +3728,11 @@ LayoutUnit RenderBox::computeIntrinsicLogicalHeight()
+@@ -3559,7 +3729,11 @@ LayoutUnit RenderBox::computeIntrinsicLogicalHeight()
      // height. A descendant that does not resolve against this box's logical height is unaffected and need not lay out again.
      layoutIfNeeded();
      auto blockSize = logicalHeight();
@@ -101832,6 +101849,39 @@ index b69c7bf9751cc17db10467583c079ebdedd9f1ae..44f56e34a5a40acf526632f5aa7fc1f4
 +#endif
      return blockSize;
  }
+ 
+@@ -5772,6 +5946,19 @@ bool RenderBox::hasAutoHeightOrContainingBlockWithAutoHeight(UpdatePercentageHei
+     return !containingBlock->hasDefiniteLogicalHeight();
+ }
+ 
++bool RenderBox::maySupplyFlexItemBaseline() const
++{
++    // Changing a descendant's line can move an ancestor's baseline even when
++    // all the intervening border boxes have fixed sizes.
++    for (const RenderElement* element = this; element; element = element->parent()) {
++        if (element->isFloatingOrOutOfFlowPositioned() || element->shouldApplyLayoutContainment())
++            return false;
++        if (auto* box = dynamicDowncast<RenderBox>(*element); box && box->isFlexItem() && isBaselinePosition(FlexFormattingUtils::alignmentForFlexItem(*box)))
++            return true;
++    }
++    return false;
++}
++
+ bool RenderBox::overflowChangesMayAffectLayout() const
+ {
+     if (style().overflowY() != Overflow::Auto && style().overflowX() != Overflow::Auto)
+diff --git a/Source/WebCore/rendering/RenderBox.h b/Source/WebCore/rendering/RenderBox.h
+index 324b81a03aaea593cd4942b21a5f54ec09f4dd09..518984f28f5566876327269cc19373ca45c03c0b 100644
+--- a/Source/WebCore/rendering/RenderBox.h
++++ b/Source/WebCore/rendering/RenderBox.h
+@@ -578,6 +578,8 @@ public:
+     void removeFloatingAndInvalidateForLayout();
+     void removeFloatingOrOutOfFlowChildFromBlockLists();
+ 
++    bool maySupplyFlexItemBaseline() const;
++    bool scrollbarChangesMayAffectFlexBaseline() const { return overflowChangesMayAffectLayout() && maySupplyFlexItemBaseline(); }
+     virtual std::optional<LayoutUnit> firstLineBaseline() const { return { }; }
+     virtual std::optional<LayoutUnit> lastLineBaseline() const { return { }; }
  
 diff --git a/Source/WebCore/rendering/RenderBoxModelObject.cpp b/Source/WebCore/rendering/RenderBoxModelObject.cpp
 index 71b979677ed9ea5b375f374fdb66f824f3074ba6..6e12a53e3b504aac91236cc6cf058ae02ff954f7 100644
@@ -103780,7 +103830,7 @@ index 447d8cce81613ce756f6ad19ebd350e64e4609ff..cdfca97ba92ec54b3d5a63a68f6bb601
  
      void layout() override;
 diff --git a/Source/WebCore/rendering/RenderObject.cpp b/Source/WebCore/rendering/RenderObject.cpp
-index 5a90dd68672464ece91671bee69e2598510a2ebb..fc069a89103a084e9466658ad1806068cc3345a2 100644
+index 5a90dd68672464ece91671bee69e2598510a2ebb..fd95eda13f53f07cc989d4288ee8f8097c18bb3f 100644
 --- a/Source/WebCore/rendering/RenderObject.cpp
 +++ b/Source/WebCore/rendering/RenderObject.cpp
 @@ -34,6 +34,7 @@
@@ -103816,6 +103866,15 @@ index 5a90dd68672464ece91671bee69e2598510a2ebb..fc069a89103a084e9466658ad1806068
  #include <stdio.h>
  #include <wtf/HexNumber.h>
  #include <wtf/ScopedLambda.h>
+@@ -552,7 +560,7 @@ static inline bool isLayoutBoundary(const RenderElement& renderer)
+     if (renderer.isTablePart())
+         return false;
+ 
+-    if (CheckedPtr renderBlock = dynamicDowncast<RenderBlock>(renderer); !renderBlock->createsNewFormattingContext())
++    if (CheckedPtr renderBlock = dynamicDowncast<RenderBlock>(renderer); !renderBlock || !renderBlock->createsNewFormattingContext() || renderBlock->maySupplyFlexItemBaseline())
+         return false;
+ 
+     return true;
 @@ -586,8 +594,39 @@ void RenderObject::clearNeedsLayout(HadSkippedLayout hadSkippedLayout)
  
  void RenderObject::scheduleLayout(RenderElement* layoutRoot)
@@ -103878,6 +103937,15 @@ index 5a90dd68672464ece91671bee69e2598510a2ebb..fc069a89103a084e9466658ad1806068
      bool hasOutOfFlowPosition = isOutOfFlowPositioned();
  
      while (ancestor) {
+@@ -629,7 +682,7 @@ RenderElement* RenderObject::markContainingBlocksForLayout(RenderElement* layout
+             if (willSkipRelativelyPositionedInlines)
+                 container = ancestor->container();
+             ancestor->setOutOfFlowChildNeedsLayoutBit(true);
+-            simplifiedNormalFlowLayout = true;
++            simplifiedNormalFlowLayout = !downcast<RenderBlock>(*ancestor).scrollbarChangesMayAffectFlexBaseline();
+         } else if (simplifiedNormalFlowLayout) {
+             if (ancestor->needsSimplifiedNormalFlowLayout())
+                 return { };
 @@ -1106,6 +1159,29 @@ void RenderObject::repaintSlowRepaintObject() const
      } else
          repaintRect = snappedIntRect(clippedOverflowRectForRepaint(repaintContainer.get()));
