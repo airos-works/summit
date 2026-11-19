@@ -395,54 +395,62 @@ const frameBox = (source) => {
   }
   return null;
 };
-const waiting = new Map();
-let queries = 0;
-// This frame's place in the page's viewport, and the page's width.
-const placeInPage = () => new Promise((resolve) => {
-  if (window === window.top) { resolve({ x: 0, y: 0, width: window.innerWidth }); return; }
-  const id = String(++queries) + Math.random().toString(36).slice(2);
-  waiting.set(id, resolve);
-  setTimeout(() => { if (waiting.delete(id)) resolve(null); }, 1000);
-  window.parent.postMessage({ [tag]: 'where', id }, '*');
-});
+// Only the field's frame posts to the native bridge (its origin matters).
+// Ancestors remember the child that requested coordinates, so movement can
+// invalidate that particular request even while its reply is in flight.
+let request = null;
+let nextId = 0;
+const leave = () => {
+  if (!request) return;
+  const previous = request;
+  request = null;
+  if (previous.child)
+    previous.child.postMessage({ [tag]: 'leave', id: previous.childId }, '*');
+  else if (previous.reported)
+    post({ type: 'leave' });
+};
+const locate = (entry) => {
+  request = entry;
+  if (window === window.top) {
+    entry.located(0, 0, window.innerWidth);
+    return;
+  }
+  entry.id = String(++nextId) + Math.random().toString(36).slice(2);
+  window.parent.postMessage({ [tag]: 'where', id: entry.id }, '*');
+};
 window.addEventListener('message', (event) => {
   const data = event.data;
   if (!data || typeof data !== 'object' || !Object.prototype.hasOwnProperty.call(data, tag)) return;
-  // The browser's own messages: the page's listeners need not see them.
   event.stopImmediatePropagation();
   const source = event.source;
   if (data[tag] === 'where' && source) {
     const box = frameBox(source);
     if (!box) return;
-    placeInPage().then((place) => {
-      if (place) source.postMessage({ [tag]: 'here', id: data.id, x: place.x + box.x, y: place.y + box.y, width: place.width }, '*');
-    });
-  } else if (data[tag] === 'here' && source === window.parent) {
-    const resolve = waiting.get(data.id);
-    if (!resolve) return;
-    waiting.delete(data.id);
-    resolve({ x: Number(data.x) || 0, y: Number(data.y) || 0, width: Number(data.width) || 0 });
+    locate({ child: source, childId: data.id, located(x, y, width) {
+      source.postMessage({ [tag]: 'here', id: data.id, x: x + box.x, y: y + box.y, width }, '*');
+    } });
+  } else if (window !== window.top && source === window.parent && request && request.id === data.id) {
+    if (data[tag] === 'leave') leave();
+    else if (data[tag] === 'here') request.located(Number(data.x) || 0, Number(data.y) || 0, Number(data.width) || 0);
   }
 }, true);
 const report = (event) => {
   const field = event.target;
   if (!isPasskeyField(field)) return;
-  const rect = field.getBoundingClientRect();
-  placeInPage().then((place) => {
-    if (!place || !place.width) return;
-    post({ type: 'field', left: rect.left + place.x, top: rect.top + place.y, right: rect.right + place.x,
-      bottom: rect.bottom + place.y, width: place.width });
-  });
+  locate({ field, located(x, y, width) {
+    if (!width) return;
+    const rect = field.getBoundingClientRect();
+    this.reported = true;
+    post({ type: 'field', left: rect.left + x, top: rect.top + y, right: rect.right + x,
+      bottom: rect.bottom + y, width });
+  }, reported: request && request.field === field && request.reported });
 };
 document.addEventListener('focusin', report, true);
 document.addEventListener('mousedown', report, true);
-// The list follows the field: it goes when the field is left or moves. A
-// click in the list does not take the field's focus (the list takes none).
-const leave = (event) => {
-  if (event.type === 'focusout' && !isPasskeyField(event.target)) return;
-  post({ type: 'leave' });
-};
-document.addEventListener('focusout', leave, true);
+window.addEventListener('pagehide', leave, true);
+document.addEventListener('focusout', (event) => {
+  if (request && request.field === event.target) leave();
+}, true);
 window.addEventListener('scroll', leave, { capture: true, passive: true });
 window.addEventListener('resize', leave, { passive: true });
 })();)js";
