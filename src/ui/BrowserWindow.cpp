@@ -2577,36 +2577,32 @@ void BrowserWindow::AddressModified()
     fAddressTyped = text;
     fAddressShown = text;
     fAutofill = { };
-    const auto keyword = fShared->Read([&](const Profile& profile) { return profile.bookmarks.ResolveKeyword(text); });
-    if (forward && !keyword) {
-        const int64 now = std::time(nullptr);
-        fAutofill = fShared->Read([&](const Profile& profile) {
-            return AutofillAddress(profile.history, profile.bookmarks.Pages(), text, now);
-        });
-        if (!fAutofill.Empty()) {
-            fAddressShown = fAutofill.text;
-            textView->Insert(text.size(), fAutofill.text.c_str() + text.size(), fAutofill.text.size() - text.size());
-            textView->Select(text.size(), fAutofill.text.size());
-        }
-    }
-    ShowSuggestions(text);
+    ShowSuggestions(text, forward);
 }
 
-void BrowserWindow::ShowSuggestions(const std::string& typed)
+void BrowserWindow::ShowSuggestions(const std::string& typed, bool complete)
 {
     if (Trim(typed).empty() || !fAddress->TextView()->IsFocus()) {
         HideSuggestions();
         return;
     }
-    const int64 now = std::time(nullptr);
-    const auto pages = fShared->Read([&](const Profile& profile) {
-        return SuggestPages(profile.history, profile.bookmarks.Pages(), typed, now, 8);
+    std::optional<BookmarkNavigation> keyword;
+    const auto matches = fShared->Read([&](const Profile& profile) {
+        keyword = profile.bookmarks.ResolveKeyword(typed);
+        if (keyword && !keyword->error.empty()) return AddressMatches{};
+        return MatchAddress(profile.history, profile.bookmarks.Pages(), typed, std::time(nullptr), 8, complete && !keyword);
     });
+    if (keyword && !keyword->error.empty()) { HideSuggestions(); return; }
+    if (!matches.fill.Empty()) {
+        fAutofill = matches.fill;
+        fAddressShown = fAutofill.text;
+        auto* textView = fAddress->TextView();
+        textView->Insert(typed.size(), fAutofill.text.c_str() + typed.size(), fAutofill.text.size() - typed.size());
+        textView->Select(typed.size(), fAutofill.text.size());
+    }
     std::vector<SuggestionRow> rows;
     // The first row is what Enter does with the text as it stands.
     const auto address = ResolveAddress(typed);
-    const auto keyword = fShared->Read([&](const Profile& profile) { return profile.bookmarks.ResolveKeyword(typed); });
-    if (keyword && !keyword->error.empty()) { HideSuggestions(); return; }
     SuggestionRow search;
     search.kind = SuggestionRow::Kind::Search;
     search.title = Trim(typed);
@@ -2642,7 +2638,7 @@ void BrowserWindow::ShowSuggestions(const std::string& typed)
         rows.push_back(search);
     }
     const std::string first = rows.empty() ? std::string() : rows.front().url;
-    for (const auto& page : pages) {
+    for (const auto& page : matches.pages) {
         if (page.url == first || rows.size() >= 8) continue;
         SuggestionRow row;
         row.kind = page.kind == Suggestion::Kind::Bookmark ? SuggestionRow::Kind::Bookmark : SuggestionRow::Kind::History;

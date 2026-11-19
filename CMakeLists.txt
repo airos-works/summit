@@ -12,6 +12,7 @@ add_library(summit_core src/core/Address.cpp src/core/Protocol.cpp src/core/Hist
     src/core/ExtensionPackage.cpp src/core/StoreOffer.cpp src/core/DownloadText.cpp src/core/DownloadHistory.cpp src/core/FormHistory.cpp src/core/Favicon.cpp src/core/InternalPages.cpp src/core/Zoom.cpp src/core/Suggest.cpp src/core/DevTools.cpp src/core/DevToolsFormat.cpp src/core/DevToolsElements.cpp src/core/PageSource.cpp
     src/core/Mcp.cpp src/core/McpHttp.cpp src/core/McpInspector.cpp src/core/WebAppManifest.cpp src/core/UpdateCheck.cpp src/core/Spelling.cpp src/core/PageLanguage.cpp src/core/TranslationModels.cpp src/core/LoadError.cpp src/core/ProfileLock.cpp src/core/BrowserProfiles.cpp
     src/core/SafeBrowsing.cpp src/core/ReadingList.cpp)
+target_compile_features(summit_core PUBLIC cxx_std_20)
 target_link_libraries(summit_core PUBLIC OpenSSL::Crypto ${CMAKE_DL_LIBS})
 target_link_libraries(summit_core PRIVATE summit_cld2)
 target_include_directories(summit_core PUBLIC src vendor)

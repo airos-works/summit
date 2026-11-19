@@ -622,7 +622,7 @@ private:
     void AddressModified();
     // The arrow keys, Escape and Tab in the field; true when used.
     bool AddressKey(char key);
-    void ShowSuggestions(const std::string& typed);
+    void ShowSuggestions(const std::string& typed, bool complete = false);
     void HideSuggestions();
     // Has the network connect to the server of an address the user is likely
     // to go to next (DNS, TCP, TLS), so its first request leaves at once.

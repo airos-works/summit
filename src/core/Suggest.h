@@ -35,6 +35,14 @@ struct Suggestion {
     double score = 0;
 };
 
+struct AddressMatches {
+    Autofill fill;
+    std::vector<Suggestion> pages;
+};
+
+AddressMatches MatchAddress(const std::vector<PageRecord>& history, const std::vector<PageRecord>& bookmarks,
+    std::string_view typed, int64_t now, size_t limit, bool complete);
+
 // Pages whose address or title contains every word typed (without case),
 // best first: most visited and most recent, with sites that start with the
 // text ahead of pages that only contain it.

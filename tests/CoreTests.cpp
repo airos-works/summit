@@ -444,6 +444,14 @@ int main()
         history.push_back({"https://pubs.example.org/menu", "Pub menu", now, false, 3});
         pages = SuggestPages(history, marked, "menu", now, 10);
         CHECK(pages.size() == 1 && pages[0].kind == Suggestion::Kind::Bookmark);
+        // Combine duplicate weights before limiting, then break ties in profile order.
+        const std::vector<PageRecord> tied = {
+            {"https://zone.example/b", "", now}, {"https://zone.example/a", "", now},
+            {"https://zone.example/c", "", now}};
+        auto combined = MatchAddress(tied, {{"https://zone.example/c", "Saved"}}, "zo", now, 2, true);
+        CHECK(combined.fill.text == "zone.example/" && combined.pages.size() == 2);
+        CHECK(combined.pages[0].title == "Saved" && combined.pages[0].kind == Suggestion::Kind::Bookmark);
+        CHECK(combined.pages[1].url == tied[0].url);
         CHECK(ShortAddress("https://www.pulsetasmania.com/") == "pulsetasmania.com");
         CHECK(ShortAddress("https://GitHub.com/jmgasper/Summit") == "github.com/jmgasper/Summit");
         CHECK(ShortAddress("summit:history") == "summit:history");
