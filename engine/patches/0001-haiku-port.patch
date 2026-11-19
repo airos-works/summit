@@ -98265,7 +98265,7 @@ index 6b21156853e18241520555e20e5808e79eadb6b2..75cb194046833b975dc9d082cfa7b22e
      auto newRects = m_renderer->rectsForRepaintingAfterLayout(m_repaintContainer, (requiresFullRepaint == RequiresFullRepaint::Yes) ? RepaintOutlineBounds::No : m_repaintOutlineBounds);
      return m_renderer->repaintAfterLayoutIfNeeded(m_repaintContainer, requiresFullRepaint, m_oldRects, newRects);
 diff --git a/Source/WebCore/rendering/RenderBlock.cpp b/Source/WebCore/rendering/RenderBlock.cpp
-index 0ff11fddb608c1b65d17189a08c8ffa40c284e90..3f942749eb79943fdc74840a61079ab4fbd2b362 100644
+index 0ff11fddb608c1b65d17189a08c8ffa40c284e90..a4d6e90c3f2cc51ed933ae7cb06618071733a041 100644
 --- a/Source/WebCore/rendering/RenderBlock.cpp
 +++ b/Source/WebCore/rendering/RenderBlock.cpp
 @@ -93,6 +93,11 @@
@@ -99266,6 +99266,16 @@ index 0ff11fddb608c1b65d17189a08c8ffa40c284e90..3f942749eb79943fdc74840a61079ab4
  }
  
  RenderBlockRareData* RenderBlock::blockRareData() const
+@@ -1380,8 +2354,7 @@ bool RenderBlock::establishesIndependentFormattingContextIgnoringDisplayType(con
+         return style.display().isBlockType()
+             && style.display().doesGenerateBlockContainer()
+             && hasNonVisibleOverflow()
+-            && style.overflowX() != Overflow::Clip
+-            && style.overflowX() != Overflow::Visible;
++            && (isScrollableOverflowValue(style.overflowX()) || isScrollableOverflowValue(style.overflowY()));
+     };
+ 
+     return style.floating() != Float::None
 diff --git a/Source/WebCore/rendering/RenderBlockFlow.cpp b/Source/WebCore/rendering/RenderBlockFlow.cpp
 index 820170c9ccbad7e487a557bcd6549aaeaeb0d9b0..7996a4aa1830960e51de28b8e426f7155bda0ffc 100644
 --- a/Source/WebCore/rendering/RenderBlockFlow.cpp
@@ -100302,6 +100312,21 @@ index c30408dbc98900cac30cc19b6a52ac5e1b698120..99122be590285832d919a055302fa425
      if (Style::AnchorPositionEvaluator::isAnchorPositioned(style()))
          Style::AnchorPositionEvaluator::captureScrollSnapshots(downcast<RenderBox>(*this));
  }
+diff --git a/Source/WebCore/rendering/RenderElementInlines.h b/Source/WebCore/rendering/RenderElementInlines.h
+index 843797d29811682d8bc2acb7a54b4ceaa551f310..e2e6d1918039d8de1c82696e95036bd111016aa2 100644
+--- a/Source/WebCore/rendering/RenderElementInlines.h
++++ b/Source/WebCore/rendering/RenderElementInlines.h
+@@ -94,9 +94,7 @@ inline bool RenderElement::isBlockBox() const
+ 
+ inline bool RenderElement::hasPotentiallyScrollableOverflow() const
+ {
+-    // We only need to test one overflow dimension since 'visible' and 'clip' always get accompanied
+-    // with 'clip' or 'visible' in the other dimension (see Style::Adjuster::adjust).
+-    return hasNonVisibleOverflow() && style().overflowX() != Overflow::Clip && style().overflowX() != Overflow::Visible;
++    return hasNonVisibleOverflow() && (isScrollableOverflowValue(style().overflowX()) || isScrollableOverflowValue(style().overflowY()));
+ }
+ 
+ inline bool RenderElement::isBeforeContent() const
 diff --git a/Source/WebCore/rendering/RenderFlexibleBox.cpp b/Source/WebCore/rendering/RenderFlexibleBox.cpp
 index 4fcb18c274244e25bf227cffde32fff4b80dc15a..62cd236ac0264fce597f1f8cd38e75c7b870a476 100644
 --- a/Source/WebCore/rendering/RenderFlexibleBox.cpp
@@ -101147,6 +101172,58 @@ index 4bf8021fddeb356aa2f416e2b5c07aae6136387b..2d3bb774ef11e3a05725494bd7c47249
  
  #if ENABLE(FULLSCREEN_API)
      // FIXME: does this require layout?
+diff --git a/Source/WebCore/rendering/RenderLayerScrollableArea.cpp b/Source/WebCore/rendering/RenderLayerScrollableArea.cpp
+index 30554c0ddaff26febd0c5c68d667aa43f4979d0c..5428c929bb863990f75ba8128917a4f87ead425a 100644
+--- a/Source/WebCore/rendering/RenderLayerScrollableArea.cpp
++++ b/Source/WebCore/rendering/RenderLayerScrollableArea.cpp
+@@ -265,9 +265,20 @@ void RenderLayerScrollableArea::setScrollPosition(const ScrollPosition& position
+     scrollToOffset(scrollOffsetFromPosition(position), options);
+ }
+ 
++static ScrollOffset offsetForScrollableAxes(ScrollOffset offset, const ScrollOffset& origin, const Style::ComputedStyle& style)
++{
++    // A clipped axis stays at scroll position zero, which can have a nonzero offset in RTL.
++    if (style.overflowX() == Overflow::Clip)
++        offset.setX(origin.x());
++    if (style.overflowY() == Overflow::Clip)
++        offset.setY(origin.y());
++    return offset;
++}
++
+ ScrollOffset RenderLayerScrollableArea::clampScrollOffset(const ScrollOffset& scrollOffset) const
+ {
+-    return scrollOffset.constrainedBetween(minimumScrollOffset(), maximumScrollOffset());
++    auto offset = scrollOffset.constrainedBetween(minimumScrollOffset(), maximumScrollOffset());
++    return offsetForScrollableAxes(offset, scrollOrigin(), m_layer.renderer().style());
+ }
+ 
+ bool RenderLayerScrollableArea::requestScrollToPosition(const ScrollPosition& position, const ScrollPositionChangeOptions& options)
+@@ -314,6 +325,7 @@ ScrollOffset RenderLayerScrollableArea::scrollToOffset(const ScrollOffset& scrol
+ {
+     ScrollOffset clampedScrollOffset = options.clamping == ScrollClamping::Clamped ? clampScrollOffset(scrollOffset) : scrollOffset;
+     ScrollOffset snappedOffset = ceiledIntPoint(scrollAnimator().scrollOffsetAdjustedForSnapping(clampedScrollOffset, options.snapPointSelectionMethod));
++    snappedOffset = offsetForScrollableAxes(snappedOffset, scrollOrigin(), m_layer.renderer().style());
+     auto snappedPosition = scrollPositionFromOffset(snappedOffset);
+ 
+     if (scrollAnimationStatus() == ScrollAnimationStatus::Animating) {
+@@ -542,7 +554,7 @@ bool RenderLayerScrollableArea::canUseCompositedScrolling() const
+ 
+ void RenderLayerScrollableArea::setScrollOffset(const ScrollOffset& offset)
+ {
+-    scrollTo(scrollPositionFromOffset(offset));
++    scrollTo(scrollPositionFromOffset(offsetForScrollableAxes(offset, scrollOrigin(), m_layer.renderer().style())));
+ }
+ 
+ std::optional<ScrollingNodeID> RenderLayerScrollableArea::scrollingNodeID() const
+@@ -1321,7 +1333,7 @@ std::optional<ScrollbarUpdateScope> RenderLayerScrollableArea::updateScrollInfoA
+         // Layout may cause us to be at an invalid scroll position. In this case we need
+         // to pull our scroll offsets back to the max (or push them up to the min).
+         auto scrollOffset = this->scrollOffset();
+-        if (scrollOffset != minimumScrollOffset()) {
++        if (scrollOffset != minimumScrollOffset() || !scrollPosition().isZero()) {
+             auto clampedScrollOffset = clampScrollOffset(scrollOffset);
+             if (clampedScrollOffset != scrollOffset)
+                 scrollToOffset(clampedScrollOffset);
 diff --git a/Source/WebCore/rendering/RenderObject.cpp b/Source/WebCore/rendering/RenderObject.cpp
 index 5a90dd68672464ece91671bee69e2598510a2ebb..fc069a89103a084e9466658ad1806068cc3345a2 100644
 --- a/Source/WebCore/rendering/RenderObject.cpp
@@ -102126,6 +102203,23 @@ index 0000000000000000000000000000000000000000..cff799029b188a06ba83de7d16f2747e
 +} // namespace WebCore
 +
 +#endif // RenderThemeHaiku_h
+diff --git a/Source/WebCore/rendering/style/RenderStyleConstants.h b/Source/WebCore/rendering/style/RenderStyleConstants.h
+index c2a1870eef49fe79a3a9c2acb53a338e524b279b..3e52b932c411c76192c832bdb311ea891eebb7d9 100644
+--- a/Source/WebCore/rendering/style/RenderStyleConstants.h
++++ b/Source/WebCore/rendering/style/RenderStyleConstants.h
+@@ -275,6 +275,12 @@ constexpr bool isNonVisibleOverflow(Overflow overflow)
+         || overflow == Overflow::Clip;
+ }
+ 
++// CSS Overflow 3 distinguishes scrollable values (including hidden) from visible and clip.
++constexpr bool isScrollableOverflowValue(Overflow overflow)
++{
++    return overflow != Overflow::Visible && overflow != Overflow::Clip;
++}
++
+ enum class Clear : uint8_t {
+     None,
+     Left,
 diff --git a/Source/WebCore/rendering/svg/legacy/LegacyRenderSVGResourceFilter.cpp b/Source/WebCore/rendering/svg/legacy/LegacyRenderSVGResourceFilter.cpp
 index 5d115e1865defb80d01742e7880b3ba5e71e494e..eb656e0c7fec6aae3778297e4914ab5598b92b66 100644
 --- a/Source/WebCore/rendering/svg/legacy/LegacyRenderSVGResourceFilter.cpp
@@ -102508,6 +102602,64 @@ index 22d96170539d88e1dec6f45bd98c269eb1b526e3..d637fa7e85d0d5a09667eaedff83359b
  
      CascadeLayerName m_resolvedCascadeLayerName;
      HashMap<CascadeLayerName, RuleSet::CascadeLayerIdentifier> m_cascadeLayerIdentifierMap;
+diff --git a/Source/WebCore/style/StyleAdjuster.cpp b/Source/WebCore/style/StyleAdjuster.cpp
+index 0656f3ce6877d1b6a86f05c8fdc5515a0a450d32..e7540f3bf0f7c1582d3c7a8374f21b4378b054e5 100644
+--- a/Source/WebCore/style/StyleAdjuster.cpp
++++ b/Source/WebCore/style/StyleAdjuster.cpp
+@@ -332,11 +332,6 @@ OptionSet<EventListenerRegionType> Adjuster::computeEventListenerRegionTypes(con
+     return types;
+ }
+ 
+-static bool NODELETE isOverflowClipOrVisible(Overflow overflow)
+-{
+-    return overflow == Overflow::Clip || overflow == Overflow::Visible;
+-}
+-
+ static bool NODELETE shouldInlinifyForRuby(const Style::ComputedStyle& style, const Style::ComputedStyle& parentBoxStyle)
+ {
+     auto parentDisplay = parentBoxStyle.display();
+@@ -654,13 +649,13 @@ void Adjuster::adjust(Style::ComputedStyle& style) const
+             style.setAutoRevealsWhenFound();
+     }
+ 
+-    bool overflowIsClipOrVisible = isOverflowClipOrVisible(style.overflowY()) && isOverflowClipOrVisible(style.overflowX());
++    bool hasScrollableAxis = isScrollableOverflowValue(style.overflowX()) || isScrollableOverflowValue(style.overflowY());
+ 
+     // The overflow property does not apply to table row elements (CSS2 section 11.1.1).
+     if (style.display() == DisplayType::TableRow) {
+         style.setOverflowX(ComputedStyle::initialOverflowX());
+         style.setOverflowY(ComputedStyle::initialOverflowY());
+-    } else if (!overflowIsClipOrVisible && style.display().isTableBox()) {
++    } else if (hasScrollableAxis && style.display().isTableBox()) {
+         // Tables only support overflow:hidden and overflow:visible and ignore anything else,
+         // see https://drafts.csswg.org/css2/#overflow. As a table is not a block
+         // container box the rules for resolving conflicting x and y values in CSS Overflow Module
+@@ -676,23 +671,12 @@ void Adjuster::adjust(Style::ComputedStyle& style) const
+             style.setOverflowY(Overflow::Visible);
+         else if (style.overflowY() == Overflow::Visible)
+             style.setOverflowX(Overflow::Visible);
+-    } else if (!isOverflowClipOrVisible(style.overflowY())) {
+-        // FIXME: Once we implement pagination controls, overflow-x should default to hidden
+-        // if overflow-y is set to -webkit-paged-x or -webkit-page-y. For now, we'll let it
+-        // default to auto so we can at least scroll through the pages.
+-        // Values of 'clip' and 'visible' can only be used with 'clip' and 'visible'.
+-        // If they aren't, 'clip' and 'visible' is reset.
++    } else if (hasScrollableAxis) {
++        // Only visible computes to auto when the other axis scrolls. A clipped axis stays clipped.
+         if (style.overflowX() == Overflow::Visible)
+             style.setOverflowX(Overflow::Auto);
+-        else if (style.overflowX() == Overflow::Clip)
+-            style.setOverflowX(Overflow::Hidden);
+-    } else if (!isOverflowClipOrVisible(style.overflowX())) {
+-        // Values of 'clip' and 'visible' can only be used with 'clip' and 'visible'.
+-        // If they aren't, 'clip' and 'visible' is reset.
+         if (style.overflowY() == Overflow::Visible)
+             style.setOverflowY(Overflow::Auto);
+-        else if (style.overflowY() == Overflow::Clip)
+-            style.setOverflowY(Overflow::Hidden);
+     }
+ 
+     // Call setStylesForPaginationMode() if a pagination mode is set for any non-root elements. If these
 diff --git a/Source/WebCore/style/StyleDifference.cpp b/Source/WebCore/style/StyleDifference.cpp
 index 3e48388cf2c59e21ffb1a3cbef6f7bfb41fe6c37..d8836ff456f6ef7e7e95882728efd472719bd1cd 100644
 --- a/Source/WebCore/style/StyleDifference.cpp
