@@ -25676,6 +25676,30 @@ index 79f2bcbc106c7c43e8a971816c183dcc00610b83..2a26dd5a0384384a75e2019e6edacb57
  }
  
  void Document::updateRemoteIntersectionObservers()
+diff --git a/Source/WebCore/dom/Element.cpp b/Source/WebCore/dom/Element.cpp
+index 387e5c0ad9a258b7e70fb47b58f7492c3cb111b1..61d7143ac4c3e6c2ab3776dac69d84b8e3e1941e 100644
+--- a/Source/WebCore/dom/Element.cpp
++++ b/Source/WebCore/dom/Element.cpp
+@@ -763,7 +763,8 @@ Ref<Element> Element::cloneElementWithChildren(Document& document, CustomElement
+ 
+ Ref<Element> Element::cloneElementWithoutChildren(Document& document, CustomElementRegistry* fallbackRegistry) const
+ {
+-    RefPtr registry = CustomElementRegistry::registryForElement(*this);
++    // A lazily created global registry takes precedence over a scoped fallback.
++    RefPtr registry = fallbackRegistry && fallbackRegistry->isScoped() ? customElementRegistry() : CustomElementRegistry::registryForElement(*this);
+     if (!registry)
+         registry = fallbackRegistry;
+     if (registry && !registry->isScoped())
+@@ -777,7 +778,8 @@ Ref<Element> Element::cloneElementWithoutChildren(Document& document, CustomElem
+ 
+     clone->cloneDataFromElement(*this);
+ 
+-    if (usesNullCustomElementRegistry() && !registry)
++    // A windowless document can have a scoped registry even when the clone's registry is null.
++    if (!registry && (usesNullCustomElementRegistry() || !document.window()))
+         clone->setUsesNullCustomElementRegistry();
+ 
+     return clone;
 diff --git a/Source/WebCore/dom/EventDispatcher.cpp b/Source/WebCore/dom/EventDispatcher.cpp
 index 366a96640f8fa0e9532ff00855ed36ec0b5eeb2b..f3e096bf2779a964470a1a0aae5700036680201f 100644
 --- a/Source/WebCore/dom/EventDispatcher.cpp
