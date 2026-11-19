@@ -30806,10 +30806,96 @@ index 0b7338e394848cc687708b0d7d6f5dc85c752b66..b21e40283e45e742d088043ce605a1cf
      FloatRect m_inkOverflow;
      float m_clearGapBeforeFirstLine { 0 };
 diff --git a/Source/WebCore/layout/integration/inline/LayoutIntegrationLineLayout.cpp b/Source/WebCore/layout/integration/inline/LayoutIntegrationLineLayout.cpp
-index ae08c6ef9e76573796692ef641a3104b1158d717..455d2915d40d5118512c6ad314f3d2d794e1b7a8 100644
+index ae08c6ef9e76573796692ef641a3104b1158d717..48306bb3a3c341cc1735d3a1a4ae11485d335986 100644
 --- a/Source/WebCore/layout/integration/inline/LayoutIntegrationLineLayout.cpp
 +++ b/Source/WebCore/layout/integration/inline/LayoutIntegrationLineLayout.cpp
-@@ -1252,6 +1252,15 @@ InlineIterator::TextBoxIterator LineLayout::textBoxesFor(const RenderText& rende
+@@ -1109,6 +1109,33 @@ static float baselineForEmptyContent(const RenderBlockFlow& rootRenderer)
+     return rootRenderer.borderAndPaddingBefore() + baseline;
+ }
+ 
++std::optional<LayoutUnit> LineLayout::baselineForLineOrBlock(const InlineDisplay::Line& line, BaselineSource source) const
++{
++    if (!line.hasContentfulInFlowBox())
++        return { };
++    // A clamped line has no visible last baseline. A block-in-inline determines
++    // which of its own lines remain visible.
++    if (source == BaselineSource::Last && line.isFullyTruncatedInBlockDirection() && !line.hasBlockLevelBox())
++        return { };
++    if (auto* blockLevelBox = m_inlineContent->blockLevelBoxForLine(line)) {
++        CheckedRef blockRenderer = downcast<RenderBox>(*blockLevelBox->layoutBox().rendererForIntegration());
++        if (auto baseline = source == BaselineSource::First ? blockRenderer->firstLineBaseline() : blockRenderer->lastLineBaseline())
++            return blockRenderer->logicalTop() + *baseline;
++        return { };
++    }
++    return baselineForLine(line);
++}
++
++void LineLayout::forEachFragmentedLineBaseline(BaselineSource source, NOESCAPE const Function<void(LayoutUnit, LayoutUnit)>& visit) const
++{
++    if (!m_inlineContent)
++        return;
++    for (auto& line : m_inlineContent->displayContent().lines) {
++        if (auto baseline = baselineForLineOrBlock(line, source))
++            visit(LayoutUnit { line.lineBoxLogicalRect().y() }, *baseline);
++    }
++}
++
+ std::optional<LayoutUnit> LineLayout::firstLineBaseline() const
+ {
+     if (!m_inlineContent) {
+@@ -1117,22 +1144,8 @@ std::optional<LayoutUnit> LineLayout::firstLineBaseline() const
+         return { };
+     }
+ 
+-    auto baselineForLineOrBlock = [&](auto& line) -> std::optional<LayoutUnit> {
+-        if (!line.hasContentfulInFlowBox())
+-            return { };
+-
+-        if (auto* blockLevelBox = m_inlineContent->blockLevelBoxForLine(line)) {
+-            // For block-in-inline look for the baseline of the child box.
+-            CheckedRef blockRenderer = downcast<RenderBox>(*blockLevelBox->layoutBox().rendererForIntegration());
+-            if (auto baseline = blockRenderer->firstLineBaseline())
+-                return blockRenderer->logicalTop() + *baseline;
+-            return { };
+-        }
+-        return LayoutUnit { baselineForLine(line) };
+-    };
+-
+     for (auto& line : m_inlineContent->displayContent().lines) {
+-        if (auto baseline = baselineForLineOrBlock(line))
++        if (auto baseline = baselineForLineOrBlock(line, BaselineSource::First))
+             return baseline;
+     }
+ 
+@@ -1147,26 +1160,8 @@ std::optional<LayoutUnit> LineLayout::lastLineBaseline() const
+         return { };
+     }
+ 
+-    auto baselineForLineOrBlock = [&](auto& line) -> std::optional<LayoutUnit> {
+-        if (!line.hasContentfulInFlowBox())
+-            return { };
+-
+-        if (auto* blockLevelBox = m_inlineContent->blockLevelBoxForLine(line)) {
+-            // For block-in-inline look for the baseline of the child box.
+-            CheckedRef blockRenderer = downcast<RenderBox>(*blockLevelBox->layoutBox().rendererForIntegration());
+-            if (auto baseline = blockRenderer->lastLineBaseline())
+-                return blockRenderer->logicalTop() + *baseline;
+-            return { };
+-        }
+-        return LayoutUnit { baselineForLine(line) };
+-    };
+-
+     for (auto& line : m_inlineContent->displayContent().lines | std::views::reverse) {
+-        // A line clamped away in the block direction holds no visible content and so is not the last line with content.
+-        // A line holding a block level box is the exception: what is visible there is decided inside that block, which runs this same look-up on its own lines.
+-        if (line.isFullyTruncatedInBlockDirection() && !line.hasBlockLevelBox())
+-            continue;
+-        if (auto baseline = baselineForLineOrBlock(line))
++        if (auto baseline = baselineForLineOrBlock(line, BaselineSource::Last))
+             return baseline;
+     }
+ 
+@@ -1252,6 +1247,15 @@ InlineIterator::TextBoxIterator LineLayout::textBoxesFor(const RenderText& rende
      return InlineIterator::textBoxFor(*m_inlineContent, *firstIndex);
  }
  
@@ -30826,10 +30912,16 @@ index ae08c6ef9e76573796692ef641a3104b1158d717..455d2915d40d5118512c6ad314f3d2d7
  {
      if (!m_inlineContent)
 diff --git a/Source/WebCore/layout/integration/inline/LayoutIntegrationLineLayout.h b/Source/WebCore/layout/integration/inline/LayoutIntegrationLineLayout.h
-index fea0118c87bc57a6e5b0ebdf231c9e86a90e449b..3ed1d644e0c79c9b5694a50e26b73dec1edfa929 100644
+index fea0118c87bc57a6e5b0ebdf231c9e86a90e449b..5e38ef6b8158eb39aa1706236f73355e60f4f908 100644
 --- a/Source/WebCore/layout/integration/inline/LayoutIntegrationLineLayout.h
 +++ b/Source/WebCore/layout/integration/inline/LayoutIntegrationLineLayout.h
-@@ -129,6 +129,7 @@ public:
+@@ -124,11 +124,13 @@ public:
+     bool isSelfCollapsingContent() const;
+     bool NODELETE hasInkOverflow() const;
+     std::optional<LayoutUnit> firstLineBaseline() const;
++    void forEachFragmentedLineBaseline(BaselineSource, NOESCAPE const Function<void(LayoutUnit, LayoutUnit)>&) const;
+     std::optional<LayoutUnit> lastLineBaseline() const;
+     LayoutRect firstInlineBoxRect(const RenderBoxModelObject&) const;
      LayoutRect enclosingBorderBoxRectFor(const RenderBoxModelObject&) const;
  
      InlineIterator::TextBoxIterator textBoxesFor(const RenderText&) const;
@@ -30837,6 +30929,14 @@ index fea0118c87bc57a6e5b0ebdf231c9e86a90e449b..3ed1d644e0c79c9b5694a50e26b73dec
      InlineIterator::LeafBoxIterator boxFor(const RenderElement&) const;
      InlineIterator::InlineBoxIterator firstInlineBoxFor(const RenderBoxModelObject&) const;
      InlineIterator::InlineBoxIterator firstRootInlineBox() const;
+@@ -175,6 +177,7 @@ private:
+     void clearInlineContent();
+     void releaseCachesAndResetDamage();
+ 
++    std::optional<LayoutUnit> baselineForLineOrBlock(const InlineDisplay::Line&, BaselineSource) const;
+     LayoutUnit NODELETE baselineForLine(const InlineDisplay::Line&) const;
+ 
+     bool NODELETE isContentConsideredStale() const;
 diff --git a/Source/WebCore/loader/CookieJar.cpp b/Source/WebCore/loader/CookieJar.cpp
 index 7a100df953c393486f1ca28b3da8507ab505cf08..5ed82dff72b910fa49f63baadf18d590d3295f42 100644
 --- a/Source/WebCore/loader/CookieJar.cpp
@@ -99801,7 +99901,7 @@ index 455aef736779facc0f165ddf7495622cc59b6160..c0a99de127da8efd90265687d52a1c37
  
  inline bool PositionedLayoutConstraints::isOpposing() const
 diff --git a/Source/WebCore/rendering/RenderBlock.cpp b/Source/WebCore/rendering/RenderBlock.cpp
-index 0ff11fddb608c1b65d17189a08c8ffa40c284e90..1683cacf7ce6ef0c6e30fb648f5005fcbd2e12d4 100644
+index 0ff11fddb608c1b65d17189a08c8ffa40c284e90..315849253f7bcf1ef95a998f6b4bbfd08c661287 100644
 --- a/Source/WebCore/rendering/RenderBlock.cpp
 +++ b/Source/WebCore/rendering/RenderBlock.cpp
 @@ -93,6 +93,11 @@
@@ -100825,6 +100925,24 @@ index 0ff11fddb608c1b65d17189a08c8ffa40c284e90..1683cacf7ce6ef0c6e30fb648f5005fc
  
          if (overridingLogicalWidthForFlexBasisComputation() && logicalWidth.isCalcSize() && logicalWidth.isAuto()) {
              // A flex-basis used as the main size, where `auto` means the width property rather than the width this box would otherwise take.
+@@ -2558,7 +3537,7 @@ std::optional<LayoutUnit> RenderBlock::firstLineBaseline() const
+ 
+     auto firstInFlowBaseline = [&] -> std::optional<LayoutUnit> {
+         for (CheckedPtr child = firstInFlowChildBox(); child; child = child->nextInFlowSiblingBox()) {
+-            if ((child->isLegend() && child->isExcludedFromNormalLayout()) || child->isExcludedMarker())
++            if (child->isRenderMultiColumnFlow() || (child->isLegend() && child->isExcludedFromNormalLayout()) || child->isExcludedMarker())
+                 continue;
+             if (auto baseline = child->firstLineBaseline())
+                 return child->logicalTop() + *baseline;
+@@ -2578,7 +3557,7 @@ std::optional<LayoutUnit> RenderBlock::lastLineBaseline() const
+ 
+     auto lastInFlowBaseline = [&] -> std::optional<LayoutUnit> {
+         for (CheckedPtr child = lastInFlowChildBox(); child; child = child->previousInFlowSiblingBox()) {
+-            if ((child->isLegend() && child->isExcludedFromNormalLayout()) || child->isExcludedMarker())
++            if (child->isRenderMultiColumnFlow() || (child->isLegend() && child->isExcludedFromNormalLayout()) || child->isExcludedMarker())
+                 continue;
+             if (auto baseline = child->lastLineBaseline())
+                 return child->logicalTop() + *baseline;
 diff --git a/Source/WebCore/rendering/RenderBlockFlow.cpp b/Source/WebCore/rendering/RenderBlockFlow.cpp
 index 820170c9ccbad7e487a557bcd6549aaeaeb0d9b0..7996a4aa1830960e51de28b8e426f7155bda0ffc 100644
 --- a/Source/WebCore/rendering/RenderBlockFlow.cpp
@@ -102993,6 +103111,111 @@ index 30554c0ddaff26febd0c5c68d667aa43f4979d0c..1a139f11c4db1178c355a9c724a773b4
              auto clampedScrollOffset = clampScrollOffset(scrollOffset);
              if (clampedScrollOffset != scrollOffset)
                  scrollToOffset(clampedScrollOffset);
+diff --git a/Source/WebCore/rendering/RenderMultiColumnSet.cpp b/Source/WebCore/rendering/RenderMultiColumnSet.cpp
+index 9e0317a249733aaf1f387c2a240dcc92cea9152e..c97eff50f63f469ec5ed2ed8733b313448e81a2c 100644
+--- a/Source/WebCore/rendering/RenderMultiColumnSet.cpp
++++ b/Source/WebCore/rendering/RenderMultiColumnSet.cpp
+@@ -30,6 +30,7 @@
+ 
+ #include "BorderPainter.h"
+ #include "HitTestResult.h"
++#include "LayoutIntegrationLineLayout.h"
+ #include "LocalFrameView.h"
+ #include "PaintInfo.h"
+ #include "RenderBlockInlines.h"
+@@ -66,6 +67,78 @@ RenderMultiColumnSet* RenderMultiColumnSet::nextSiblingMultiColumnSet() const
+     return nullptr;
+ }
+ 
++std::optional<LayoutUnit> RenderMultiColumnSet::firstLineBaseline() const
++{
++    return contentBaseline(BaselineSource::First);
++}
++
++std::optional<LayoutUnit> RenderMultiColumnSet::lastLineBaseline() const
++{
++    return contentBaseline(BaselineSource::Last);
++}
++
++std::optional<LayoutUnit> RenderMultiColumnSet::contentBaseline(BaselineSource source) const
++{
++    CheckedPtr flow = multiColumnFlow();
++    auto columnHeight = computedColumnHeight();
++    if (!flow || columnHeight <= 0_lu)
++        return { };
++
++    auto setStart = logicalTopInFragmentedFlow();
++    auto setEnd = logicalBottomInFragmentedFlow();
++    bool first = source == BaselineSource::First;
++    // Record the first or last in-flow baseline in each column. Compare those
++    // baselines in the column set's coordinates, where the columns sit side by side.
++    HashMap<unsigned, LayoutUnit, DefaultHash<unsigned>, WTF::UnsignedWithZeroKeyHashTraits<unsigned>> columnBaselines;
++    auto record = [&](LayoutUnit flowTop, LayoutUnit flowBaseline) {
++        if (flowTop < setStart || flowTop >= setEnd)
++            return;
++        auto column = columnIndexAtOffset(flowTop);
++        auto baseline = flowBaseline - setStart - column * columnHeight + columnLogicalTop(column);
++        if (first)
++            columnBaselines.add(column, baseline);
++        else
++            columnBaselines.set(column, baseline);
++    };
++
++    auto collect = [&](auto& collect, const RenderBox& box, LayoutUnit top) -> void {
++        if (box.isRenderMultiColumnSpannerPlaceholder() || box.isExcludedMarker() || (box.isLegend() && box.isExcludedFromNormalLayout()))
++            return;
++        auto end = top + box.logicalHeight();
++        bool isFlow = &box == flow.get();
++        if (!isFlow && (top >= setEnd || end < setStart))
++            return;
++        auto* block = dynamicDowncast<RenderBlockFlow>(box);
++        bool fitsInColumn = top >= setStart && end <= setEnd
++            && columnIndexAtOffset(top) == columnIndexAtOffset(std::max(top, end - LayoutUnit::fromRawValue(1)));
++        // A box wholly inside a column exports its ordinary baseline. For a split
++        // block, visit its children or lines so each fragment supplies its own.
++        if (!isFlow && (fitsInColumn || !block || block->multiColumnFlow() || box.isWritingModeRoot() || box.shouldApplyLayoutContainment())) {
++            if (auto baseline = first ? box.firstLineBaseline() : box.lastLineBaseline())
++                record(top, top + *baseline);
++            return;
++        }
++        if (block && block->childrenInline()) {
++            if (auto* lines = block->inlineLayout()) {
++                lines->forEachFragmentedLineBaseline(source, [&](LayoutUnit lineTop, LayoutUnit baseline) {
++                    record(top + lineTop, top + baseline);
++                });
++            }
++            return;
++        }
++        for (CheckedPtr child = box.firstInFlowChildBox(); child; child = child->nextInFlowSiblingBox())
++            collect(collect, *child, top + child->logicalTop());
++    };
++    collect(collect, *flow, 0_lu);
++
++    std::optional<LayoutUnit> result;
++    for (auto baseline : columnBaselines.values()) {
++        if (!result || (first ? baseline < *result : baseline > *result))
++            result = baseline;
++    }
++    return result;
++}
++
+ RenderMultiColumnSet* RenderMultiColumnSet::previousSiblingMultiColumnSet() const
+ {
+     for (RenderObject* sibling = previousSibling(); sibling; sibling = sibling->previousSibling()) {
+diff --git a/Source/WebCore/rendering/RenderMultiColumnSet.h b/Source/WebCore/rendering/RenderMultiColumnSet.h
+index 447d8cce81613ce756f6ad19ebd350e64e4609ff..cdfca97ba92ec54b3d5a63a68f6bb601a9654b30 100644
+--- a/Source/WebCore/rendering/RenderMultiColumnSet.h
++++ b/Source/WebCore/rendering/RenderMultiColumnSet.h
+@@ -143,6 +143,9 @@ public:
+     LayoutUnit columnGap() const;
+ 
+ private:
++    std::optional<LayoutUnit> firstLineBaseline() const override;
++    std::optional<LayoutUnit> lastLineBaseline() const override;
++    std::optional<LayoutUnit> contentBaseline(BaselineSource) const;
+     void addOverflowFromInFlowChildren(OptionSet<ComputeOverflowOptions> = { }) override;
+ 
+     void layout() override;
 diff --git a/Source/WebCore/rendering/RenderObject.cpp b/Source/WebCore/rendering/RenderObject.cpp
 index 5a90dd68672464ece91671bee69e2598510a2ebb..fc069a89103a084e9466658ad1806068cc3345a2 100644
 --- a/Source/WebCore/rendering/RenderObject.cpp
