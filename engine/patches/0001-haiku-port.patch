@@ -128973,6 +128973,40 @@ index 0000000000000000000000000000000000000000..76c801492fff9daa106e386dcfeb1ae1
 +        WKRetainPtr<WKViewRef> fWebView;
 +};
 +
+diff --git a/Source/WebKit/UIProcess/Automation/SimulatedInputDispatcher.cpp b/Source/WebKit/UIProcess/Automation/SimulatedInputDispatcher.cpp
+index 4e548d8d71bfce1544da7cc41f3b6417c1f6b321..64033090572a02846d55797bb5342e7c7c79472c 100644
+--- a/Source/WebKit/UIProcess/Automation/SimulatedInputDispatcher.cpp
++++ b/Source/WebKit/UIProcess/Automation/SimulatedInputDispatcher.cpp
+@@ -470,7 +470,7 @@ void SimulatedInputDispatcher::transitionInputSourceToState(SimulatedInputSource
+ #if !ENABLE(WEBDRIVER_WHEEL_INTERACTIONS)
+         RELEASE_ASSERT_NOT_REACHED();
+ #else
+-        resolveLocation(valueOrDefault(a.location), b.location, b.origin.value_or(MouseMoveOrigin::Viewport), b.nodeHandle, [this, protectedThis = Ref { *this }, &a, &b, eventDispatchFinished = WTF::move(eventDispatchFinished)](std::optional<WebCore::IntPoint> location, std::optional<AutomationCommandError> error) mutable {
++        resolveLocation(valueOrDefault(a.location), b.location, b.origin.value_or(MouseMoveOrigin::Viewport), b.nodeHandle, [this, protectedThis = Ref { *this }, &b, eventDispatchFinished = WTF::move(eventDispatchFinished)](std::optional<WebCore::IntPoint> location, std::optional<AutomationCommandError> error) mutable {
+             if (error) {
+                 eventDispatchFinished(error);
+                 return;
+@@ -483,16 +483,11 @@ void SimulatedInputDispatcher::transitionInputSourceToState(SimulatedInputSource
+ 
+             b.location = location;
+ 
+-            auto aScrollDelta = a.scrollDelta.value_or(WebCore::IntSize());
+-            auto bScrollDelta = b.scrollDelta.value_or(WebCore::IntSize());
+-            auto usedScrollDelta = bScrollDelta;
+-            if (!aScrollDelta.isZero())
+-                usedScrollDelta.contract(aScrollDelta.width(), aScrollDelta.height());
+-
+-            if (!usedScrollDelta.isZero()) {
+-                LOG(Automation, "SimulatedInputDispatcher[%p]: simulating Wheel from (%d, %d) to (%d, %d) for transition to %d.%d", this, aScrollDelta.width(), aScrollDelta.height(), bScrollDelta.width(), bScrollDelta.height(), m_keyframeIndex, m_inputSourceStateIndex);
++            // Wheel actions carry a displacement for this tick. A pause has no delta.
++            if (auto delta = b.scrollDelta; delta && !delta->isZero()) {
++                LOG(Automation, "SimulatedInputDispatcher[%p]: simulating wheel delta (%d, %d) for transition to %d.%d", this, delta->width(), delta->height(), m_keyframeIndex, m_inputSourceStateIndex);
+                 // FIXME: This does not interpolate mouse scrolls per the "perform a scroll" algorithm (§15.4.4 Wheel actions).
+-                m_client.simulateWheelInteraction(protect(m_page), b.location.value(), usedScrollDelta, WTF::move(eventDispatchFinished));
++                m_client.simulateWheelInteraction(protect(m_page), b.location.value(), *delta, WTF::move(eventDispatchFinished));
+             } else
+                 eventDispatchFinished(std::nullopt);
+         });
 diff --git a/Source/WebKit/UIProcess/Automation/WebAutomationSession.cpp b/Source/WebKit/UIProcess/Automation/WebAutomationSession.cpp
 index 599cc694a716da0c05e7104be0ec919146f99913..2bf6d2fbb383673a8c2e10bb3fe3e2bbc2fa6ff2 100644
 --- a/Source/WebKit/UIProcess/Automation/WebAutomationSession.cpp
