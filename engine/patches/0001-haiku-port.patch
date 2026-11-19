@@ -99167,8 +99167,35 @@ index 16eb9a0deaa13b9747f9d287d385e507dd41489a..19ede88a03733a025b6c18c1e4b25fb9
  
  #include <errno.h>
  #include <fcntl.h>
+diff --git a/Source/WebCore/rendering/GridBaselineAlignment.cpp b/Source/WebCore/rendering/GridBaselineAlignment.cpp
+index 5304b89173ccf53c17f575fbfe4c051e5bd634a9..4fe8bcf176911ba9e81db9899296f6885fb7eb77 100644
+--- a/Source/WebCore/rendering/GridBaselineAlignment.cpp
++++ b/Source/WebCore/rendering/GridBaselineAlignment.cpp
+@@ -153,7 +153,7 @@ void GridBaselineAlignment::updateBaselineAlignmentContext(ItemPosition preferen
+     alignment.maxAscent = std::max(alignment.maxAscent, ascent);
+ }
+ 
+-LayoutUnit GridBaselineAlignment::baselineOffsetForGridItem(ItemPosition preference, unsigned sharedContext, const RenderBox& gridItem, Style::GridTrackSizingDirection alignmentContextType) const
++std::optional<LayoutUnit> GridBaselineAlignment::baselineOffsetForGridItem(ItemPosition preference, unsigned sharedContext, const RenderBox& gridItem, Style::GridTrackSizingDirection alignmentContextType) const
+ {
+     ASSERT(isBaselinePosition(preference));
+     auto& contextMap = alignmentContextType == Style::GridTrackSizingDirection::Rows ? m_rowAlignmentContextStates : m_columnAlignmentContextStates;
+diff --git a/Source/WebCore/rendering/GridBaselineAlignment.h b/Source/WebCore/rendering/GridBaselineAlignment.h
+index a35d4f393b4dd4c82a58a78943f7466e3a25a396..eedc30f319899800121955362a691d09d5276123 100644
+--- a/Source/WebCore/rendering/GridBaselineAlignment.h
++++ b/Source/WebCore/rendering/GridBaselineAlignment.h
+@@ -53,7 +53,8 @@ public:
+ 
+     // Returns the baseline offset of a particular item, based on the max-ascent for its associated
+     // baseline-sharing group
+-    LayoutUnit baselineOffsetForGridItem(ItemPosition, unsigned sharedContext, const RenderBox&, Style::GridTrackSizingDirection alignmentContextType) const;
++    // A shared baseline can have a zero offset. An absent offset selects fallback alignment.
++    std::optional<LayoutUnit> baselineOffsetForGridItem(ItemPosition, unsigned sharedContext, const RenderBox&, Style::GridTrackSizingDirection alignmentContextType) const;
+ 
+     // Sets the Grid Container's writing mode so that we can avoid the dependecy of the LayoutGrid class for
+     // determining whether a grid item is orthogonal or not.
 diff --git a/Source/WebCore/rendering/GridTrackSizingAlgorithm.cpp b/Source/WebCore/rendering/GridTrackSizingAlgorithm.cpp
-index 8004ec61378fe96a582562ae1a9a6253f8a9c198..182a2abe76a51ecb34a3afa7eda2c8c10842a900 100644
+index 8004ec61378fe96a582562ae1a9a6253f8a9c198..93e7cd758fed82afd96fbea703b7dd11ae889f20 100644
 --- a/Source/WebCore/rendering/GridTrackSizingAlgorithm.cpp
 +++ b/Source/WebCore/rendering/GridTrackSizingAlgorithm.cpp
 @@ -40,6 +40,10 @@
@@ -99208,7 +99235,7 @@ index 8004ec61378fe96a582562ae1a9a6253f8a9c198..182a2abe76a51ecb34a3afa7eda2c8c1
  
          if (renderGrid()->canSetColumnAxisStretchRequirementForItem(gridItem))
              gridLayoutState.setLayoutRequirementForGridItem(gridItem, ItemLayoutRequirement::NeedsColumnAxisStretchAlignment);
-@@ -1085,7 +1100,23 @@ LayoutUnit GridTrackSizingAlgorithmStrategy::logicalHeightForGridItem(RenderBox&
+@@ -1085,9 +1100,25 @@ LayoutUnit GridTrackSizingAlgorithmStrategy::logicalHeightForGridItem(RenderBox&
      if (gridItem.needsLayout())
          gridItem.clearOverridingSize();
  
@@ -99230,9 +99257,17 @@ index 8004ec61378fe96a582562ae1a9a6253f8a9c198..182a2abe76a51ecb34a3afa7eda2c8c1
 +    }
 +#endif
  
-     auto gridItemLogicalHeight = gridItem.logicalHeight() + GridLayoutFunctions::marginLogicalSizeForGridItem(*renderGrid(), gridItemBlockDirection, gridItem) + m_algorithm.baselineOffsetForGridItem(gridItem, direction());
+-    auto gridItemLogicalHeight = gridItem.logicalHeight() + GridLayoutFunctions::marginLogicalSizeForGridItem(*renderGrid(), gridItemBlockDirection, gridItem) + m_algorithm.baselineOffsetForGridItem(gridItem, direction());
++    auto gridItemLogicalHeight = gridItem.logicalHeight() + GridLayoutFunctions::marginLogicalSizeForGridItem(*renderGrid(), gridItemBlockDirection, gridItem) + m_algorithm.baselineOffsetForGridItem(gridItem, direction()).value_or(0_lu);
      if (intrinsicLogicalHeightsForRowSizingFirstPass && sizingState() == GridTrackSizingAlgorithm::SizingState::RowSizingFirstIteration)
-@@ -1149,7 +1180,11 @@ LayoutUnit GridTrackSizingAlgorithmStrategy::minContentContributionForGridItem(R
+         intrinsicLogicalHeightsForRowSizingFirstPass->setSizeForGridItem(gridItem, gridItemLogicalHeight);
+ 
+@@ -1145,11 +1176,15 @@ LayoutUnit GridTrackSizingAlgorithmStrategy::minContentContributionForGridItem(R
+             return 0_lu;
+         }();
+ 
+-        return std::max(minContentLogicalWidth, minLogicalWidth) + GridLayoutFunctions::marginLogicalSizeForGridItem(*renderGrid(), gridItemInlineDirection, gridItem) + m_algorithm.baselineOffsetForGridItem(gridItem, direction());
++        return std::max(minContentLogicalWidth, minLogicalWidth) + GridLayoutFunctions::marginLogicalSizeForGridItem(*renderGrid(), gridItemInlineDirection, gridItem) + m_algorithm.baselineOffsetForGridItem(gridItem, direction()).value_or(0_lu);
      }
  
      if (updateOverridingContainingBlockContentSizeForGridItem(gridItem, gridItemInlineDirection)) {
@@ -99244,7 +99279,14 @@ index 8004ec61378fe96a582562ae1a9a6253f8a9c198..182a2abe76a51ecb34a3afa7eda2c8c1
  
          if (auto& intrinsicLogicalHeightsForRowSizingFirstPass = renderGrid()->intrinsicLogicalHeightsForRowSizingFirstPass())
              intrinsicLogicalHeightsForRowSizingFirstPass->invalidateSizeForItem(gridItem);
-@@ -1199,7 +1234,11 @@ LayoutUnit GridTrackSizingAlgorithmStrategy::maxContentContributionForGridItem(R
+@@ -1193,13 +1228,17 @@ LayoutUnit GridTrackSizingAlgorithmStrategy::maxContentContributionForGridItem(R
+             return gridItem.maxContentLogicalWidthContribution();
+         }();
+ 
+-        return maxContentLogicalWidth + GridLayoutFunctions::marginLogicalSizeForGridItem(*renderGrid(), gridItemInlineDirection, gridItem) + m_algorithm.baselineOffsetForGridItem(gridItem, direction());
++        return maxContentLogicalWidth + GridLayoutFunctions::marginLogicalSizeForGridItem(*renderGrid(), gridItemInlineDirection, gridItem) + m_algorithm.baselineOffsetForGridItem(gridItem, direction()).value_or(0_lu);
+     }
+ 
      if (updateOverridingContainingBlockContentSizeForGridItem(gridItem, gridItemInlineDirection)) {
          if (auto& intrinsicLogicalHeightsForRowSizingFirstPass = renderGrid()->intrinsicLogicalHeightsForRowSizingFirstPass())
              intrinsicLogicalHeightsForRowSizingFirstPass->invalidateSizeForItem(gridItem);
@@ -99256,6 +99298,34 @@ index 8004ec61378fe96a582562ae1a9a6253f8a9c198..182a2abe76a51ecb34a3afa7eda2c8c1
      }
      return logicalHeightForGridItem(gridItem, gridLayoutState);
  }
+@@ -1245,7 +1284,7 @@ LayoutUnit GridTrackSizingAlgorithmStrategy::minContributionForGridItem(RenderBo
+         return overflow == Overflow::Visible || overflow == Overflow::Clip;
+     };
+ 
+-    LayoutUnit baselineShim = m_algorithm.baselineOffsetForGridItem(gridItem, direction());
++    LayoutUnit baselineShim = m_algorithm.baselineOffsetForGridItem(gridItem, direction()).value_or(0_lu);
+ 
+     if (gridItemMinSize.isAuto()) {
+         if (!computedOverflowIsNotScrollable())
+@@ -1322,15 +1361,15 @@ void GridTrackSizingAlgorithm::updateBaselineAlignmentContext(const RenderBox& g
+     m_baselineAlignment.updateBaselineAlignmentContext(align, alignmentContext, gridItem, alignmentContextType);
+ }
+ 
+-LayoutUnit GridTrackSizingAlgorithm::baselineOffsetForGridItem(const RenderBox& gridItem, Style::GridTrackSizingDirection alignmentContextType) const
++std::optional<LayoutUnit> GridTrackSizingAlgorithm::baselineOffsetForGridItem(const RenderBox& gridItem, Style::GridTrackSizingDirection alignmentContextType) const
+ {
+     // If we haven't yet initialized this axis (which can be the case if we're doing
+     // prelayout of a subgrid), then we can't know the baseline offset.
+     if (tracks(alignmentContextType).isEmpty())
+-        return LayoutUnit();
++        return std::nullopt;
+ 
+     if (!participateInBaselineAlignment(gridItem, alignmentContextType))
+-        return LayoutUnit();
++        return std::nullopt;
+ 
+     ASSERT_IMPLIES(alignmentContextType == Style::GridTrackSizingDirection::Rows, !m_renderGrid->isSubgridRows());
+     auto align = m_renderGrid->selfAlignmentForGridItem(gridItem, Style::logicalAxis(alignmentContextType)).position();
 @@ -1460,7 +1499,11 @@ private:
  void IndefiniteSizeStrategy::layoutGridItemForMinSizeComputation(RenderBox& gridItem, bool overrideSizeHasChanged) const
  {
@@ -99280,6 +99350,19 @@ index 8004ec61378fe96a582562ae1a9a6253f8a9c198..182a2abe76a51ecb34a3afa7eda2c8c1
      gridItem.layoutIfNeeded();
  }
  
+diff --git a/Source/WebCore/rendering/GridTrackSizingAlgorithm.h b/Source/WebCore/rendering/GridTrackSizingAlgorithm.h
+index f3cc4b96982db4dcc2b2e64c0d9277bb9752f8f3..7376210d1861d04e787ffbb437c74fea8d5c26df 100644
+--- a/Source/WebCore/rendering/GridTrackSizingAlgorithm.h
++++ b/Source/WebCore/rendering/GridTrackSizingAlgorithm.h
+@@ -132,7 +132,7 @@ public:
+     LayoutUnit minContentSize() const { return m_minContentSize; };
+     LayoutUnit maxContentSize() const { return m_maxContentSize; };
+ 
+-    LayoutUnit baselineOffsetForGridItem(const RenderBox&, Style::GridTrackSizingDirection alignmentContextType) const;
++    std::optional<LayoutUnit> baselineOffsetForGridItem(const RenderBox&, Style::GridTrackSizingDirection alignmentContextType) const;
+ 
+     // The estimated grid area should be use pre-layout versus the grid area, which should be used once
+     // layout is complete.
 diff --git a/Source/WebCore/rendering/LayoutRepainter.cpp b/Source/WebCore/rendering/LayoutRepainter.cpp
 index 6b21156853e18241520555e20e5808e79eadb6b2..75cb194046833b975dc9d082cfa7b22ebad8abb4 100644
 --- a/Source/WebCore/rendering/LayoutRepainter.cpp
@@ -101536,7 +101619,7 @@ index 4fcb18c274244e25bf227cffde32fff4b80dc15a..62cd236ac0264fce597f1f8cd38e75c7
              flexItem.repaintDuringLayoutIfMoved(oldFlexItemRects[index]);
          ++index;
 diff --git a/Source/WebCore/rendering/RenderGrid.cpp b/Source/WebCore/rendering/RenderGrid.cpp
-index e4016aa11263c14ff1ece803b6abdb2d697c2f75..549874815d5f3abd8d2a4a823907c8abbf8130c6 100644
+index e4016aa11263c14ff1ece803b6abdb2d697c2f75..46a1f762fe54205796e89fe387425aa0aecb9ebf 100644
 --- a/Source/WebCore/rendering/RenderGrid.cpp
 +++ b/Source/WebCore/rendering/RenderGrid.cpp
 @@ -48,12 +48,24 @@
@@ -101648,7 +101731,95 @@ index e4016aa11263c14ff1ece803b6abdb2d697c2f75..549874815d5f3abd8d2a4a823907c8ab
  }
  
  // FIXME: This logic is shared by RenderFlexibleBox, so it should be moved to RenderBox.
-@@ -2704,8 +2752,19 @@ void RenderGrid::updateIntrinsicLogicalHeightsForRowSizingFirstPassCacheAvailabi
+@@ -2051,12 +2099,12 @@ const RenderBox* RenderGrid::baselineGridItem(ItemPosition alignment) const
+     return baselineGridItem;
+ }
+ 
+-LayoutUnit RenderGrid::columnAxisBaselineOffsetForGridItem(const RenderBox& gridItem) const
++std::optional<LayoutUnit> RenderGrid::columnAxisBaselineOffsetForGridItem(const RenderBox& gridItem) const
+ {
+     // FIXME : CSS Grid Lanes does not properly handle baseline calculations currently.
+     // We will just skip this running this step if we detect the RenderGrid is a grid lanes container for now.
+     if (isGridLanes())
+-        return LayoutUnit { };
++        return std::nullopt;
+ 
+     if (isSubgridRows()) {
+         RenderGrid* outer = downcast<RenderGrid>(parent());
+@@ -2067,12 +2115,12 @@ LayoutUnit RenderGrid::columnAxisBaselineOffsetForGridItem(const RenderBox& grid
+     return m_trackSizingAlgorithm.baselineOffsetForGridItem(gridItem, Style::GridTrackSizingDirection::Rows);
+ }
+ 
+-LayoutUnit RenderGrid::rowAxisBaselineOffsetForGridItem(const RenderBox& gridItem) const
++std::optional<LayoutUnit> RenderGrid::rowAxisBaselineOffsetForGridItem(const RenderBox& gridItem) const
+ {
+     // FIXME : CSS Grid Lanes does not properly handle baseline calculations currently.
+     // We will just skip this running this step if we detect the RenderGrid is a grid lanes container for now.
+     if (isGridLanes())
+-        return LayoutUnit { };
++        return std::nullopt;
+ 
+     if (isSubgridColumns()) {
+         RenderGrid* outer = downcast<RenderGrid>(parent());
+@@ -2179,14 +2227,8 @@ GridAxisPosition RenderGrid::rowAxisPositionForGridItem(const RenderBox& gridIte
+     case ItemPosition::Stretch:
+         return GridAxisPosition::GridAxisStart;
+     case ItemPosition::Baseline:
+-        // FIXME: Handle non-inline matching orthogonal grid items properly.
+-        if (GridLayoutFunctions::isOrthogonalGridItem(*this, gridItem) && !WritingMode().isInlineMatchingAny(gridItem.writingMode()))
+-            return GridAxisPosition::GridAxisStart;
+         return hasSameDirection ? GridAxisPosition::GridAxisStart : GridAxisPosition::GridAxisEnd;
+     case ItemPosition::LastBaseline:
+-        // FIXME: Handle non-inline matching orthogonal grid items properly.
+-        if (GridLayoutFunctions::isOrthogonalGridItem(*this, gridItem) && !WritingMode().isInlineMatchingAny(gridItem.writingMode()))
+-            return GridAxisPosition::GridAxisStart;
+         return hasSameDirection ? GridAxisPosition::GridAxisEnd : GridAxisPosition::GridAxisStart;
+     case ItemPosition::Legacy:
+     case ItemPosition::Auto:
+@@ -2204,16 +2246,18 @@ LayoutUnit RenderGrid::columnAxisOffsetForGridItem(const RenderBox& gridItem, Gr
+     LayoutUnit startPosition = startOfRow + marginBeforeForChild(gridItem);
+     LayoutUnit columnAxisGridItemSize = GridLayoutFunctions::isOrthogonalGridItem(*this, gridItem) ? gridItem.logicalWidth() + gridItem.marginLogicalWidth() : gridItem.logicalHeight() + gridItem.marginLogicalHeight();
+     LayoutUnit stackingAxisOffset = hasStackingAxisRows() ? gridLanesResult->get().stackingAxisOffsetForGridItem(gridItem) : 0_lu;
+-    auto overflow = selfAlignmentForGridItem(gridItem, LogicalBoxAxis::Block).overflow();
++    auto alignment = selfAlignmentForGridItem(gridItem, LogicalBoxAxis::Block);
++    auto baselineOffset = columnAxisBaselineOffsetForGridItem(gridItem);
++    auto overflow = isBaselinePosition(alignment.position()) && !baselineOffset ? OverflowAlignment::Safe : alignment.overflow();
+     LayoutUnit offsetFromStartPosition = computeOverflowAlignmentOffset(overflow, endOfRow - startOfRow, columnAxisGridItemSize);
+     if (GridLayoutFunctions::hasAutoMarginsInColumnAxis(gridItem, writingMode()))
+         return startPosition;
+     GridAxisPosition axisPosition = columnAxisPositionForGridItem(gridItem);
+     switch (axisPosition) {
+     case GridAxisPosition::GridAxisStart:
+-        return startPosition + columnAxisBaselineOffsetForGridItem(gridItem) + stackingAxisOffset;
++        return startPosition + baselineOffset.value_or(0_lu) + stackingAxisOffset;
+     case GridAxisPosition::GridAxisEnd:
+-        return (startPosition + offsetFromStartPosition) - columnAxisBaselineOffsetForGridItem(gridItem);
++        return (startPosition + offsetFromStartPosition) - baselineOffset.value_or(0_lu);
+     case GridAxisPosition::GridAxisCenter:
+         return startPosition + (offsetFromStartPosition / 2);
+     }
+@@ -2230,15 +2274,16 @@ LayoutUnit RenderGrid::rowAxisOffsetForGridItem(const RenderBox& gridItem, GridL
+     if (GridLayoutFunctions::hasAutoMarginsInRowAxis(gridItem, writingMode()))
+         return startPosition;
+     LayoutUnit rowAxisGridItemSize = GridLayoutFunctions::isOrthogonalGridItem(*this, gridItem) ? gridItem.logicalHeight() + gridItem.marginLogicalHeight() : gridItem.logicalWidth() + gridItem.marginLogicalWidth();
+-    auto overflow = selfAlignmentForGridItem(gridItem, LogicalBoxAxis::Inline).overflow();
+-    auto rowAxisBaselineOffset = rowAxisBaselineOffsetForGridItem(gridItem);
++    auto alignment = selfAlignmentForGridItem(gridItem, LogicalBoxAxis::Inline);
++    auto baselineOffset = rowAxisBaselineOffsetForGridItem(gridItem);
++    auto overflow = isBaselinePosition(alignment.position()) && !baselineOffset ? OverflowAlignment::Safe : alignment.overflow();
+     LayoutUnit offsetFromStartPosition = computeOverflowAlignmentOffset(overflow, endOfColumn - startOfColumn, rowAxisGridItemSize);
+     GridAxisPosition axisPosition = rowAxisPositionForGridItem(gridItem);
+     switch (axisPosition) {
+     case GridAxisPosition::GridAxisStart:
+-        return startPosition + rowAxisBaselineOffset + stackingAxisOffset;
++        return startPosition + baselineOffset.value_or(0_lu) + stackingAxisOffset;
+     case GridAxisPosition::GridAxisEnd:
+-        return startPosition + offsetFromStartPosition - rowAxisBaselineOffset;
++        return startPosition + offsetFromStartPosition - baselineOffset.value_or(0_lu);
+     case GridAxisPosition::GridAxisCenter:
+         return startPosition + offsetFromStartPosition / 2;
+     }
+@@ -2704,8 +2749,19 @@ void RenderGrid::updateIntrinsicLogicalHeightsForRowSizingFirstPassCacheAvailabi
  
      if (canCreateIntrinsicLogicalHeightsCacheForRowSizingFirstPass && m_intrinsicLogicalHeightsForRowSizingFirstPass) {
          for (auto& gridItem : childrenOfType<RenderBox>(*this)) {
@@ -101669,6 +101840,21 @@ index e4016aa11263c14ff1ece803b6abdb2d697c2f75..549874815d5f3abd8d2a4a823907c8ab
          }
      } else if (canCreateIntrinsicLogicalHeightsCacheForRowSizingFirstPass)
          m_intrinsicLogicalHeightsForRowSizingFirstPass.emplace();
+diff --git a/Source/WebCore/rendering/RenderGrid.h b/Source/WebCore/rendering/RenderGrid.h
+index d4011dc069a914499be7b756d26e1fc39e5d1905..ce4ef579e84cee961e36272773e02b031ddec9a0 100644
+--- a/Source/WebCore/rendering/RenderGrid.h
++++ b/Source/WebCore/rendering/RenderGrid.h
+@@ -269,8 +269,8 @@ private:
+     std::optional<LayoutUnit> lastLineBaseline() const final;
+     const RenderBox* baselineGridItem(ItemPosition alignment) const;
+ 
+-    LayoutUnit columnAxisBaselineOffsetForGridItem(const RenderBox&) const;
+-    LayoutUnit rowAxisBaselineOffsetForGridItem(const RenderBox&) const;
++    std::optional<LayoutUnit> columnAxisBaselineOffsetForGridItem(const RenderBox&) const;
++    std::optional<LayoutUnit> rowAxisBaselineOffsetForGridItem(const RenderBox&) const;
+ 
+     unsigned NODELETE nonCollapsedTracks(Style::GridTrackSizingDirection) const;
+ 
 diff --git a/Source/WebCore/rendering/RenderLayer.cpp b/Source/WebCore/rendering/RenderLayer.cpp
 index 4bd303aa17e5da8a780da294d7a1337b8978d6ea..46d843be01f4444e7b076dbeed9213074d28486b 100644
 --- a/Source/WebCore/rendering/RenderLayer.cpp
