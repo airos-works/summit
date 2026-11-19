@@ -14775,6 +14775,171 @@ index 7d4633cbea43f5816021e3f64c405d33e310d1bc..274f2b98e3a444860e9e7bcdc8a2ef52
 -    RTCEncodedVideoFrameMetadata getMetadata();
 +    [CallWith=RelevantScriptExecutionContext] RTCEncodedVideoFrameMetadata getMetadata();
  };
+diff --git a/Source/WebCore/Modules/mediastream/RTCIceTransport.cpp b/Source/WebCore/Modules/mediastream/RTCIceTransport.cpp
+index f1de2d1b6ad86b69433d830cd68c02de61497d3b..9eeb307a9990339ea249b5c3680a4a31bd725582 100644
+--- a/Source/WebCore/Modules/mediastream/RTCIceTransport.cpp
++++ b/Source/WebCore/Modules/mediastream/RTCIceTransport.cpp
+@@ -39,15 +39,16 @@ namespace WebCore {
+ 
+ WTF_MAKE_TZONE_ALLOCATED_IMPL(RTCIceTransport);
+ 
+-Ref<RTCIceTransport> RTCIceTransport::create(ScriptExecutionContext& context, UniqueRef<RTCIceTransportBackend>&& backend, RTCPeerConnection& connection)
++Ref<RTCIceTransport> RTCIceTransport::create(ScriptExecutionContext& context, UniqueRef<RTCIceTransportBackend>&& backend, RTCPeerConnection& connection, RTCIceComponent component)
+ {
+-    auto result = adoptRef(*new RTCIceTransport(context, WTF::move(backend), connection));
++    auto result = adoptRef(*new RTCIceTransport(context, WTF::move(backend), connection, component));
+     result->suspendIfNeeded();
+     return result;
+ }
+ 
+-RTCIceTransport::RTCIceTransport(ScriptExecutionContext& context, UniqueRef<RTCIceTransportBackend>&& backend, RTCPeerConnection& connection)
++RTCIceTransport::RTCIceTransport(ScriptExecutionContext& context, UniqueRef<RTCIceTransportBackend>&& backend, RTCPeerConnection& connection, RTCIceComponent component)
+     : ActiveDOMObject(&context)
++    , m_component(component)
+     , m_backend(WTF::move(backend))
+     , m_connection(connection)
+ {
+diff --git a/Source/WebCore/Modules/mediastream/RTCIceTransport.h b/Source/WebCore/Modules/mediastream/RTCIceTransport.h
+index f08606300433c3fe4ff5a02424d63ad7bfdd2476..e4154726815cd41854c9b3b3d769e14c3e072e3d 100644
+--- a/Source/WebCore/Modules/mediastream/RTCIceTransport.h
++++ b/Source/WebCore/Modules/mediastream/RTCIceTransport.h
+@@ -37,6 +37,7 @@
+ #include "EventTarget.h"
+ #include "EventTargetInterfaces.h"
+ #include "RTCIceCandidate.h"
++#include "RTCIceComponent.h"
+ #include "RTCIceGatheringState.h"
+ #include "RTCIceTransportBackend.h"
+ #include "RTCIceTransportState.h"
+@@ -51,7 +52,7 @@ class RTCPeerConnection;
+ class RTCIceTransport : public RefCounted<RTCIceTransport>, public ActiveDOMObject, public EventTarget, public RTCIceTransportBackendClient {
+     WTF_MAKE_TZONE_ALLOCATED(RTCIceTransport);
+ public:
+-    static Ref<RTCIceTransport> create(ScriptExecutionContext&, UniqueRef<RTCIceTransportBackend>&&, RTCPeerConnection&);
++    static Ref<RTCIceTransport> create(ScriptExecutionContext&, UniqueRef<RTCIceTransportBackend>&&, RTCPeerConnection&, RTCIceComponent);
+     ~RTCIceTransport();
+ 
+     // ContextDestructionObserver.
+@@ -59,6 +60,7 @@ public:
+     void deref() const final { RefCounted::deref(); }
+     USING_CAN_MAKE_WEAKPTR(EventTarget);
+ 
++    RTCIceComponent component() const { return m_component; }
+     RTCIceTransportState state() const { return m_transportState; }
+     RTCIceGatheringState gatheringState() const { return m_gatheringState; }
+ 
+@@ -72,7 +74,7 @@ public:
+     std::optional<CandidatePair> NODELETE getSelectedCandidatePair();
+ 
+ private:
+-    RTCIceTransport(ScriptExecutionContext&, UniqueRef<RTCIceTransportBackend>&&, RTCPeerConnection&);
++    RTCIceTransport(ScriptExecutionContext&, UniqueRef<RTCIceTransportBackend>&&, RTCPeerConnection&, RTCIceComponent);
+ 
+     // EventTarget
+     enum EventTargetInterfaceType eventTargetInterface() const final { return EventTargetInterfaceType::RTCIceTransport; }
+@@ -89,6 +91,7 @@ private:
+     void onGatheringStateChanged(RTCIceGatheringState) final;
+     void onSelectedCandidatePairChanged(RefPtr<RTCIceCandidate>&&, RefPtr<RTCIceCandidate>&&) final;
+ 
++    const RTCIceComponent m_component;
+     bool m_isStopped { false };
+     const UniqueRef<RTCIceTransportBackend> m_backend;
+     WeakPtr<RTCPeerConnection, WeakPtrImplWithEventTargetData> m_connection;
+diff --git a/Source/WebCore/Modules/mediastream/RTCIceTransport.idl b/Source/WebCore/Modules/mediastream/RTCIceTransport.idl
+index fdeade240059e1b65b47b3f717ac7566601d26ab..89aa6c5cf6032dcd7016b0d0a7ca900a07a5dbee 100644
+--- a/Source/WebCore/Modules/mediastream/RTCIceTransport.idl
++++ b/Source/WebCore/Modules/mediastream/RTCIceTransport.idl
+@@ -43,7 +43,7 @@ typedef RTCIceGatheringState IceGatheringState;
+     SkipVTableValidation
+ ] interface RTCIceTransport : EventTarget {
+     // FIXME 169662: missing readonly attribute RTCIceRole role;
+-    // FIXME 169662: missing readonly attribute RTCIceComponent component;
++    readonly attribute RTCIceComponent component;
+     readonly attribute IceTransportState state;
+     readonly attribute IceGatheringState gatheringState;
+     // FIXME 169662: missing sequence<RTCIceCandidate> getLocalCandidates();
+diff --git a/Source/WebCore/Modules/mediastream/RTCPeerConnection.cpp b/Source/WebCore/Modules/mediastream/RTCPeerConnection.cpp
+index 7369cc721d5ac7c067e7fd397758046c8cd80dfc..39c0737b39ac115b67cda5072a791f8a72f9ba74 100644
+--- a/Source/WebCore/Modules/mediastream/RTCPeerConnection.cpp
++++ b/Source/WebCore/Modules/mediastream/RTCPeerConnection.cpp
+@@ -1242,19 +1242,19 @@ Document* RTCPeerConnection::document()
+     return downcast<Document>(scriptExecutionContext());
+ }
+ 
+-Ref<RTCIceTransport> RTCPeerConnection::getOrCreateIceTransport(UniqueRef<RTCIceTransportBackend>&& backend)
++Ref<RTCIceTransport> RTCPeerConnection::getOrCreateIceTransport(UniqueRef<RTCIceTransportBackend>&& backend, RTCIceComponent component)
+ {
+     auto index = m_iceTransports.findIf([&backend](auto& transport) { return backend.get() == transport->backend(); });
+     if (index == notFound) {
+         index = m_iceTransports.size();
+-        m_iceTransports.append(RTCIceTransport::create(*protect(scriptExecutionContext()), WTF::move(backend), *this));
++        m_iceTransports.append(RTCIceTransport::create(*protect(scriptExecutionContext()), WTF::move(backend), *this, component));
+     }
+ 
+     return m_iceTransports[index].copyRef();
+ }
+ 
+ 
+-RefPtr<RTCDtlsTransport> RTCPeerConnection::getOrCreateDtlsTransport(std::unique_ptr<RTCDtlsTransportBackend>&& backend)
++RefPtr<RTCDtlsTransport> RTCPeerConnection::getOrCreateDtlsTransport(std::unique_ptr<RTCDtlsTransportBackend>&& backend, RTCIceComponent component)
+ {
+     if (!backend)
+         return nullptr;
+@@ -1267,7 +1267,7 @@ RefPtr<RTCDtlsTransport> RTCPeerConnection::getOrCreateDtlsTransport(std::unique
+     if (index == notFound) {
+         index = m_dtlsTransports.size();
+         auto iceTransportBackend = backend->iceTransportBackend();
+-        m_dtlsTransports.append(RTCDtlsTransport::create(*context, makeUniqueRefFromNonNullUniquePtr(WTF::move(backend)), getOrCreateIceTransport(WTF::move(iceTransportBackend))));
++        m_dtlsTransports.append(RTCDtlsTransport::create(*context, makeUniqueRefFromNonNullUniquePtr(WTF::move(backend)), getOrCreateIceTransport(WTF::move(iceTransportBackend), component)));
+     }
+ 
+     return m_dtlsTransports[index].copyRef();
+@@ -1304,10 +1304,10 @@ void RTCPeerConnection::updateTransceiverTransports()
+ {
+     for (auto& transceiver : m_transceiverSet.list()) {
+         Ref sender = transceiver->sender();
+-        sender->setTransport(getOrCreateDtlsTransport(sender->dtlsTransportBackend()));
++        sender->setTransport(getOrCreateDtlsTransport(sender->dtlsTransportBackend(), RTCIceComponent::Rtp));
+ 
+         Ref receiver = transceiver->receiver();
+-        receiver->setTransport(getOrCreateDtlsTransport(receiver->dtlsTransportBackend()));
++        receiver->setTransport(getOrCreateDtlsTransport(receiver->dtlsTransportBackend(), RTCIceComponent::Rtp));
+     }
+ }
+ 
+@@ -1338,7 +1338,8 @@ void RTCPeerConnection::updateSctpBackend(std::unique_ptr<RTCSctpTransportBacken
+         if (!context)
+             return;
+ 
+-        RefPtr dtlsTransport = getOrCreateDtlsTransport(sctpBackend->dtlsTransportBackend().moveToUniquePtr());
++        // Data channels use ICE component 1, including when bundled with RTP.
++        RefPtr dtlsTransport = getOrCreateDtlsTransport(sctpBackend->dtlsTransportBackend().moveToUniquePtr(), RTCIceComponent::Rtp);
+         if (!dtlsTransport)
+             return;
+         sctpTransport = RTCSctpTransport::create(*context, makeUniqueRefFromNonNullUniquePtr(WTF::move(sctpBackend)), dtlsTransport.releaseNonNull());
+diff --git a/Source/WebCore/Modules/mediastream/RTCPeerConnection.h b/Source/WebCore/Modules/mediastream/RTCPeerConnection.h
+index b9764722013300cd6891da5c51d484e6951c9867..5bf5d83dcedaa28fc77a72fbcbd9827a89fd449f 100644
+--- a/Source/WebCore/Modules/mediastream/RTCPeerConnection.h
++++ b/Source/WebCore/Modules/mediastream/RTCPeerConnection.h
+@@ -43,6 +43,7 @@
+ #include "PeerConnectionBackend.h"
+ #include "RTCConfiguration.h"
+ #include "RTCDataChannel.h"
++#include "RTCIceComponent.h"
+ #include "RTCIceConnectionState.h"
+ #include "RTCIceGatheringState.h"
+ #include "RTCLocalSessionDescriptionInit.h"
+@@ -254,8 +255,8 @@ private:
+ 
+     ExceptionOr<Vector<MediaEndpointConfiguration::IceServerInfo>> iceServersFromConfiguration(RTCConfiguration& newConfiguration, const RTCConfiguration* existingConfiguration, bool isLocalDescriptionSet);
+ 
+-    Ref<RTCIceTransport> getOrCreateIceTransport(UniqueRef<RTCIceTransportBackend>&&);
+-    RefPtr<RTCDtlsTransport> getOrCreateDtlsTransport(std::unique_ptr<RTCDtlsTransportBackend>&&);
++    Ref<RTCIceTransport> getOrCreateIceTransport(UniqueRef<RTCIceTransportBackend>&&, RTCIceComponent);
++    RefPtr<RTCDtlsTransport> getOrCreateDtlsTransport(std::unique_ptr<RTCDtlsTransportBackend>&&, RTCIceComponent);
+     void updateTransceiverTransports();
+ 
+     void setSignalingState(RTCSignalingState);
 diff --git a/Source/WebCore/Modules/mediastream/RTCRtpTransformableFrame.h b/Source/WebCore/Modules/mediastream/RTCRtpTransformableFrame.h
 index a6edf51e1d68e899cc0b602bad3d079629988792..1681dd9f43211907c7b6cc893a188cc1cbb88ec0 100644
 --- a/Source/WebCore/Modules/mediastream/RTCRtpTransformableFrame.h
