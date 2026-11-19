@@ -25342,7 +25342,7 @@ index c0e79d205b34ca017d69dd11e47fc353b313e940..660b4095d4a014466616ecacca3b2554
  
  void CSSFontSelector::updateStyleIfNeeded()
 diff --git a/Source/WebCore/css/CSSProperties.json b/Source/WebCore/css/CSSProperties.json
-index bf647feda8b76086349434ba673d35091c601c47..2ec20ab0b736132bb91bf3688475aa194dc8e2eb 100644
+index bf647feda8b76086349434ba673d35091c601c47..1c8b2152798c2656519a403fd6a3f92129c6f812 100644
 --- a/Source/WebCore/css/CSSProperties.json
 +++ b/Source/WebCore/css/CSSProperties.json
 @@ -10874,6 +10874,8 @@
@@ -25381,7 +25381,19 @@ index bf647feda8b76086349434ba673d35091c601c47..2ec20ab0b736132bb91bf3688475aa19
                  "center",
                  "space-between",
                  "space-around",
-@@ -15939,14 +15947,14 @@
+@@ -11584,9 +11592,10 @@
+         "grid-auto-flow": {
+             "animation-type": "discrete",
+             "initial": "normal",
+-            "initial-comment": "Current spec initial value is 'row'.",
++            "initial-comment": "The computed getter resolves this internal default to row, or to the automatic direction for grid lanes.",
+             "codegen-properties": {
+                 "style-extractor-custom": true,
++                "computed-style-getter-custom": true,
+                 "computed-style-initial-constexpr": true,
+                 "computed-style-storage-path": ["m_nonInheritedData", "rareData", "grid"],
+                 "computed-style-storage-kind": "value",
+@@ -15939,14 +15948,14 @@
              }
          },
          "<self-position>": {
@@ -104269,7 +104281,7 @@ index 22d96170539d88e1dec6f45bd98c269eb1b526e3..d637fa7e85d0d5a09667eaedff83359b
      CascadeLayerName m_resolvedCascadeLayerName;
      HashMap<CascadeLayerName, RuleSet::CascadeLayerIdentifier> m_cascadeLayerIdentifierMap;
 diff --git a/Source/WebCore/style/StyleAdjuster.cpp b/Source/WebCore/style/StyleAdjuster.cpp
-index 0656f3ce6877d1b6a86f05c8fdc5515a0a450d32..297bb6db8d9898ffdc19ef632c1907209a962431 100644
+index 0656f3ce6877d1b6a86f05c8fdc5515a0a450d32..816d02413d45386d80718d36be0150b3d980e9ea 100644
 --- a/Source/WebCore/style/StyleAdjuster.cpp
 +++ b/Source/WebCore/style/StyleAdjuster.cpp
 @@ -332,11 +332,6 @@ OptionSet<EventListenerRegionType> Adjuster::computeEventListenerRegionTypes(con
@@ -104284,7 +104296,30 @@ index 0656f3ce6877d1b6a86f05c8fdc5515a0a450d32..297bb6db8d9898ffdc19ef632c190720
  static bool NODELETE shouldInlinifyForRuby(const Style::ComputedStyle& style, const Style::ComputedStyle& parentBoxStyle)
  {
      auto parentDisplay = parentBoxStyle.display();
-@@ -654,13 +649,13 @@ void Adjuster::adjust(Style::ComputedStyle& style) const
+@@ -509,22 +504,6 @@ void Adjuster::adjust(Style::ComputedStyle& style) const
+         if (display.isInternalTableBox() && display != DisplayType::TableCell)
+             style.setWritingMode(m_parentStyle.writingMode().computedWritingMode());
+ 
+-        // FIXME: Adjust this once CSSWG clarifies exactly how the initial value should compute on other display types.
+-        // For now, this gives mostly backwards-compatible behavior.
+-        auto adjustGridAutoFlow = [&](GridAutoFlow::Direction direction) {
+-            if (auto gridAutoFlow = style.gridAutoFlow(); gridAutoFlow.direction() == GridAutoFlow::Direction::Normal) {
+-                gridAutoFlow.setDirection(direction);
+-                style.setGridAutoFlow(gridAutoFlow);
+-            }
+-        };
+-        if (display.isGridBox())
+-            adjustGridAutoFlow(GridAutoFlow::Direction::Row);
+-        else if (display.isGridLanesBox()) {
+-            auto direction = (!style.gridTemplateRows().isNone() && style.gridTemplateColumns().isNone())
+-                ? GridAutoFlow::Direction::Column : GridAutoFlow::Direction::Row;
+-            adjustGridAutoFlow(direction);
+-        }
+-
+         if (display.isDeprecatedFlexibleBox()) {
+             // FIXME: Since we don't support block-flow on flexible boxes yet, disallow setting
+             // of block-flow to anything other than StyleWritingMode::HorizontalTb.
+@@ -654,13 +633,13 @@ void Adjuster::adjust(Style::ComputedStyle& style) const
              style.setAutoRevealsWhenFound();
      }
  
@@ -104300,7 +104335,7 @@ index 0656f3ce6877d1b6a86f05c8fdc5515a0a450d32..297bb6db8d9898ffdc19ef632c190720
          // Tables only support overflow:hidden and overflow:visible and ignore anything else,
          // see https://drafts.csswg.org/css2/#overflow. As a table is not a block
          // container box the rules for resolving conflicting x and y values in CSS Overflow Module
-@@ -676,23 +671,12 @@ void Adjuster::adjust(Style::ComputedStyle& style) const
+@@ -676,23 +655,12 @@ void Adjuster::adjust(Style::ComputedStyle& style) const
              style.setOverflowY(Overflow::Visible);
          else if (style.overflowY() == Overflow::Visible)
              style.setOverflowX(Overflow::Visible);
@@ -104326,7 +104361,7 @@ index 0656f3ce6877d1b6a86f05c8fdc5515a0a450d32..297bb6db8d9898ffdc19ef632c190720
      }
  
      // Call setStylesForPaginationMode() if a pagination mode is set for any non-root elements. If these
-@@ -1052,6 +1036,16 @@ void Adjuster::adjustThemeStyle(Style::ComputedStyle& style, const Style::Comput
+@@ -1052,6 +1020,16 @@ void Adjuster::adjustThemeStyle(Style::ComputedStyle& style, const Style::Comput
  
      RenderTheme::singleton().adjustStyle(style, parentStyle, m_element.get());
  
@@ -105101,6 +105136,29 @@ index e641504e4e70e439c7aa08b6bf795b8c711aba05..044ef9c7f3fe8ea090e8ed4a0b1424e6
          return { };
      }
  
+diff --git a/Source/WebCore/style/computed/StyleComputedStyleProperties+GettersCustomInlines.h b/Source/WebCore/style/computed/StyleComputedStyleProperties+GettersCustomInlines.h
+index 0e05f23e393b338f3244ca037e6bbb04b7b0f37a..94bd803258010d7db8114ebf42d532d7c00484f0 100644
+--- a/Source/WebCore/style/computed/StyleComputedStyleProperties+GettersCustomInlines.h
++++ b/Source/WebCore/style/computed/StyleComputedStyleProperties+GettersCustomInlines.h
+@@ -113,6 +113,18 @@ inline ZIndex ComputedStyleProperties::specifiedZIndex() const
+     return m_nonInheritedData->boxData->specifiedZIndex();
+ }
+ 
++inline Style::GridAutoFlow ComputedStyleProperties::gridAutoFlow() const
++{
++    auto flow = m_nonInheritedData->rareData->grid->gridAutoFlow;
++    if (flow.direction() == GridAutoFlow::Direction::Normal) {
++        // Grid auto-placement defaults to rows. A grid-lanes container with
++        // only row tracks uses columns for its stacking direction.
++        bool hasOnlyRowTracks = display().isGridLanesBox() && !gridTemplateRows().isNone() && gridTemplateColumns().isNone();
++        flow.setDirection(hasOnlyRowTracks ? GridAutoFlow::Direction::Column : GridAutoFlow::Direction::Row);
++    }
++    return flow;
++}
++
+ // FIXME: Support writing mode properties.
+ 
+ inline TextDirection ComputedStyleProperties::computedDirection() const
 diff --git a/Source/WebCore/style/values/align/StyleAlignContent.cpp b/Source/WebCore/style/values/align/StyleAlignContent.cpp
 index 65c527609d4f9853714e732ce9bd5e10ae49ea15..ce7f580e36a29392ce0367e2911d10996a1c6578 100644
 --- a/Source/WebCore/style/values/align/StyleAlignContent.cpp
