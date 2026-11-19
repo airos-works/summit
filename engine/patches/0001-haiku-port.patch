@@ -4123,6 +4123,74 @@ index 0000000000000000000000000000000000000000..a4177146295892bee55c077619cd9f53
 +}  // namespace SkOpts
 +
 +#endif // SK_CPU_X86 && !SK_ENABLE_OPTIMIZE_SIZE
+diff --git a/Source/ThirdParty/skia/src/opts/SkBlitMask_opts.h b/Source/ThirdParty/skia/src/opts/SkBlitMask_opts.h
+index f7d6f527b6d08bcd333adb0ef64c415d258aa79f..4e48120c839dae9f6da1c11b1b9c862356242f07 100644
+--- a/Source/ThirdParty/skia/src/opts/SkBlitMask_opts.h
++++ b/Source/ThirdParty/skia/src/opts/SkBlitMask_opts.h
+@@ -17,7 +17,7 @@
+ 
+ namespace SK_OPTS_NS {
+ 
+-#if defined(SK_ARM_HAS_NEON)
++#if defined(SK_ARM_HAS_NEON) && !defined(__HAIKU__)
+     // The Sk4px versions below will work fine with NEON, but we have had many indications
+     // that it doesn't perform as well as this NEON-specific code.
+ 
+@@ -171,7 +171,7 @@ namespace SK_OPTS_NS {
+         } while (--height != 0);
+     }
+ 
+-#elif SK_CPU_LSX_LEVEL >= SK_CPU_LSX_LEVEL_LSX
++#elif SK_CPU_LSX_LEVEL >= SK_CPU_LSX_LEVEL_LSX && !defined(__HAIKU__)
+     #include <lsxintrin.h>
+ 
+     static __m128i SkAlphaMul_lsx(__m128i x, __m128i y) {
+@@ -354,6 +354,16 @@ namespace SK_OPTS_NS {
+     }
+ 
+ #else
++    // Match the compositor's rounded source-over multiplication when a mask
++    // is painted straight onto a background or into a transparent layer.
++    static inline Sk4px scale_mask_pixel(const Sk4px& value, const Sk4px& scale) {
++#if defined(__HAIKU__)
++        return (value * scale).div255();
++#else
++        return value.approxMulDiv255(scale);
++#endif
++    }
++
+     static void blit_mask_d32_a8_general(SkPMColor* dst, size_t dstRB,
+                                          const SkAlpha* mask, size_t maskRB,
+                                          SkColor color, int w, int h) {
+@@ -361,8 +371,8 @@ namespace SK_OPTS_NS {
+         auto fn = [&](const Sk4px& d, const Sk4px& aa) {
+             //  = (s + d(1-sa))aa + d(1-aa)
+             //  = s*aa + d(1-sa*aa)
+-            auto left  = s.approxMulDiv255(aa),
+-                 right = d.approxMulDiv255(left.alphas().inv());
++            auto left  = scale_mask_pixel(s, aa),
++                 right = scale_mask_pixel(d, left.alphas().inv());
+             return left + right;  // This does not overflow (exhaustively checked).
+         };
+         while (h --> 0) {
+@@ -383,7 +393,7 @@ namespace SK_OPTS_NS {
+             //  = s*aa + d(1-sa*aa)
+             //   ~~~>
+             //  = s*aa + d(1-aa)
+-            return s.approxMulDiv255(aa) + d.approxMulDiv255(aa.inv());
++            return scale_mask_pixel(s, aa) + scale_mask_pixel(d, aa.inv());
+         };
+         while (h --> 0) {
+             Sk4px::MapDstAlpha(w, dst, mask, fn);
+@@ -403,7 +413,7 @@ namespace SK_OPTS_NS {
+             // a = 1*aa + d(1-1*aa) = aa + d(1-aa)
+             // c = 0*aa + d(1-1*aa) =      d(1-aa)
+             return (aa & Sk4px(skvx::byte16{0,0,0,255, 0,0,0,255, 0,0,0,255, 0,0,0,255}))
+-                 + d.approxMulDiv255(aa.inv());
++                 + scale_mask_pixel(d, aa.inv());
+         };
+         while (h --> 0) {
+             Sk4px::MapDstAlpha(w, dst, mask, fn);
 diff --git a/Source/WTF/Scripts/Preferences/UnifiedWebPreferences.yaml b/Source/WTF/Scripts/Preferences/UnifiedWebPreferences.yaml
 index b6d135a1282843e5d5c81d4a56a6e6cd4d46379d..69905c855dd7e885d653ae23562cf9c3bb13de6c 100644
 --- a/Source/WTF/Scripts/Preferences/UnifiedWebPreferences.yaml

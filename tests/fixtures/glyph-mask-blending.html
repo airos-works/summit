@@ -1,0 +1,67 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Text mask blending over opaque backgrounds</title>
+<pre id="result"></pre>
+<script>
+function makeContext() {
+    const canvas = document.createElement('canvas');
+    canvas.width = 160;
+    canvas.height = 64;
+    return canvas.getContext('2d', { willReadFrequently: true });
+}
+
+function drawText(context, color) {
+    context.fillStyle = color;
+    context.font = '23px serif';
+    context.fillText('Ag 123', 2, 25);
+    context.font = 'italic 17px sans-serif';
+    context.fillText('fraction', 2, 50);
+}
+
+function pixels(context) {
+    return context.getImageData(0, 0, context.canvas.width, context.canvas.height).data;
+}
+
+function scale(channel, alpha) {
+    return Math.round(channel * alpha / 255);
+}
+
+const maskContext = makeContext();
+drawText(maskContext, 'black');
+const mask = pixels(maskContext);
+const foregrounds = [
+    [0, 0, 0, 255], [255, 255, 255, 255], [73, 156, 201, 255],
+    [31, 62, 127, 128], [205, 90, 25, 64]
+];
+const backgrounds = [
+    [255, 192, 203], [18, 99, 242], [57, 128, 215], [0, 0, 0], [255, 255, 255]
+];
+
+const checks = [];
+for (const foreground of foregrounds) {
+    const [red, green, blue, alpha] = foreground;
+    const premultiplied = [red, green, blue].map(channel => scale(channel, alpha));
+    for (const background of backgrounds) {
+        const context = makeContext();
+        context.fillStyle = 'rgb(' + background.join(',') + ')';
+        context.fillRect(0, 0, context.canvas.width, context.canvas.height);
+        drawText(context, `rgba(${red}, ${green}, ${blue}, ${alpha / 255})`);
+        const data = pixels(context);
+        let edges = 0;
+        let mismatches = 0;
+        for (let i = 0; i < data.length; i += 4) {
+            const coverage = mask[i + 3];
+            if (!coverage || coverage === 255)
+                continue;
+            ++edges;
+            const remaining = 255 - scale(alpha, coverage);
+            const matches = background.every((destination, channel) =>
+                scale(premultiplied[channel], coverage) + scale(destination, remaining) === data[i + channel]);
+            if (!matches)
+                ++mismatches;
+        }
+        checks.push({ foreground, background, edges, mismatches, pass: edges > 0 && !mismatches });
+    }
+}
+document.getElementById('result').textContent = JSON.stringify(checks, null, 2);
+</script>
