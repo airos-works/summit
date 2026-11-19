@@ -110045,7 +110045,7 @@ index 0000000000000000000000000000000000000000..f32a1c303300b70614a2b227d27dc96e
 +    network
 +)
 diff --git a/Source/WebDriver/Session.cpp b/Source/WebDriver/Session.cpp
-index 950353c0d08c2b76cd70b754e719d8c4b8009d28..886a2886b820f0145ba7e43e3cc7c8b886d58622 100644
+index 950353c0d08c2b76cd70b754e719d8c4b8009d28..30a754b435b0705f7355b35d6d73e63a6e72680b 100644
 --- a/Source/WebDriver/Session.cpp
 +++ b/Source/WebDriver/Session.cpp
 @@ -2400,6 +2400,15 @@ void Session::elementSendKeys(const String& elementID, const String& text, Funct
@@ -110138,8 +110138,43 @@ index 950353c0d08c2b76cd70b754e719d8c4b8009d28..886a2886b820f0145ba7e43e3cc7c8b8
                      if (currentState.mouseInteraction)
                          state->setString("mouseInteraction"_s, mouseInteractionForAutomation(currentState.mouseInteraction.value()));
                      break;
+@@ -3063,7 +3099,7 @@ void Session::performActions(Vector<Vector<Action>>&& actionsByTick, Function<vo
+                         if (!virtualKey.isNull())
+                             currentState.pressedVirtualKeys.remove(virtualKey);
+                         else
+-                            currentState.pressedKey = std::nullopt;
++                            currentState.pressedCharKeys.remove(action.key.value());
+                         break;
+                     }
+                     case Action::Subtype::KeyDown: {
+@@ -3072,7 +3108,7 @@ void Session::performActions(Vector<Vector<Action>>&& actionsByTick, Function<vo
+                         if (!virtualKey.isNull())
+                             currentState.pressedVirtualKeys.add(virtualKey);
+                         else
+-                            currentState.pressedKey = action.key.value();
++                            currentState.pressedCharKeys.add(action.key.value());
+                         break;
+                     }
+                     case Action::Subtype::Pause:
+@@ -3086,8 +3122,14 @@ void Session::performActions(Vector<Vector<Action>>&& actionsByTick, Function<vo
+                     case Action::Subtype::Scroll:
+                         ASSERT_NOT_REACHED();
+                     }
+-                    if (currentState.pressedKey)
+-                        state->setString("pressedCharKey"_s, currentState.pressedKey.value());
++                    if (currentState.pressedCharKeys.size() == 1)
++                        state->setString("pressedCharKey"_s, *currentState.pressedCharKeys.begin());
++                    else if (!currentState.pressedCharKeys.isEmpty()) {
++                        auto keys = JSON::Array::create();
++                        for (const auto& key : currentState.pressedCharKeys)
++                            keys->pushString(key);
++                        state->setArray("pressedCharKeys"_s, WTF::move(keys));
++                    }
+                     if (!currentState.pressedVirtualKeys.isEmpty()) {
+                         // FIXME: support parsing and tracking multiple virtual keys.
+                         Ref<JSON::Array> virtualKeys = JSON::Array::create();
 diff --git a/Source/WebDriver/Session.h b/Source/WebDriver/Session.h
-index f998209d4d5cea50ae43da7f2a0ed42c1927f669..c750a7cca5c327642c3cd6e062aac9518c6c51d0 100644
+index f998209d4d5cea50ae43da7f2a0ed42c1927f669..af83165976504a9dfbf0afcb59335c1146961a43 100644
 --- a/Source/WebDriver/Session.h
 +++ b/Source/WebDriver/Session.h
 @@ -146,6 +146,8 @@ public:
@@ -110151,7 +110186,7 @@ index f998209d4d5cea50ae43da7f2a0ed42c1927f669..c750a7cca5c327642c3cd6e062aac951
      void getAllCookies(Function<void(CommandResult&&)>&&);
      void getNamedCookie(const String& name, Function<void(CommandResult&&)>&&);
      void addCookie(const Cookie&, Function<void(CommandResult&&)>&&);
-@@ -254,7 +256,8 @@ private:
+@@ -254,9 +256,10 @@ private:
  
          Type type;
          String subtype;
@@ -110159,8 +110194,11 @@ index f998209d4d5cea50ae43da7f2a0ed42c1927f669..c750a7cca5c327642c3cd6e062aac951
 +        Vector<MouseButton> pressedButtons;
 +        std::optional<MouseButton> interactionButton;
          std::optional<MouseInteraction> mouseInteraction;
-         std::optional<String> pressedKey;
+-        std::optional<String> pressedKey;
++        HashSet<String> pressedCharKeys;
          HashSet<String> pressedVirtualKeys;
+     };
+     InputSourceState& inputSourceState(const String& id);
 diff --git a/Source/WebDriver/SessionHost.h b/Source/WebDriver/SessionHost.h
 index 464e50d5a70645d78b8316b42cc37c4a0e84dc50..96f7dfadb76922b64235c7db6e2065d133e2a40f 100644
 --- a/Source/WebDriver/SessionHost.h
@@ -135193,6 +135231,18 @@ index 0000000000000000000000000000000000000000..76c801492fff9daa106e386dcfeb1ae1
 +        WKRetainPtr<WKViewRef> fWebView;
 +};
 +
+diff --git a/Source/WebKit/UIProcess/Automation/Automation.json b/Source/WebKit/UIProcess/Automation/Automation.json
+index db6d0394a966500ac2d23b700d99342a8feb6f06..84371629a731a9702abb8d40eece76b80403840b 100644
+--- a/Source/WebKit/UIProcess/Automation/Automation.json
++++ b/Source/WebKit/UIProcess/Automation/Automation.json
+@@ -336,6 +336,7 @@
+             "properties": [
+                 { "name": "sourceId", "type": "string", "description": "The input source whose state is described by this object." },
+                 { "name": "pressedCharKey", "type": "string", "optional": true, "description": "For 'keyboard' input sources, specifies a character key that has 'pressed' state. Unmentioned character keys are assumed to have a 'released' state." },
++                { "name": "pressedCharKeys", "type": "array", "items": { "type": "string" }, "optional": true, "description": "Character keys held by this keyboard input source, in addition to pressedCharKey if supplied." },
+                 { "name": "pressedVirtualKeys", "type": "array", "items": { "$ref": "VirtualKey" }, "optional": true, "description": "For 'keyboard' input sources, specifies virtual keys that have a 'pressed' state. Unmentioned virtual keys are assumed to have a 'released' state." },
+                 { "name": "pressedButton", "$ref": "MouseButton", "optional": true, "description": "For 'mouse' input sources, specifies which mouse button has a 'pressed' state. Unmentioned mouse buttons are assumed to have a 'released' state. For 'touch' input sources, passing MouseButton::Left denotes a touch-down state." },
+                 { "name": "mouseInteraction", "$ref": "MouseInteraction", "optional": true, "description": "For 'mouse' input sources, specifies which type of interaction took place. If unmentioned and the interaction cannot be determined through other heuristics, the state is dropped."},
 diff --git a/Source/WebKit/UIProcess/Automation/SimulatedInputDispatcher.cpp b/Source/WebKit/UIProcess/Automation/SimulatedInputDispatcher.cpp
 index 4e548d8d71bfce1544da7cc41f3b6417c1f6b321..da5ddebac0d4b360cc8499577c8e1e841a06d354 100644
 --- a/Source/WebKit/UIProcess/Automation/SimulatedInputDispatcher.cpp
@@ -135383,7 +135433,7 @@ index 865206d7f0784ce1c1b0965ca788fa9371fe1a6e..f1c4ac24b9c50dba23d296c15552f0e5
  
      // The position within m_keyframes.
 diff --git a/Source/WebKit/UIProcess/Automation/WebAutomationSession.cpp b/Source/WebKit/UIProcess/Automation/WebAutomationSession.cpp
-index 599cc694a716da0c05e7104be0ec919146f99913..71ce2cbadc405953b85ed29ad1056871fcc4a5fa 100644
+index 599cc694a716da0c05e7104be0ec919146f99913..74230b08f62f4ef6589abf8041f36066b3bedefc 100644
 --- a/Source/WebKit/UIProcess/Automation/WebAutomationSession.cpp
 +++ b/Source/WebKit/UIProcess/Automation/WebAutomationSession.cpp
 @@ -68,7 +68,7 @@
@@ -135489,7 +135539,38 @@ index 599cc694a716da0c05e7104be0ec919146f99913..71ce2cbadc405953b85ed29ad1056871
      auto page = webPageProxyForHandle(browsingContextHandle);
      SYNC_FAIL_WITH_PREDEFINED_ERROR_IF(!page, WindowNotFound);
  
-@@ -3117,20 +3150,24 @@ void WebAutomationSession::cancelInteractionSequence(const Inspector::Protocol::
+@@ -3016,16 +3049,24 @@ void WebAutomationSession::performInteractionSequence(const Inspector::Protocol:
+             Ref inputSource = *m_inputSources.get(sourceId);
+             SimulatedInputSourceState sourceState { };
+ 
+-            auto pressedCharKeyString = stateObject->getString("pressedCharKey"_s);
+-            if (!!pressedCharKeyString) {
++            auto addPressedCharKey = [&](const String& key) {
+ #if ENABLE(WEBDRIVER_KEYBOARD_GRAPHEME_CLUSTERS)
+-                ASYNC_FAIL_WITH_PREDEFINED_ERROR_AND_DETAILS_IF(WTF::numGraphemeClusters(pressedCharKeyString) != 1, InvalidParameter, "Invalid 'pressedCharKey'."_s);
+-                sourceState.pressedCharKeys.add(pressedCharKeyString);
++                if (WTF::numGraphemeClusters(key) != 1)
++                    return false;
++                sourceState.pressedCharKeys.add(key);
+ #else
+-                auto charKey = pressedCharKey(pressedCharKeyString);
+-                ASYNC_FAIL_WITH_PREDEFINED_ERROR_AND_DETAILS_IF(!charKey, InvalidParameter, "Invalid 'pressedCharKey'."_s);
++                auto charKey = pressedCharKey(key);
++                if (!charKey)
++                    return false;
+                 sourceState.pressedCharKeys.add(*charKey);
+ #endif
++                return true;
++            };
++            if (auto key = stateObject->getString("pressedCharKey"_s); !key.isNull())
++                ASYNC_FAIL_WITH_PREDEFINED_ERROR_AND_DETAILS_IF(!addPressedCharKey(key), InvalidParameter, "Invalid 'pressedCharKey'."_s);
++            if (auto keys = stateObject->getArray("pressedCharKeys"_s)) {
++                for (const auto& value : *keys)
++                    ASYNC_FAIL_WITH_PREDEFINED_ERROR_AND_DETAILS_IF(!addPressedCharKey(value->asString()), InvalidParameter, "Invalid entry in 'pressedCharKeys'."_s);
+             }
+ 
+             if (auto pressedVirtualKeysArray = stateObject->getArray("pressedVirtualKeys"_s)) {
+@@ -3117,20 +3158,24 @@ void WebAutomationSession::cancelInteractionSequence(const Inspector::Protocol::
      auto frameID = webFrameIDForHandle(frameHandle, frameNotFound);
      ASYNC_FAIL_WITH_PREDEFINED_ERROR_IF(frameNotFound, WindowNotFound);
  
@@ -135519,7 +135600,7 @@ index 599cc694a716da0c05e7104be0ec919146f99913..71ce2cbadc405953b85ed29ad1056871
  void WebAutomationSession::takeScreenshot(const Inspector::Protocol::Automation::BrowsingContextHandle& handle, const Inspector::Protocol::Automation::FrameHandle& frameHandle, const Inspector::Protocol::Automation::NodeHandle& nodeHandle, std::optional<bool>&& optionalScrollIntoViewIfNeeded, std::optional<bool>&& optionalClipToViewport, CommandCallback<String>&& callback)
  {
      auto page = webPageProxyForHandle(handle);
-@@ -3156,6 +3193,20 @@ void WebAutomationSession::takeScreenshot(const Inspector::Protocol::Automation:
+@@ -3156,6 +3201,20 @@ void WebAutomationSession::takeScreenshot(const Inspector::Protocol::Automation:
          } };
      };
  #endif
@@ -135542,10 +135623,10 @@ index 599cc694a716da0c05e7104be0ec919146f99913..71ce2cbadc405953b85ed29ad1056871
      // to the visible viewport), so fall back to taking the snapshot in the WebProcess whenever we need pixels outside the
 diff --git a/Source/WebKit/UIProcess/Automation/haiku/WebAutomationSessionHaiku.cpp b/Source/WebKit/UIProcess/Automation/haiku/WebAutomationSessionHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..8d13dd2028d89cfc1476a7631e1ee0d6fba78dda
+index 0000000000000000000000000000000000000000..d8db971013dac85e18ac70577aaa3042b8584179
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Automation/haiku/WebAutomationSessionHaiku.cpp
-@@ -0,0 +1,481 @@
+@@ -0,0 +1,508 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -135574,6 +135655,7 @@ index 0000000000000000000000000000000000000000..8d13dd2028d89cfc1476a7631e1ee0d6
 +WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
 +#include <cstdlib>
 +#include <string>
++#include <string_view>
 +
 +// WebDriver's simulated input as the BMessages a BWebKitView passes on
 +// (viewInputHaiku): the same NativeWebMouseEvent / NativeWebKeyboardEvent
@@ -135976,11 +136058,37 @@ index 0000000000000000000000000000000000000000..8d13dd2028d89cfc1476a7631e1ee0d6
 +        page.handleKeyboardEvent(event.releaseNonNull());
 +}
 +
-+static std::string bytesForCharacterHaiku(char32_t character, bool shifted)
++static NativeKeyHaiku nativeCharacterHaiku(std::string bytes, bool shifted)
 +{
-+    if (shifted && character >= 'a' && character <= 'z')
-+        character -= 'a' - 'A';
-+    return String::fromCodePoint(character).utf8().toStdString();
++    NativeKeyHaiku key { 0, WTF::move(bytes), 0 };
++    if (key.bytes.size() != 1)
++        return key;
++
++    // WebDriver defines printable key codes using the unshifted and shifted
++    // US keyboard rows. Haiku assigns consecutive scan codes within each row.
++    static constexpr struct {
++        int32 firstScanCode;
++        std::string_view plain;
++        std::string_view shifted;
++    } rows[] {
++        { 0x11, "`1234567890-=", "~!@#$%^&*()_+" },
++        { 0x27, "qwertyuiop[]\\", "QWERTYUIOP{}|" },
++        { 0x3c, "asdfghjkl;'", "ASDFGHJKL:\"" },
++        { 0x4c, "zxcvbnm,./", "ZXCVBNM<>?" },
++        { 0x5e, " ", " " }
++    };
++    for (const auto& row : rows) {
++        auto index = row.plain.find(key.bytes[0]);
++        if (index == std::string_view::npos)
++            index = row.shifted.find(key.bytes[0]);
++        if (index == std::string_view::npos)
++            continue;
++        key.key = row.firstScanCode + static_cast<int32>(index);
++        if (shifted)
++            key.bytes[0] = row.shifted[index];
++        break;
++    }
++    return key;
 +}
 +
 +void WebAutomationSession::platformSimulateKeyboardInteraction(WebPageProxy& page, KeyboardInteraction interaction, Variant<VirtualKey, CharKey>&& key)
@@ -135992,9 +136100,9 @@ index 0000000000000000000000000000000000000000..8d13dd2028d89cfc1476a7631e1ee0d6
 +        },
 +        [&](CharKey charKey) {
 +#if ENABLE(WEBDRIVER_KEYBOARD_GRAPHEME_CLUSTERS)
-+            native.bytes = charKey.utf8().toStdString();
++            native = nativeCharacterHaiku(charKey.utf8().toStdString(), m_currentModifiers & B_SHIFT_KEY);
 +#else
-+            native.bytes = bytesForCharacterHaiku(charKey, m_currentModifiers & B_SHIFT_KEY);
++            native = nativeCharacterHaiku(String::fromCodePoint(charKey).utf8().toStdString(), m_currentModifiers & B_SHIFT_KEY);
 +#endif
 +        });
 +
@@ -136018,9 +136126,9 @@ index 0000000000000000000000000000000000000000..8d13dd2028d89cfc1476a7631e1ee0d6
 +{
 +    // Element Send Keys: each character typed as a key down and up.
 +    for (char32_t character : StringView(keySequence).codePoints()) {
-+        auto bytes = bytesForCharacterHaiku(character, m_currentModifiers & B_SHIFT_KEY);
-+        sendKeyEventHaiku(page, true, 0, bytes, m_currentModifiers);
-+        sendKeyEventHaiku(page, false, 0, bytes, m_currentModifiers);
++        auto key = nativeCharacterHaiku(String::fromCodePoint(character).utf8().toStdString(), m_currentModifiers & B_SHIFT_KEY);
++        sendKeyEventHaiku(page, true, key.key, key.bytes, m_currentModifiers);
++        sendKeyEventHaiku(page, false, key.key, key.bytes, m_currentModifiers);
 +    }
 +}
 +
