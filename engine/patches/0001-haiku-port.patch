@@ -58124,10 +58124,10 @@ index 0000000000000000000000000000000000000000..976621f9ad3fa0e29c170d78ca6b7ee0
 +#endif
 diff --git a/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.cpp b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..2d19f3c83a5039bad81fe87a8d61ec4df2896986
+index 0000000000000000000000000000000000000000..3211da0853dee0a1d7db80b4af1bbbb82e1c8d57
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.cpp
-@@ -0,0 +1,3552 @@
+@@ -0,0 +1,3547 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -58902,19 +58902,23 @@ index 0000000000000000000000000000000000000000..2d19f3c83a5039bad81fe87a8d61ec4d
 +        m_layerBufferProxy = WTF::move(proxy);
 +    }
 +#endif
-+    IntSize frameSize()
++    struct PresentedFrame {
++        unsigned count { 0 };
++        int64_t pts { 0 };
++        IntSize size;
++    };
++
++    PresentedFrame lastPresentedFrame()
 +    {
 +        Locker locker { m_frameLock };
-+        return m_frameSize;
++        return m_lastPresentedFrame;
 +    }
 +    // A frame the compositor replaced before it showed it was not presented
 +    // (getVideoPlaybackQuality() counts it dropped): sites such as YouTube
 +    // choose a lighter stream when too many are, as they do in browsers
 +    // whose compositor reports them. SUMMIT_COUNT_UNSHOWN_FRAMES=0 counts
 +    // every frame handed to the compositor as presented, as before.
-+    unsigned presentedFrames() const { return m_presentedFrames - m_unshownFrames; }
-+    // Every picture handed on, for requestVideoFrameCallback.
-+    unsigned framesHandedOn() const { return m_presentedFrames; }
++    unsigned presentedFrames() { return lastPresentedFrame().count - m_unshownFrames; }
 +    unsigned droppedFrames() const { return m_droppedFrames + m_unshownFrames; }
 +    // For the browser's debugging tools (engineDescription()): the decoder
 +    // the last setup chose and how it went.
@@ -59505,15 +59509,18 @@ index 0000000000000000000000000000000000000000..2d19f3c83a5039bad81fe87a8d61ec4d
 +#if defined(HAIKU_MSE_COMPOSITED_VIDEO)
 +            if (frame.planesLayout) {
 +                presentPlanes(WTF::move(frame.pixels), *frame.planesLayout);
++                didPresent(frame);
 +                continue;
 +            }
 +#endif
 +#if USE(SKIA)
 +            auto imageInfo = SkImageInfo::Make(frame.size.width(), frame.size.height(), kBGRA_8888_SkColorType, kOpaque_SkAlphaType, SkColorSpace::MakeSRGB());
-+            present(SkImages::RasterFromData(imageInfo, WTF::move(frame.pixels), frame.rowBytes), frame.size);
-+#else
-+            present(frame.size);
++            auto image = SkImages::RasterFromData(imageInfo, WTF::move(frame.pixels), frame.rowBytes);
++            if (!image)
++                continue;
++            present(WTF::move(image));
 +#endif
++            didPresent(frame);
 +        }
 +    }
 +
@@ -59565,17 +59572,14 @@ index 0000000000000000000000000000000000000000..2d19f3c83a5039bad81fe87a8d61ec4d
 +        return buffer;
 +    }
 +
-+    void present(sk_sp<SkImage>&& image, IntSize size)
++    void present(sk_sp<SkImage>&& image)
 +    {
-+        if (!image)
-+            return;
 +#if defined(HAIKU_MSE_COMPOSITED_VIDEO)
 +        RefPtr<CoordinatedPlatformLayerBufferProxy> proxy;
 +#endif
 +        {
 +            Locker locker { m_frameLock };
 +            m_frame = image;
-+            m_frameSize = size;
 +#if defined(HAIKU_MSE_COMPOSITED_VIDEO)
 +            m_framePlanes = nullptr;
 +            proxy = m_layerBufferProxy;
@@ -59592,7 +59596,6 @@ index 0000000000000000000000000000000000000000..2d19f3c83a5039bad81fe87a8d61ec4d
 +            }
 +        }
 +#endif
-+        didPresent();
 +    }
 +
 +#if defined(HAIKU_MSE_COMPOSITED_VIDEO)
@@ -59604,7 +59607,6 @@ index 0000000000000000000000000000000000000000..2d19f3c83a5039bad81fe87a8d61ec4d
 +            m_frame = nullptr;
 +            m_framePlanes = planes;
 +            m_framePlanesLayout = layout;
-+            m_frameSize = IntSize(layout.width, layout.height);
 +            proxy = m_layerBufferProxy;
 +        }
 +        if (proxy && proxy->acceptsDisplayBufferHaiku()) {
@@ -59612,7 +59614,6 @@ index 0000000000000000000000000000000000000000..2d19f3c83a5039bad81fe87a8d61ec4d
 +                return makeUnique<CoordinatedPlatformLayerBufferPlanesHaiku>(sk_sp<SkData>(planes), layout);
 +            }));
 +        }
-+        didPresent();
 +    }
 +#endif
 +
@@ -59627,22 +59628,16 @@ index 0000000000000000000000000000000000000000..2d19f3c83a5039bad81fe87a8d61ec4d
 +            ++m_unshownFrames;
 +    }
 +#endif
-+#else
-+    void present(IntSize size)
++#endif
++
++    void didPresent(const DecodedFrame& frame)
 +    {
 +        {
 +            Locker locker { m_frameLock };
-+            m_frameSize = size;
++            m_lastPresentedFrame = { m_lastPresentedFrame.count + 1, frame.pts, frame.size };
 +        }
-+        didPresent();
-+    }
-+#endif
-+
-+    void didPresent()
-+    {
 +        m_presentedSinceFlush = true;
 +        m_hasFrameSinceFlush = true;
-+        ++m_presentedFrames;
 +        if (m_repaintQueued.exchange(true))
 +            return;
 +        callOnMainThread([weakPlayer = m_weakPlayer, this] {
@@ -59685,7 +59680,6 @@ index 0000000000000000000000000000000000000000..2d19f3c83a5039bad81fe87a8d61ec4d
 +    std::atomic<bool> m_enqueuedSinceFlush { false };
 +    std::atomic<bool> m_suspendedHaiku { false };
 +    std::atomic<unsigned> m_samplesSkippedHiddenHaiku { 0 };
-+    std::atomic<unsigned> m_presentedFrames { 0 };
 +    std::atomic<unsigned> m_droppedFrames { 0 };
 +    std::atomic<unsigned> m_unshownFrames { 0 };
 +    Lock m_frameLock;
@@ -59705,7 +59699,7 @@ index 0000000000000000000000000000000000000000..2d19f3c83a5039bad81fe87a8d61ec4d
 +#else
 +    Vector<uint8_t> m_scratch;
 +#endif
-+    IntSize m_frameSize WTF_GUARDED_BY_LOCK(m_frameLock);
++    PresentedFrame m_lastPresentedFrame WTF_GUARDED_BY_LOCK(m_frameLock);
 +    DecoderInfo m_decoderInfo WTF_GUARDED_BY_LOCK(m_frameLock);
 +};
 +
@@ -61105,7 +61099,7 @@ index 0000000000000000000000000000000000000000..2d19f3c83a5039bad81fe87a8d61ec4d
 +    RefPtr player = m_player.get();
 +    if (!player)
 +        return;
-+    auto size = m_videoRenderer->frameSize();
++    auto size = m_videoRenderer->lastPresentedFrame().size;
 +    if (!size.isEmpty() && FloatSize(size) != m_naturalSize) {
 +        m_naturalSize = FloatSize(size);
 +        player->sizeChanged();
@@ -61188,16 +61182,17 @@ index 0000000000000000000000000000000000000000..2d19f3c83a5039bad81fe87a8d61ec4d
 +
 +std::optional<VideoFrameMetadata> MediaPlayerPrivateHaikuMSE::videoFrameMetadata()
 +{
-+    unsigned presented = m_videoRenderer ? m_videoRenderer->framesHandedOn() : 0;
-+    if (!presented || presented == m_lastMetadataFrames)
++    if (!m_videoRenderer)
 +        return std::nullopt;
-+    m_lastMetadataFrames = presented;
++    auto frame = m_videoRenderer->lastPresentedFrame();
++    if (!frame.count || frame.count == m_lastMetadataFrames)
++        return std::nullopt;
++    m_lastMetadataFrames = frame.count;
 +    VideoFrameMetadata metadata;
-+    auto size = naturalSize();
-+    metadata.width = size.width();
-+    metadata.height = size.height();
-+    metadata.presentedFrames = presented;
-+    metadata.mediaTime = currentTime().toDouble();
++    metadata.width = frame.size.width();
++    metadata.height = frame.size.height();
++    metadata.presentedFrames = frame.count;
++    metadata.mediaTime = fromMicroseconds(frame.pts).toDouble();
 +    metadata.presentationTime = MonotonicTime::now().secondsSinceEpoch().seconds();
 +    metadata.expectedDisplayTime = metadata.presentationTime;
 +    return metadata;

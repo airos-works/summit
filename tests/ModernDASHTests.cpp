@@ -88,6 +88,24 @@ private:
         double advanced = end[0].get<double>() - start[0].get<double>();
         Require(std::abs(advanced / elapsed - rate) < 0.15, "media time advances at the requested playback rate");
     }
+    void CheckFrameTimestamps(Inspector& inspector)
+    {
+        inspector.Evaluate(R"JS(
+            window.frameTimes = [];
+            video.requestVideoFrameCallback(function collect(now, metadata) {
+                frameTimes.push(metadata.mediaTime);
+                if (frameTimes.length < 70)
+                    video.requestVideoFrameCallback(collect);
+            });
+        )JS");
+        WaitScript(inspector, "frameTimes.length === 70", "receive 70 MSE video frame callbacks");
+        // The fixture has one frame every 1/30 s. Allow for the decoder's
+        // microsecond precision and for callbacks that skip frames.
+        Require(inspector.Evaluate(R"JS(frameTimes.every((time, i) =>
+            Math.abs(time - Math.round(time * 30) / 30) <= 0.000001
+            && (!i || time > frameTimes[i - 1])))JS") == true,
+            "MSE callbacks report successive presentation timestamps from the 30 fps fixture");
+    }
     void WaitForIdleTimer()
     {
         auto team = JSON::parse(m_view->Diagnostics()).at("page").at("webProcess").get<team_id>();
@@ -167,6 +185,7 @@ private:
         Require(inspector.Evaluate("dashTest.loadMSE()") == true, "switch from direct DASH to JavaScript MediaSource");
         Ready(inspector); Play(inspector);
         WaitScript(inspector, "video.currentTime>1 && !window.mseError", "existing MSE audio/video playback remains functional");
+        CheckFrameTimestamps(inspector);
         CheckPlaybackRate(inspector, 2);
         CheckPlaybackRate(inspector, 0);
         CheckPlaybackRate(inspector, 1);
