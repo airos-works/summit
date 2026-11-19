@@ -104752,7 +104752,7 @@ index 0000000000000000000000000000000000000000..f32a1c303300b70614a2b227d27dc96e
 +    network
 +)
 diff --git a/Source/WebDriver/Session.cpp b/Source/WebDriver/Session.cpp
-index 950353c0d08c2b76cd70b754e719d8c4b8009d28..4ce456e0aea42799e24909f48e33646cc8cea96d 100644
+index 950353c0d08c2b76cd70b754e719d8c4b8009d28..886a2886b820f0145ba7e43e3cc7c8b886d58622 100644
 --- a/Source/WebDriver/Session.cpp
 +++ b/Source/WebDriver/Session.cpp
 @@ -2400,6 +2400,15 @@ void Session::elementSendKeys(const String& elementID, const String& text, Funct
@@ -104798,8 +104798,55 @@ index 950353c0d08c2b76cd70b754e719d8c4b8009d28..4ce456e0aea42799e24909f48e33646c
  void Session::getAllCookies(Function<void(CommandResult&&)>&& completionHandler)
  {
      if (!m_currentBrowsingContext) {
+@@ -3017,11 +3046,16 @@ void Session::performActions(Vector<Vector<Action>>&& actionsByTick, Function<vo
+                 case Action::Type::Pointer: {
+                     switch (action.subtype) {
+                     case Action::Subtype::PointerUp:
+-                        currentState.pressedButton = std::nullopt;
++                        if (!currentState.pressedButtons.removeFirst(action.button.value()))
++                            break;
++                        currentState.interactionButton = action.button;
+                         currentState.mouseInteraction = MouseInteraction::Up;
+                         break;
+                     case Action::Subtype::PointerDown:
+-                        currentState.pressedButton = action.button.value();
++                        if (currentState.pressedButtons.contains(action.button.value()))
++                            break;
++                        currentState.pressedButtons.append(action.button.value());
++                        currentState.interactionButton = action.button;
+                         currentState.mouseInteraction = MouseInteraction::Down;
+                         break;
+                     case Action::Subtype::PointerMove: {
+@@ -3034,6 +3068,7 @@ void Session::performActions(Vector<Vector<Action>>&& actionsByTick, Function<vo
+                         state->setObject("location"_s, WTF::move(location));
+                         if (action.origin->type == PointerOrigin::Type::Element)
+                             state->setString("nodeHandle"_s, action.origin->elementID.value());
++                        currentState.interactionButton = currentState.pressedButtons.isEmpty() ? std::nullopt : std::optional { currentState.pressedButtons.last() };
+                         currentState.mouseInteraction = MouseInteraction::Move;
+                         [[fallthrough]];
+                     }
+@@ -3042,15 +3077,16 @@ void Session::performActions(Vector<Vector<Action>>&& actionsByTick, Function<vo
+                             state->setDouble("duration"_s, action.duration.value());
+                         break;
+                     case Action::Subtype::PointerCancel:
+-                        currentState.pressedButton = std::nullopt;
++                        currentState.pressedButtons.clear();
++                        currentState.interactionButton.reset();
+                         break;
+                     case Action::Subtype::KeyUp:
+                     case Action::Subtype::KeyDown:
+                     case Action::Subtype::Scroll:
+                         ASSERT_NOT_REACHED();
+                     }
+-                    if (currentState.pressedButton)
+-                        state->setString("pressedButton"_s, mouseButtonForAutomation(currentState.pressedButton.value()));
++                    if (currentState.interactionButton)
++                        state->setString("pressedButton"_s, mouseButtonForAutomation(currentState.interactionButton.value()));
+                     if (currentState.mouseInteraction)
+                         state->setString("mouseInteraction"_s, mouseInteractionForAutomation(currentState.mouseInteraction.value()));
+                     break;
 diff --git a/Source/WebDriver/Session.h b/Source/WebDriver/Session.h
-index f998209d4d5cea50ae43da7f2a0ed42c1927f669..6580e033f96a8345e436df4063e370450d3c53ab 100644
+index f998209d4d5cea50ae43da7f2a0ed42c1927f669..c750a7cca5c327642c3cd6e062aac9518c6c51d0 100644
 --- a/Source/WebDriver/Session.h
 +++ b/Source/WebDriver/Session.h
 @@ -146,6 +146,8 @@ public:
@@ -104811,6 +104858,16 @@ index f998209d4d5cea50ae43da7f2a0ed42c1927f669..6580e033f96a8345e436df4063e37045
      void getAllCookies(Function<void(CommandResult&&)>&&);
      void getNamedCookie(const String& name, Function<void(CommandResult&&)>&&);
      void addCookie(const Cookie&, Function<void(CommandResult&&)>&&);
+@@ -254,7 +256,8 @@ private:
+ 
+         Type type;
+         String subtype;
+-        std::optional<MouseButton> pressedButton;
++        Vector<MouseButton> pressedButtons;
++        std::optional<MouseButton> interactionButton;
+         std::optional<MouseInteraction> mouseInteraction;
+         std::optional<String> pressedKey;
+         HashSet<String> pressedVirtualKeys;
 diff --git a/Source/WebDriver/SessionHost.h b/Source/WebDriver/SessionHost.h
 index 464e50d5a70645d78b8316b42cc37c4a0e84dc50..96f7dfadb76922b64235c7db6e2065d133e2a40f 100644
 --- a/Source/WebDriver/SessionHost.h
@@ -130009,10 +130066,10 @@ index 599cc694a716da0c05e7104be0ec919146f99913..2bf6d2fbb383673a8c2e10bb3fe3e2bb
      // to the visible viewport), so fall back to taking the snapshot in the WebProcess whenever we need pixels outside the
 diff --git a/Source/WebKit/UIProcess/Automation/haiku/WebAutomationSessionHaiku.cpp b/Source/WebKit/UIProcess/Automation/haiku/WebAutomationSessionHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..9f982ff2e707a4ecb369a180ab75879309368a2a
+index 0000000000000000000000000000000000000000..8d13dd2028d89cfc1476a7631e1ee0d6fba78dda
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Automation/haiku/WebAutomationSessionHaiku.cpp
-@@ -0,0 +1,476 @@
+@@ -0,0 +1,481 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -130149,7 +130206,7 @@ index 0000000000000000000000000000000000000000..9f982ff2e707a4ecb369a180ab758793
 +    return buttons;
 +}
 +
-+static void sendMouseEventHaiku(WebPageProxy& page, uint32 what, uint32 buttons, uint32 previousButtons, int32 clicks, const IntPoint& location, uint32 modifiers)
++static void sendMouseEventHaiku(WebPageProxy& page, uint32 what, uint32 buttons, uint32 previousButtons, int32 clicks, const IntPoint& location, uint32 modifiers, BPoint movement = { })
 +{
 +    BMessage message(what);
 +    message.AddInt64("when", system_time());
@@ -130159,7 +130216,7 @@ index 0000000000000000000000000000000000000000..9f982ff2e707a4ecb369a180ab758793
 +    if (what != B_MOUSE_MOVED)
 +        message.AddInt32("clicks", clicks);
 +    BPoint position(location.x(), location.y());
-+    if (auto event = NativeWebMouseEvent::create(message, position, position, previousButtons, BPoint()))
++    if (auto event = NativeWebMouseEvent::create(message, position, position, previousButtons, movement))
 +        page.handleMouseEvent(event.releaseNonNull());
 +}
 +
@@ -130191,9 +130248,13 @@ index 0000000000000000000000000000000000000000..9f982ff2e707a4ecb369a180ab758793
 +    };
 +
 +    switch (interaction) {
-+    case MouseInteraction::Move:
-+        sendMouseEventHaiku(page, B_MOUSE_MOVED, pressed, pressed, 0, locationInView, modifiers);
++    case MouseInteraction::Move: {
++        BPoint movement;
++        if (m_lastPosition)
++            movement = BPoint(locationInView.x() - m_lastPosition->x(), locationInView.y() - m_lastPosition->y());
++        sendMouseEventHaiku(page, B_MOUSE_MOVED, pressed, pressed, 0, locationInView, modifiers, movement);
 +        break;
++    }
 +    case MouseInteraction::Down:
 +        // A press with no button is the primary one, as in the GTK port.
 +        if (!mask)
@@ -130227,6 +130288,7 @@ index 0000000000000000000000000000000000000000..9f982ff2e707a4ecb369a180ab758793
 +        up(2);
 +        break;
 +    }
++    updateLastPosition(locationInView, 16);
 +}
 +
 +#endif // ENABLE(WEBDRIVER_MOUSE_INTERACTIONS)
