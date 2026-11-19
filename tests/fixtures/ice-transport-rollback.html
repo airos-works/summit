@@ -1,0 +1,55 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>ICE transport lifetime after rolling back an offer</title>
+<pre id="result"></pre>
+<script>
+async function checkRollback(startWithStableAudio) {
+    const options = { bundlePolicy: 'max-compat', iceServers: [] };
+    const offerer = new RTCPeerConnection(options);
+    const answerer = new RTCPeerConnection(options);
+    let timer;
+    try {
+        const audio = offerer.addTransceiver('audio');
+        if (startWithStableAudio) {
+            await offerer.setLocalDescription();
+            await answerer.setRemoteDescription(offerer.localDescription);
+            await answerer.setLocalDescription();
+            await offerer.setRemoteDescription(answerer.localDescription);
+        }
+        const stable = audio.sender.transport?.iceTransport;
+        const video = offerer.addTransceiver('video');
+        await offerer.setLocalDescription();
+        const audioIce = audio.sender.transport.iceTransport;
+        const videoIce = video.sender.transport.iceTransport;
+        const retired = [...new Set([audioIce, videoIce])].filter(ice => ice !== stable);
+        const closed = retired.map(ice => new Promise(resolve => {
+            ice.addEventListener('statechange', () => {
+                if (ice.state === 'closed')
+                    resolve();
+            });
+        }));
+        await offerer.setLocalDescription({ type: 'rollback' });
+        await Promise.race([
+            Promise.all(closed),
+            new Promise((_, reject) => {
+                timer = setTimeout(() => reject(new Error('ICE transport stayed open after rollback')), 5000);
+            })
+        ]);
+        return offerer.signalingState === 'stable' && !video.sender.transport
+            && (startWithStableAudio
+                ? !!stable && audio.sender.transport?.iceTransport === stable && stable.state !== 'closed'
+                : !audio.sender.transport && audioIce !== videoIce)
+            && retired.every(ice => ice.state === 'closed' && ice.getSelectedCandidatePair() === null);
+    } finally {
+        clearTimeout(timer);
+        offerer.close();
+        answerer.close();
+    }
+}
+
+(async () => {
+    const initialOffer = await checkRollback(false);
+    const subsequentOffer = await checkRollback(true);
+    document.getElementById('result').textContent = JSON.stringify({ initialOffer, subsequentOffer });
+})().catch(error => { document.getElementById('result').textContent = String(error); });
+</script>

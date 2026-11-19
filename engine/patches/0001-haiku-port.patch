@@ -15046,7 +15046,7 @@ index 7d4633cbea43f5816021e3f64c405d33e310d1bc..274f2b98e3a444860e9e7bcdc8a2ef52
 +    [CallWith=RelevantScriptExecutionContext] RTCEncodedVideoFrameMetadata getMetadata();
  };
 diff --git a/Source/WebCore/Modules/mediastream/RTCIceTransport.cpp b/Source/WebCore/Modules/mediastream/RTCIceTransport.cpp
-index f1de2d1b6ad86b69433d830cd68c02de61497d3b..76ce6b942b7be701680b65461098f73a80136abb 100644
+index f1de2d1b6ad86b69433d830cd68c02de61497d3b..5558c1362b5aad6673c018be7efdfde10e5ebb3e 100644
 --- a/Source/WebCore/Modules/mediastream/RTCIceTransport.cpp
 +++ b/Source/WebCore/Modules/mediastream/RTCIceTransport.cpp
 @@ -39,15 +39,16 @@ namespace WebCore {
@@ -15090,8 +15090,19 @@ index f1de2d1b6ad86b69433d830cd68c02de61497d3b..76ce6b942b7be701680b65461098f73a
  void RTCIceTransport::onStateChanged(RTCIceTransportState state)
  {
      queueTaskKeepingObjectAlive(*this, TaskSource::Networking, [state](auto& transport) mutable {
+@@ -85,7 +100,9 @@ void RTCIceTransport::onStateChanged(RTCIceTransportState state)
+             return;
+ 
+         transport.m_transportState = state;
+-        if (transport.m_transportState == RTCIceTransportState::Failed)
++        if (state == RTCIceTransportState::Closed)
++            transport.m_isStopped = true;
++        if (state == RTCIceTransportState::Failed || state == RTCIceTransportState::Closed)
+             transport.m_selectedCandidatePair = { };
+ 
+         if (RefPtr connection = transport.connection())
 diff --git a/Source/WebCore/Modules/mediastream/RTCIceTransport.h b/Source/WebCore/Modules/mediastream/RTCIceTransport.h
-index f08606300433c3fe4ff5a02424d63ad7bfdd2476..323a01ee393afd903339f6a4b3db5f302a818169 100644
+index f08606300433c3fe4ff5a02424d63ad7bfdd2476..23c89dc3064ac1c4ac21d3a768dd00264b3e8521 100644
 --- a/Source/WebCore/Modules/mediastream/RTCIceTransport.h
 +++ b/Source/WebCore/Modules/mediastream/RTCIceTransport.h
 @@ -37,6 +37,7 @@
@@ -15111,18 +15122,19 @@ index f08606300433c3fe4ff5a02424d63ad7bfdd2476..323a01ee393afd903339f6a4b3db5f30
      ~RTCIceTransport();
  
      // ContextDestructionObserver.
-@@ -59,6 +60,10 @@ public:
+@@ -59,6 +60,11 @@ public:
      void deref() const final { RefCounted::deref(); }
      USING_CAN_MAKE_WEAKPTR(EventTarget);
  
 +    RTCIceRole role() const { return m_role; }
 +    void didApplyAnswer();
++    void checkForClosure() { m_backend->checkForClosure(); }
 +    void close() { stop(); }
 +    RTCIceComponent component() const { return m_component; }
      RTCIceTransportState state() const { return m_transportState; }
      RTCIceGatheringState gatheringState() const { return m_gatheringState; }
  
-@@ -72,7 +77,7 @@ public:
+@@ -72,7 +78,7 @@ public:
      std::optional<CandidatePair> NODELETE getSelectedCandidatePair();
  
  private:
@@ -15131,7 +15143,7 @@ index f08606300433c3fe4ff5a02424d63ad7bfdd2476..323a01ee393afd903339f6a4b3db5f30
  
      // EventTarget
      enum EventTargetInterfaceType eventTargetInterface() const final { return EventTargetInterfaceType::RTCIceTransport; }
-@@ -85,10 +90,14 @@ private:
+@@ -85,10 +91,14 @@ private:
      bool NODELETE virtualHasPendingActivity() const final;
  
      // RTCIceTransportBackendClient
@@ -15162,7 +15174,7 @@ index fdeade240059e1b65b47b3f717ac7566601d26ab..54e502a214d66a110681f107a07073e5
      readonly attribute IceGatheringState gatheringState;
      // FIXME 169662: missing sequence<RTCIceCandidate> getLocalCandidates();
 diff --git a/Source/WebCore/Modules/mediastream/RTCIceTransportBackend.h b/Source/WebCore/Modules/mediastream/RTCIceTransportBackend.h
-index b59f580923c3e1a34cfe5d63dc1ed78b5300940d..c7b74ee097330e49f64563ce083881f48602b9e6 100644
+index b59f580923c3e1a34cfe5d63dc1ed78b5300940d..6128b942200f87b939de2801bd22cbf405acecbb 100644
 --- a/Source/WebCore/Modules/mediastream/RTCIceTransportBackend.h
 +++ b/Source/WebCore/Modules/mediastream/RTCIceTransportBackend.h
 @@ -27,6 +27,7 @@
@@ -15181,16 +15193,17 @@ index b59f580923c3e1a34cfe5d63dc1ed78b5300940d..c7b74ee097330e49f64563ce083881f4
  };
  
  class RTCIceTransportBackend {
-@@ -49,6 +51,7 @@ public:
+@@ -49,6 +51,8 @@ public:
  
      virtual void registerClient(RTCIceTransportBackendClient&) = 0;
      virtual void unregisterClient() = 0;
 +    virtual RTCIceRole startObservingRole() = 0;
++    virtual void checkForClosure() = 0;
  };
  
  inline bool operator==(const RTCIceTransportBackend& a, const RTCIceTransportBackend& b)
 diff --git a/Source/WebCore/Modules/mediastream/RTCPeerConnection.cpp b/Source/WebCore/Modules/mediastream/RTCPeerConnection.cpp
-index 7369cc721d5ac7c067e7fd397758046c8cd80dfc..dbeba113ada744b4289436e92a6e87126983c1e3 100644
+index 7369cc721d5ac7c067e7fd397758046c8cd80dfc..39f0ed0c754898fe70100d029265ff473c3f4e07 100644
 --- a/Source/WebCore/Modules/mediastream/RTCPeerConnection.cpp
 +++ b/Source/WebCore/Modules/mediastream/RTCPeerConnection.cpp
 @@ -473,7 +473,7 @@ void RTCPeerConnection::setLocalDescription(RTCLocalSessionDescriptionInit&& loc
@@ -15220,7 +15233,69 @@ index 7369cc721d5ac7c067e7fd397758046c8cd80dfc..dbeba113ada744b4289436e92a6e8712
  
      return true;
  }
-@@ -1242,19 +1244,19 @@ Document* RTCPeerConnection::document()
+@@ -944,10 +946,14 @@ void RTCPeerConnection::updateIceConnectionState(RTCIceConnectionState)
+     });
+ }
+ 
+-static bool NODELETE isIceTransportUsedByTransceiver(const RTCIceTransport& iceTransport, RTCRtpTransceiver& transceiver)
++bool RTCPeerConnection::isIceTransportInUse(const RTCIceTransport& iceTransport) const
+ {
+-    auto* dtlsTransport = transceiver.sender().transport();
+-    return dtlsTransport && &dtlsTransport->iceTransport() == &iceTransport;
++    if (m_sctpTransport && &m_sctpTransport->transport().iceTransport() == &iceTransport)
++        return true;
++    return std::ranges::any_of(m_transceiverSet.list(), [&](auto& transceiver) {
++        auto* dtlsTransport = transceiver->sender().transport();
++        return dtlsTransport && &dtlsTransport->iceTransport() == &iceTransport;
++    });
+ }
+ 
+ // https://w3c.github.io/webrtc-pc/#rtcpeerconnectionstate-enum
+@@ -957,13 +963,7 @@ RTCPeerConnectionState RTCPeerConnection::computeConnectionState()
+         return RTCPeerConnectionState::Closed;
+ 
+     auto iceTransports = m_iceTransports;
+-    iceTransports.removeAllMatching([&](auto& iceTransport) {
+-        if (m_sctpTransport && &m_sctpTransport->transport().iceTransport() == iceTransport.ptr())
+-            return false;
+-        return std::ranges::all_of(m_transceiverSet.list(), [&iceTransport](auto& transceiver) {
+-            return !isIceTransportUsedByTransceiver(iceTransport.get(), transceiver);
+-        });
+-    });
++    iceTransports.removeAllMatching([&](auto& iceTransport) { return !isIceTransportInUse(iceTransport); });
+ 
+     auto dtlsTransports = m_dtlsTransports;
+     dtlsTransports.removeAllMatching([&](auto& dtlsTransport) {
+@@ -1011,13 +1011,7 @@ RTCIceConnectionState RTCPeerConnection::computeIceConnectionStateFromIceTranspo
+ 
+     auto iceTransports = m_iceTransports;
+ 
+-    iceTransports.removeAllMatching([&](auto& iceTransport) {
+-        if (m_sctpTransport && &m_sctpTransport->transport().iceTransport() == iceTransport.ptr())
+-            return false;
+-        return std::ranges::all_of(m_transceiverSet.list(), [&iceTransport](auto& transceiver) {
+-            return !isIceTransportUsedByTransceiver(iceTransport.get(), transceiver);
+-        });
+-    });
++    iceTransports.removeAllMatching([&](auto& iceTransport) { return !isIceTransportInUse(iceTransport); });
+ 
+     if (std::ranges::any_of(iceTransports, [](auto& transport) { return transport->state() == RTCIceTransportState::Failed; }))
+         return RTCIceConnectionState::Failed;
+@@ -1053,6 +1047,13 @@ void RTCPeerConnection::processIceTransportStateChange(RTCIceTransport& iceTrans
+ 
+ void RTCPeerConnection::processIceTransportChanges()
+ {
++    // An answer may bundle media onto one transport, or rollback may discard
++    // a newly offered transport. Let the backend confirm which ones closed.
++    for (auto& transport : m_iceTransports) {
++        if (transport->state() != RTCIceTransportState::Closed && !isIceTransportInUse(transport))
++            transport->checkForClosure();
++    }
++
+     auto newIceConnectionState = computeIceConnectionStateFromIceTransports();
+     bool iceConnectionStateChanged = m_iceConnectionState != newIceConnectionState;
+     m_iceConnectionState = newIceConnectionState;
+@@ -1242,19 +1243,19 @@ Document* RTCPeerConnection::document()
      return downcast<Document>(scriptExecutionContext());
  }
  
@@ -15243,7 +15318,7 @@ index 7369cc721d5ac7c067e7fd397758046c8cd80dfc..dbeba113ada744b4289436e92a6e8712
  {
      if (!backend)
          return nullptr;
-@@ -1267,7 +1269,7 @@ RefPtr<RTCDtlsTransport> RTCPeerConnection::getOrCreateDtlsTransport(std::unique
+@@ -1267,7 +1268,7 @@ RefPtr<RTCDtlsTransport> RTCPeerConnection::getOrCreateDtlsTransport(std::unique
      if (index == notFound) {
          index = m_dtlsTransports.size();
          auto iceTransportBackend = backend->iceTransportBackend();
@@ -15252,7 +15327,7 @@ index 7369cc721d5ac7c067e7fd397758046c8cd80dfc..dbeba113ada744b4289436e92a6e8712
      }
  
      return m_dtlsTransports[index].copyRef();
-@@ -1300,14 +1302,28 @@ void RTCPeerConnection::updateDescriptions(PeerConnectionBackend::DescriptionSta
+@@ -1300,14 +1301,28 @@ void RTCPeerConnection::updateDescriptions(PeerConnectionBackend::DescriptionSta
      }
  }
  
@@ -15283,7 +15358,7 @@ index 7369cc721d5ac7c067e7fd397758046c8cd80dfc..dbeba113ada744b4289436e92a6e8712
      }
  }
  
-@@ -1338,7 +1354,8 @@ void RTCPeerConnection::updateSctpBackend(std::unique_ptr<RTCSctpTransportBacken
+@@ -1338,7 +1353,8 @@ void RTCPeerConnection::updateSctpBackend(std::unique_ptr<RTCSctpTransportBacken
          if (!context)
              return;
  
@@ -15294,7 +15369,7 @@ index 7369cc721d5ac7c067e7fd397758046c8cd80dfc..dbeba113ada744b4289436e92a6e8712
              return;
          sctpTransport = RTCSctpTransport::create(*context, makeUniqueRefFromNonNullUniquePtr(WTF::move(sctpBackend)), dtlsTransport.releaseNonNull());
 diff --git a/Source/WebCore/Modules/mediastream/RTCPeerConnection.h b/Source/WebCore/Modules/mediastream/RTCPeerConnection.h
-index b9764722013300cd6891da5c51d484e6951c9867..e1482aec8fb309eed583548fc2915c0ab3536b5b 100644
+index b9764722013300cd6891da5c51d484e6951c9867..27ecd36e0e802393fffdf324cd0bd6832f107494 100644
 --- a/Source/WebCore/Modules/mediastream/RTCPeerConnection.h
 +++ b/Source/WebCore/Modules/mediastream/RTCPeerConnection.h
 @@ -43,6 +43,7 @@
@@ -15313,7 +15388,15 @@ index b9764722013300cd6891da5c51d484e6951c9867..e1482aec8fb309eed583548fc2915c0a
      void updateDescriptions(PeerConnectionBackend::DescriptionStates&&);
      void updateTransceiversAfterSuccessfulLocalDescription();
      void updateTransceiversAfterSuccessfulRemoteDescription();
-@@ -254,8 +256,8 @@ private:
+@@ -240,6 +242,7 @@ private:
+     bool NODELETE virtualHasPendingActivity() const final;
+ 
+     bool updateIceConnectionStateFromIceTransports();
++    bool isIceTransportInUse(const RTCIceTransport&) const;
+     RTCIceConnectionState computeIceConnectionStateFromIceTransports();
+     RTCPeerConnectionState computeConnectionState();
+ 
+@@ -254,8 +257,8 @@ private:
  
      ExceptionOr<Vector<MediaEndpointConfiguration::IceServerInfo>> iceServersFromConfiguration(RTCConfiguration& newConfiguration, const RTCConfiguration* existingConfiguration, bool isLocalDescriptionSet);
  
@@ -15519,7 +15602,7 @@ index a6edf51e1d68e899cc0b602bad3d079629988792..54b772070a7c1a12262ccb90206ff7cf
      WeakPtr<RTCRtpScriptTransformer> m_transformer;
  };
 diff --git a/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCIceTransportBackend.cpp b/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCIceTransportBackend.cpp
-index cd57e0202fb108aefddc2db4bafc7a565fde7588..4de35fc8c2739c6bbb673c065ca0825ec1a579b4 100644
+index cd57e0202fb108aefddc2db4bafc7a565fde7588..c632c59a29ecf5184a6e2a9920bac805e2a1e630 100644
 --- a/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCIceTransportBackend.cpp
 +++ b/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCIceTransportBackend.cpp
 @@ -35,6 +35,7 @@
@@ -15530,15 +15613,16 @@ index cd57e0202fb108aefddc2db4bafc7a565fde7588..4de35fc8c2739c6bbb673c065ca0825e
  
  ALLOW_UNUSED_PARAMETERS_END
  
-@@ -84,6 +85,7 @@ public:
+@@ -84,6 +85,8 @@ public:
      static Ref<LibWebRTCIceTransportBackendObserver> create(RTCIceTransportBackendClient& client, Ref<webrtc::IceTransportInterface> backend) { return adoptRef(*new LibWebRTCIceTransportBackendObserver(client, WTF::move(backend))); }
  
      void start();
 +    RTCIceRole startObservingRole();
++    void checkForClosure();
      void stop();
  
  private:
-@@ -147,6 +149,39 @@ void LibWebRTCIceTransportBackendObserver::start()
+@@ -147,6 +150,53 @@ void LibWebRTCIceTransportBackendObserver::start()
      });
  }
  
@@ -15575,10 +15659,24 @@ index cd57e0202fb108aefddc2db4bafc7a565fde7588..4de35fc8c2739c6bbb673c065ca0825e
 +    });
 +}
 +
++void LibWebRTCIceTransportBackendObserver::checkForClosure()
++{
++    LibWebRTCProvider::callOnWebRTCNetworkThread([protectedThis = Ref { *this }] {
++        // libwebrtc retains transports needed for rollback. Clear() detaches
++        // the public handle only when the native transport is actually retired.
++        if (protectedThis->m_backend->internal())
++            return;
++        callOnMainThread([protectedThis] {
++            if (RefPtr client = protectedThis->m_client.get())
++                client->onStateChanged(RTCIceTransportState::Closed);
++        });
++    });
++}
++
  void LibWebRTCIceTransportBackendObserver::stop()
  {
      m_client = nullptr;
-@@ -154,6 +189,7 @@ void LibWebRTCIceTransportBackendObserver::stop()
+@@ -154,6 +204,7 @@ void LibWebRTCIceTransportBackendObserver::stop()
          auto* internal = m_backend->internal();
          if (!internal)
              return;
@@ -15586,7 +15684,16 @@ index cd57e0202fb108aefddc2db4bafc7a565fde7588..4de35fc8c2739c6bbb673c065ca0825e
          internal->RemoveGatheringStateCallback(this);
          internal->UnsubscribeNetworkRouteChanged(this);
      });
-@@ -210,6 +246,11 @@ void LibWebRTCIceTransportBackend::registerClient(RTCIceTransportBackendClient&
+@@ -183,7 +234,7 @@ void LibWebRTCIceTransportBackendObserver::onNetworkRouteChanged(std::optional<w
+ 
+ void LibWebRTCIceTransportBackendObserver::processSelectedCandidatePairChanged(const webrtc::Candidate& local, const webrtc::Candidate& remote)
+ {
+-    callOnMainThread([protectedThis = Ref { *this }, localSdp = fromStdString(local.ToString()).isolatedCopy(), remoteSdp = fromStdString(remote.ToString()).isolatedCopy(), localFields = convertIceCandidate(local).isolatedCopy(), remoteFields = convertIceCandidate(remote).isolatedCopy()]() mutable {
++    callOnMainThread([protectedThis = Ref { *this }, localSdp = fromStdString(local.ToCandidateAttribute(true)).isolatedCopy(), remoteSdp = fromStdString(remote.ToCandidateAttribute(true)).isolatedCopy(), localFields = convertIceCandidate(local).isolatedCopy(), remoteFields = convertIceCandidate(remote).isolatedCopy()]() mutable {
+         RefPtr client = protectedThis->m_client.get();
+         if (!client)
+             return;
+@@ -210,6 +261,16 @@ void LibWebRTCIceTransportBackend::registerClient(RTCIceTransportBackendClient&
      m_observer->start();
  }
  
@@ -15595,18 +15702,24 @@ index cd57e0202fb108aefddc2db4bafc7a565fde7588..4de35fc8c2739c6bbb673c065ca0825e
 +    return m_observer->startObservingRole();
 +}
 +
++void LibWebRTCIceTransportBackend::checkForClosure()
++{
++    m_observer->checkForClosure();
++}
++
  void LibWebRTCIceTransportBackend::unregisterClient()
  {
      ASSERT(m_observer);
 diff --git a/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCIceTransportBackend.h b/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCIceTransportBackend.h
-index 6a9c7864add53e69952566785f5c2e47f30214b4..171dc2a0eb5c4502479b17257aaed3271f6204f7 100644
+index 6a9c7864add53e69952566785f5c2e47f30214b4..28b51b4da43b45650915fe15c30183b2a0b7ef67 100644
 --- a/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCIceTransportBackend.h
 +++ b/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCIceTransportBackend.h
-@@ -46,6 +46,7 @@ private:
+@@ -46,6 +46,8 @@ private:
      const void* backend() const final { return m_backend.ptr(); }
      void registerClient(RTCIceTransportBackendClient&) final;
      void unregisterClient() final;
 +    RTCIceRole startObservingRole() final;
++    void checkForClosure() final;
  
      const Ref<webrtc::IceTransportInterface> m_backend;
      const RefPtr<LibWebRTCIceTransportBackendObserver> m_observer;
