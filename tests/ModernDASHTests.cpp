@@ -1,6 +1,7 @@
 // Real native DASH playback, transport failures and decoder regression checks.
 #define SUMMIT_PDF_HELPERS_ONLY
 #include "ModernPDFTests.cpp"
+#include <WebKit/WebKitDiagnostics.h>
 #include <cmath>
 
 class DASHTests final : public BApplication {
@@ -76,6 +77,30 @@ private:
         inspector.Evaluate("(()=>{window.playResult=null;dashTest.play().then(r=>window.playResult=r);return true})()");
         WaitScript(inspector, "window.playResult===true", "DASH play promise resolves");
     }
+    void CheckPlaybackRate(Inspector& inspector, double rate)
+    {
+        inspector.Evaluate("video.playbackRate=" + std::to_string(rate));
+        auto sample = [&] { return inspector.Evaluate("[video.currentTime,performance.now()/1000]"); };
+        auto start = sample();
+        snooze(1000000);
+        auto end = sample();
+        double elapsed = end[1].get<double>() - start[1].get<double>();
+        double advanced = end[0].get<double>() - start[0].get<double>();
+        Require(std::abs(advanced / elapsed - rate) < 0.15, "media time advances at the requested playback rate");
+    }
+    void WaitForIdleTimer()
+    {
+        auto team = JSON::parse(m_view->Diagnostics()).at("page").at("webProcess").get<team_id>();
+        Wait([&] {
+            auto report = JSON::parse(BWebKitProcessDiagnostics(team, R"({"topics":"media"})"));
+            for (const auto& element : report.at("media").at("elements")) {
+                if (element.at("connected") == true && element.at("paused") == true
+                    && element.at("player").at("playbackTimerActive") == false)
+                    return true;
+            }
+            return false;
+        }, "paused on-demand DASH stops its playback timer");
+    }
     void Click(Inspector& inspector, const char* id)
     {
         auto point = inspector.Evaluate("(()=>{const r=document.getElementById(" + JSON(id).dump() + ").getBoundingClientRect();return [r.x+r.width/2,r.y+r.height/2]})()");
@@ -108,8 +133,12 @@ private:
         Click(inspector, "play");
         WaitScript(inspector, "video.currentTime>2 && !video.muted && video.getVideoPlaybackQuality().totalVideoFrames>30", "native user gesture plays DASH video with audio enabled");
         snooze(700000); Capture(m_capture);
+        CheckPlaybackRate(inspector, 2);
+        CheckPlaybackRate(inspector, 0.5);
+        CheckPlaybackRate(inspector, 1);
         inspector.Evaluate("video.pause()"); auto time = inspector.Evaluate("video.currentTime").get<double>(); snooze(600000);
         Require(std::abs(inspector.Evaluate("video.currentTime").get<double>() - time) < 0.05, "paused DASH clock remains stable");
+        WaitForIdleTimer();
         Seek(inspector, 12.4); Require(inspector.Evaluate("dashTest.pixels().colored>500") == true, "seeking retains a decoded video picture");
         Seek(inspector, 18); Seek(inspector, 16); Play(inspector);
         WaitScript(inspector, "video.ended && video.currentTime===18", "finite DASH reaches a clean ended state");
@@ -128,7 +157,9 @@ private:
         WaitScript(inspector, "video.currentTime>1", "DASH requests preserve the private context's HTTP session cookie");
         Load(inspector, "live"); Ready(inspector);
         Require(inspector.Evaluate("video.duration===Infinity && video.seekable.length===1 && video.seekable.end(0)<=10") == true, "live DASH exposes an infinite duration and a finite live window");
-        auto end = inspector.Evaluate("video.seekable.end(0)").get<double>(); Play(inspector);
+        auto end = inspector.Evaluate("video.seekable.end(0)").get<double>();
+        WaitScript(inspector, "video.paused && video.seekable.end(0)>" + std::to_string(end + 1), "paused live DASH still refreshes its seekable window");
+        Play(inspector);
         WaitScript(inspector, "video.seekable.end(0)>" + std::to_string(end + 2) + " && video.currentTime>3", "live MPD refresh advances playback and the seekable window");
         inspector.Evaluate("video.pause()");
         Require(inspector.Evaluate("dashTest.clear()") == true, "cancel the active live media load");
@@ -136,6 +167,9 @@ private:
         Require(inspector.Evaluate("dashTest.loadMSE()") == true, "switch from direct DASH to JavaScript MediaSource");
         Ready(inspector); Play(inspector);
         WaitScript(inspector, "video.currentTime>1 && !window.mseError", "existing MSE audio/video playback remains functional");
+        CheckPlaybackRate(inspector, 2);
+        CheckPlaybackRate(inspector, 0);
+        CheckPlaybackRate(inspector, 1);
         Navigate(m_base + "/policy.html?run=policy-" + std::to_string(getpid()));
         WaitScript(inspector, "typeof dashTest==='object'", "media policy fixture is ready"); Load(inspector, "fast");
         WaitScript(inspector, "video.error!==null", "DASH respects the document's media-src policy");

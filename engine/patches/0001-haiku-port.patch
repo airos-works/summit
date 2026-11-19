@@ -46164,10 +46164,10 @@ index 0000000000000000000000000000000000000000..69785063c0c8d3727bd9867ed0b42d88
 +}
 diff --git a/Source/WebCore/platform/graphics/haiku/DashPlaybackHaiku.cpp b/Source/WebCore/platform/graphics/haiku/DashPlaybackHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..f8a6846155910b7b8f77397236e2918fb175c9b6
+index 0000000000000000000000000000000000000000..2bc92bfcb41d0691ea9e40acd99e78d80f9a1bad
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/DashPlaybackHaiku.cpp
-@@ -0,0 +1,495 @@
+@@ -0,0 +1,503 @@
 +/* Copyright (C) 2026 air/OS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "DashPlaybackHaiku.h"
 +#include "HLSPlaylistHaiku.h"
@@ -46613,6 +46613,14 @@ index 0000000000000000000000000000000000000000..f8a6846155910b7b8f77397236e2918f
 +    }
 +    fail(m_hls ? "Could not load an HLS resource" : "Could not load a DASH resource", true);
 +}
++bool Player::hasEnqueueablePackets() const
++{
++    for (unsigned i = 0; i < m_tracks.size(); ++i) {
++        if (!m_tracks[i].packets.empty() && m_hooks.canEnqueue(i))
++            return true;
++    }
++    return false;
++}
 +bool Player::hasEnded() const
 +{
 +    return !m_stopped && m_manifest && !isLive() && (!hasVideo() || m_tracks[0].ended) && (!hasAudio() || m_tracks[1].ended);
@@ -46665,10 +46673,10 @@ index 0000000000000000000000000000000000000000..f8a6846155910b7b8f77397236e2918f
 +}
 diff --git a/Source/WebCore/platform/graphics/haiku/DashPlaybackHaiku.h b/Source/WebCore/platform/graphics/haiku/DashPlaybackHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..c657893b44517a36df0b46e65b8b29261fcfe93f
+index 0000000000000000000000000000000000000000..edc41670f33c232f3f28d3bcf17e5101b671edd7
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/DashPlaybackHaiku.h
-@@ -0,0 +1,125 @@
+@@ -0,0 +1,126 @@
 +/* Copyright (C) 2026 air/OS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#pragma once
 +#include "DashManifestHaiku.h"
@@ -46734,6 +46742,7 @@ index 0000000000000000000000000000000000000000..c657893b44517a36df0b46e65b8b2926
 +    bool isHLS() const { return bool(m_hls); }
 +    bool hasEnded() const;
 +    bool hasCurrentData() const;
++    bool hasEnqueueablePackets() const;
 +    double duration() const;
 +    double seekableStart() const;
 +    double seekableEnd() const;
@@ -58090,10 +58099,10 @@ index 0000000000000000000000000000000000000000..976621f9ad3fa0e29c170d78ca6b7ee0
 +#endif
 diff --git a/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.cpp b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..a4d90d5d9942334bf7e5c66f70bc8b27efbeb372
+index 0000000000000000000000000000000000000000..2d19f3c83a5039bad81fe87a8d61ec4df2896986
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.cpp
-@@ -0,0 +1,3488 @@
+@@ -0,0 +1,3552 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -58343,9 +58352,14 @@ index 0000000000000000000000000000000000000000..a4d90d5d9942334bf7e5c66f70bc8b27
 +int64_t HaikuMSEClock::now() const
 +{
 +    Locker locker { m_lock };
++    return timeAt(system_time());
++}
++
++int64_t HaikuMSEClock::timeAt(int64_t systemTime) const
++{
 +    if (!m_running)
 +        return m_base;
-+    return m_base + (system_time() - m_startedAt);
++    return clampTo<int64_t>(m_base + (systemTime - m_startedAt) * m_rate.load());
 +}
 +
 +void HaikuMSEClock::start()
@@ -58362,7 +58376,7 @@ index 0000000000000000000000000000000000000000..a4d90d5d9942334bf7e5c66f70bc8b27
 +    Locker locker { m_lock };
 +    if (!m_running)
 +        return;
-+    m_base += system_time() - m_startedAt;
++    m_base = timeAt(system_time());
 +    m_running = false;
 +}
 +
@@ -58371,6 +58385,15 @@ index 0000000000000000000000000000000000000000..a4d90d5d9942334bf7e5c66f70bc8b27
 +    Locker locker { m_lock };
 +    m_base = mediaTime;
 +    m_startedAt = system_time();
++}
++
++void HaikuMSEClock::setRate(double rate)
++{
++    Locker locker { m_lock };
++    auto now = system_time();
++    m_base = timeAt(now);
++    m_startedAt = now;
++    m_rate = rate;
 +}
 +
 +// #pragma mark - Tracks
@@ -58540,6 +58563,7 @@ index 0000000000000000000000000000000000000000..a4d90d5d9942334bf7e5c66f70bc8b27
 +public:
 +    HaikuMSESampleQueue(size_t capacity, MediaPlayerPrivateHaikuMSE& player)
 +        : m_capacity(capacity)
++        , m_weakPlayer(player)
 +#if ENABLE(ENCRYPTED_MEDIA)
 +        , m_decryptionContext(player.decryptionContext())
 +        , m_keyStateChanged([weakPlayer = WeakPtr { player }] {
@@ -58549,9 +58573,6 @@ index 0000000000000000000000000000000000000000..a4d90d5d9942334bf7e5c66f70bc8b27
 +        })
 +#endif
 +    {
-+#if !ENABLE(ENCRYPTED_MEDIA)
-+        UNUSED_PARAM(player);
-+#endif
 +    }
 +
 +#if ENABLE(ENCRYPTED_MEDIA)
@@ -58571,10 +58592,14 @@ index 0000000000000000000000000000000000000000..a4d90d5d9942334bf7e5c66f70bc8b27
 +        m_condition.notifyAll();
 +    }
 +
-+    bool isReadyForMore()
++    bool isReadyForMore(bool notifyDash)
 +    {
 +        Locker locker { m_lock };
-+        return m_samples.size() < m_capacity;
++        if (m_samples.size() < m_capacity)
++            return true;
++        if (notifyDash)
++            m_notifyDash = true;
++        return false;
 +    }
 +
 +    void requestReadyNotification(ThreadSafeWeakPtr<SourceBufferPrivateHaiku>&& buffer, TrackID trackID)
@@ -58590,6 +58615,7 @@ index 0000000000000000000000000000000000000000..a4d90d5d9942334bf7e5c66f70bc8b27
 +    {
 +        Locker locker { m_lock };
 +        m_samples.clear();
++        m_notifyDash = false;
 +#if ENABLE(ENCRYPTED_MEDIA)
 +        setWaitingForKey(false);
 +        m_decryptionFailed = false;
@@ -58674,6 +58700,13 @@ index 0000000000000000000000000000000000000000..a4d90d5d9942334bf7e5c66f70bc8b27
 +            if (&m_samples.first()->configuration() != configuration)
 +                return TakeResult::Stop;
 +            sample = m_samples.takeFirst();
++            if (m_notifyDash && m_samples.size() <= m_capacity / 2) {
++                m_notifyDash = false;
++                callOnMainThread([weakPlayer = m_weakPlayer] {
++                    if (RefPtr player = weakPlayer.get())
++                        player->dashRendererReady();
++                });
++            }
 +            if (m_wantsNotification && m_samples.size() <= m_capacity / 2) {
 +                m_wantsNotification = false;
 +                notify = WTF::move(m_notify);
@@ -58723,6 +58756,7 @@ index 0000000000000000000000000000000000000000..a4d90d5d9942334bf7e5c66f70bc8b27
 +
 +private:
 +    const size_t m_capacity;
++    WeakPtr<MediaPlayerPrivateHaikuMSE> m_weakPlayer;
 +#if ENABLE(ENCRYPTED_MEDIA)
 +    Ref<HaikuCencDecryptionContext> m_decryptionContext;
 +    Function<void()> m_keyStateChanged;
@@ -58735,6 +58769,7 @@ index 0000000000000000000000000000000000000000..a4d90d5d9942334bf7e5c66f70bc8b27
 +    std::atomic<unsigned> m_generation { 0 };
 +    std::atomic<bool> m_aborted { false };
 +    bool m_endOfStream WTF_GUARDED_BY_LOCK(m_lock) { false };
++    bool m_notifyDash WTF_GUARDED_BY_LOCK(m_lock) { false };
 +    bool m_wantsNotification WTF_GUARDED_BY_LOCK(m_lock) { false };
 +    ThreadSafeWeakPtr<SourceBufferPrivateHaiku> m_notify WTF_GUARDED_BY_LOCK(m_lock);
 +    TrackID m_notifyTrackID WTF_GUARDED_BY_LOCK(m_lock) { 0 };
@@ -58790,7 +58825,7 @@ index 0000000000000000000000000000000000000000..a4d90d5d9942334bf7e5c66f70bc8b27
 +            flush();
 +    }
 +    bool isSuspendedHaiku() const { return m_suspendedHaiku; }
-+    bool isReadyForMore() { return m_queue.isReadyForMore(); }
++    bool isReadyForMore(bool notifyDash = false) { return m_queue.isReadyForMore(notifyDash); }
 +#if ENABLE(ENCRYPTED_MEDIA)
 +    bool waitingForKey() const { return m_queue.waitingForKey(); }
 +    bool decryptionFailed() const { return m_queue.decryptionFailed(); }
@@ -59480,11 +59515,12 @@ index 0000000000000000000000000000000000000000..a4d90d5d9942334bf7e5c66f70bc8b27
 +            __int128 wait = static_cast<__int128>(pts) - m_clock.now();
 +            if (wait <= 3000)
 +                return true;
-+            if (!m_clock.isRunning()) {
++            auto rate = m_clock.rate();
++            if (!m_clock.isRunning() || !rate) {
 +                m_queue.waitFor(10_ms, generation);
 +                continue;
 +            }
-+            m_queue.waitFor(Seconds::fromMicroseconds(static_cast<int64_t>(std::min<__int128>(wait - 2000, 20000))), generation);
++            m_queue.waitFor(Seconds::fromMicroseconds(std::min(20000.0, static_cast<double>(wait - 2000) / rate)), generation);
 +        }
 +        return false;
 +    }
@@ -59675,7 +59711,7 @@ index 0000000000000000000000000000000000000000..a4d90d5d9942334bf7e5c66f70bc8b27
 +    }
 +
 +    void enqueue(Ref<MediaSampleHaiku>&& sample) { m_queue.enqueue(WTF::move(sample)); }
-+    bool isReadyForMore() { return m_queue.isReadyForMore(); }
++    bool isReadyForMore(bool notifyDash = false) { return m_queue.isReadyForMore(notifyDash); }
 +#if ENABLE(ENCRYPTED_MEDIA)
 +    bool waitingForKey() const { return m_queue.waitingForKey(); }
 +    bool decryptionFailed() const { return m_queue.decryptionFailed(); }
@@ -59709,11 +59745,17 @@ index 0000000000000000000000000000000000000000..a4d90d5d9942334bf7e5c66f70bc8b27
 +        m_muted = muted;
 +        updateOutput();
 +    }
++    void playbackRateChanged()
++    {
++        // The mixer resamples PCM at the input rate negotiated by BSoundPlayer.
++        releaseOutput();
++    }
 +    // Main thread, from the player's timer: the output needs the decoded
 +    // format, which is only known after the first chunk.
 +    void updateOutput()
 +    {
-+        bool wanted = m_playing && !m_muted && m_formatKnown;
++        auto rate = m_clock.rate();
++        bool wanted = m_playing && !m_muted && m_formatKnown && rate >= 0.25 && rate <= 4;
 +        if (!wanted) {
 +            if (m_soundPlayer && m_outputStarted) {
 +                m_soundPlayer->Stop(false);
@@ -59728,6 +59770,7 @@ index 0000000000000000000000000000000000000000..a4d90d5d9942334bf7e5c66f70bc8b27
 +            {
 +                Locker locker { m_pcmLock };
 +                format = m_format;
++                format.frame_rate *= rate;
 +            }
 +            BMediaRoster* roster = BMediaRoster::Roster();
 +            media_node output;
@@ -60032,7 +60075,7 @@ index 0000000000000000000000000000000000000000..a4d90d5d9942334bf7e5c66f70bc8b27
 +            if (m_frameSize && m_format.frame_rate > 0) {
 +                double microsecondsPerFrame = 1000000.0 / m_format.frame_rate;
 +                // Media time at which the start of this buffer will be heard.
-+                int64_t target = m_clock.now() + m_latency;
++                int64_t target = m_clock.now() + static_cast<int64_t>(m_latency * m_clock.rate());
 +                while (written < size && !m_pcm.isEmpty()) {
 +                    auto& block = m_pcm.first();
 +                    int64_t blockTime = block.pts + int64_t(block.offset / m_frameSize * microsecondsPerFrame);
@@ -60505,7 +60548,10 @@ index 0000000000000000000000000000000000000000..a4d90d5d9942334bf7e5c66f70bc8b27
 +#endif
 +        return nullptr;
 +    };
-+    hooks.canEnqueue = [this](unsigned track) { return track ? audioRenderer().isReadyForMore() : videoRenderer().isReadyForMore(); };
++    hooks.canEnqueue = [this](unsigned track) {
++        bool notifyWhenReady = m_paused || !rate();
++        return track ? audioRenderer().isReadyForMore(notifyWhenReady) : videoRenderer().isReadyForMore(notifyWhenReady);
++    };
 +    hooks.enqueue = [this](unsigned track, const auto& configuration, auto&& sample, double offset) {
 +        enqueueDashSample(track, configuration, WTF::move(sample), offset);
 +    };
@@ -60634,6 +60680,21 @@ index 0000000000000000000000000000000000000000..a4d90d5d9942334bf7e5c66f70bc8b27
 +{
 +    MSE_TRACE("pause at %.3f\n", currentTime().toDouble());
 +    m_paused = true;
++    updatePlaybackState();
++}
++
++void MediaPlayerPrivateHaikuMSE::setRateDouble(double requestedRate)
++{
++    // Both decoders consume forward-ordered samples. A zero rate holds the
++    // current position until a forward rate is selected again.
++    if (!std::isfinite(requestedRate))
++        return;
++    auto newRate = std::clamp(requestedRate, 0.0, 16.0);
++    if (newRate == rate())
++        return;
++    if (m_audioRenderer)
++        m_audioRenderer->playbackRateChanged();
++    m_clock.setRate(newRate);
 +    updatePlaybackState();
 +}
 +
@@ -60910,7 +60971,7 @@ index 0000000000000000000000000000000000000000..a4d90d5d9942334bf7e5c66f70bc8b27
 +void MediaPlayerPrivateHaikuMSE::updatePlaybackState()
 +{
 +    RefPtr mediaSource = m_mediaSourcePrivate;
-+    bool run = !m_paused && !m_pendingSeek && (m_dash ? !m_dash->isStopped() && m_dash->hasMetadata() : bool(mediaSource));
++    bool run = !m_paused && rate() > 0 && !m_pendingSeek && (m_dash ? !m_dash->isStopped() && m_dash->hasMetadata() : bool(mediaSource));
 +    run = run && m_networkState != MediaPlayer::NetworkState::DecodeError;
 +#if ENABLE(ENCRYPTED_MEDIA)
 +    run = run && !m_waitingForKey;
@@ -60968,9 +61029,15 @@ index 0000000000000000000000000000000000000000..a4d90d5d9942334bf7e5c66f70bc8b27
 +            player->timeChanged();
 +    }
 +
-+    bool needsTimer = m_dash ? !m_dash->isStopped() : !m_paused;
-+    if (needsTimer && !m_playbackTimer.isActive()) m_playbackTimer.startRepeating(50_ms);
-+    else if (!needsTimer) m_playbackTimer.stop();
++    // Loads and seeks pump on completion. At a fixed position we only
++    // need another batch of queued packets, or a live playlist refresh.
++    bool needsTimer = !m_paused && rate() > 0;
++    if (m_dash)
++        needsTimer = !m_dash->isStopped() && (needsTimer || m_dash->isLive() || m_dash->hasEnqueueablePackets());
++    if (needsTimer && !m_playbackTimer.isActive())
++        m_playbackTimer.startRepeating(50_ms);
++    else if (!needsTimer && m_playbackTimer.isActive())
++        m_playbackTimer.stop();
 +}
 +
 +void MediaPlayerPrivateHaikuMSE::playbackTimerFired()
@@ -60979,15 +61046,19 @@ index 0000000000000000000000000000000000000000..a4d90d5d9942334bf7e5c66f70bc8b27
 +    if (m_dash) {
 +        m_dash->tick(currentTime().toDouble(), MonotonicTime::now().secondsSinceEpoch().value());
 +        dashChanged();
-+    }
-+    updatePlaybackState();
++    } else
++        updatePlaybackState();
 +    if (mseTraceEnabled() && m_videoRenderer && ++m_statsTicks >= 100) {
 +        m_statsTicks = 0;
 +        MSE_TRACE("stats time=%.2f presented=%u dropped=%u running=%d\n", currentTime().toDouble(),
 +            m_videoRenderer->presentedFrames(), m_videoRenderer->droppedFrames(), m_clock.isRunning());
 +    }
-+    if (m_audioRenderer)
-+        m_audioRenderer->updateOutput();
++}
++
++void MediaPlayerPrivateHaikuMSE::dashRendererReady()
++{
++    if (m_dash)
++        updatePlaybackState();
 +}
 +
 +void MediaPlayerPrivateHaikuMSE::audioOutputFormatChanged(HaikuMSEAudioRenderer* renderer)
@@ -61014,8 +61085,9 @@ index 0000000000000000000000000000000000000000..a4d90d5d9942334bf7e5c66f70bc8b27
 +        m_naturalSize = FloatSize(size);
 +        player->sizeChanged();
 +    }
-+    if (m_dash) dashChanged();
-+    if (!m_clock.isRunning() && !m_paused)
++    if (m_dash)
++        dashChanged();
++    else if (!m_clock.isRunning() && !m_paused)
 +        updatePlaybackState();
 +    if (!m_announcedFirstFrame) {
 +        m_announcedFirstFrame = true;
@@ -61121,6 +61193,7 @@ index 0000000000000000000000000000000000000000..a4d90d5d9942334bf7e5c66f70bc8b27
 +    object->setInteger("naturalHeight"_s, static_cast<int>(size.height()));
 +    object->setBoolean("paused"_s, m_paused);
 +    object->setBoolean("stalled"_s, m_stalled);
++    object->setBoolean("playbackTimerActive"_s, m_playbackTimer.isActive());
 +    if (m_videoRenderer) {
 +        auto decoder = m_videoRenderer->decoderInfo();
 +        auto video = JSON::Object::create();
@@ -61584,10 +61657,10 @@ index 0000000000000000000000000000000000000000..a4d90d5d9942334bf7e5c66f70bc8b27
 +#endif // ENABLE(MEDIA_SOURCE)
 diff --git a/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.h b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..41a9a65f25b5e4a29973990ecf31f8e2939aa74f
+index 0000000000000000000000000000000000000000..add6ea563c6a50ad98a54f7241d314e2be0cd2cf
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.h
-@@ -0,0 +1,433 @@
+@@ -0,0 +1,441 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -61756,9 +61829,13 @@ index 0000000000000000000000000000000000000000..41a9a65f25b5e4a29973990ecf31f8e2
 +    void start();
 +    void stop();
 +    void set(int64_t mediaTime);
++    void setRate(double);
++    double rate() const { return m_rate; }
 +
 +private:
++    int64_t timeAt(int64_t systemTime) const WTF_REQUIRES_LOCK(m_lock);
 +    mutable Lock m_lock;
++    std::atomic<double> m_rate { 1 };
 +    int64_t m_base WTF_GUARDED_BY_LOCK(m_lock) { 0 };
 +    int64_t m_startedAt WTF_GUARDED_BY_LOCK(m_lock) { 0 };
 +    std::atomic<bool> m_running { false };
@@ -61790,6 +61867,7 @@ index 0000000000000000000000000000000000000000..41a9a65f25b5e4a29973990ecf31f8e2
 +
 +    // Called on the main thread by the renderers.
 +    void videoFrameAvailable();
++    void dashRendererReady();
 +    void decodingFailed();
 +    void audioOutputFormatChanged(HaikuMSEAudioRenderer*);
 +#if ENABLE(ENCRYPTED_MEDIA)
@@ -61822,6 +61900,9 @@ index 0000000000000000000000000000000000000000..41a9a65f25b5e4a29973990ecf31f8e2
 +    void cancelLoad() final;
 +    void play() final;
 +    void pause() final;
++    void setRateDouble(double) final;
++    double rate() const final { return m_clock.rate(); }
++    double effectiveRate() const final { return m_clock.isRunning() ? rate() : 0; }
 +    bool paused() const final { return m_paused; }
 +    FloatSize naturalSize() const final;
 +    bool hasVideo() const final;

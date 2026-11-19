@@ -103,7 +103,9 @@ int main(int argc, char** argv)
     for (unsigned i = 0; i < 100 && deliver(); ++i) { }
     assert(player.hasMetadata() && player.hasAudio() && player.hasVideo() && !failed);
     assert(samples[0] == 0 && samples[1] == 0 && requests.empty());
+    assert(!player.hasEnqueueablePackets());
     ready = true;
+    assert(player.hasEnqueueablePackets());
     for (unsigned tick = 0; tick < 500 && !player.hasEnded(); ++tick) {
         time = tick * 0.05;
         if (time > 5) bandwidth = 300000;
@@ -112,6 +114,7 @@ int main(int argc, char** argv)
         assert(!failed);
     }
     assert(player.hasEnded() && finished == 2 && samples[0] == 540 && samples[1] > 800);
+    assert(!player.hasEnqueueablePackets());
     assert(widths.size() >= 3 && widths.front() == 320 && widths[1] == 640 && widths.back() == 320);
     assert(player.duration() == 18 && changes > 10 && resets == 1);
     const auto beforeSeek = samples;
