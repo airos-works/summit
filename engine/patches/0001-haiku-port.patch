@@ -103535,6 +103535,37 @@ index b91cd6776229ae7d04e7619f00b014682f0bf252..a9c1dbea67e073db25d3c15be81f6d07
  
      auto push = [&](Element& element) {
          if constexpr (scope == TeardownScope::DescendantsOnly) {
+diff --git a/Source/WebCore/style/AnchorPositionEvaluator.cpp b/Source/WebCore/style/AnchorPositionEvaluator.cpp
+index a32360d9a24a2d8974cffa52369ca6a8da963999..d1d0a5b897c2b1d1e8837ffcccdb909e92aee089 100644
+--- a/Source/WebCore/style/AnchorPositionEvaluator.cpp
++++ b/Source/WebCore/style/AnchorPositionEvaluator.cpp
+@@ -474,13 +474,20 @@ static bool NODELETE anchorSideMatchesInsetProperty(CSSValueID anchorSideID, Box
+ static LayoutRect boxBoundingBoxInContainer(const RenderBoxModelObject& box, const RenderLayerModelObject& container)
+ {
+     bool wasFixed = false;
+-    auto localRect = [&]() -> LayoutRect {
+-        if (CheckedPtr inlineBox = dynamicDowncast<RenderInline>(&box))
+-            return inlineBox->borderBoxRectInContainer();
+-        return box.borderBoundingBox();
+-    }();
++    FloatRect localRect;
++    if (CheckedPtr inlineBox = dynamicDowncast<RenderInline>(&box)) {
++        // Keep subpixel edges of inline fragments until the anchor has been mapped
++        // into its containing block. The integer paint bounds can expand either edge.
++        auto fragments = inlineBox->localBorderBoxRects();
++        if (!fragments.isEmpty()) {
++            localRect = fragments.first();
++            for (auto& fragment : fragments.span().subspan(1))
++                localRect.uniteEvenIfEmpty(fragment);
++        }
++    } else
++        localRect = box.borderBoundingBox();
+     // FIXME: figure out if OverscrollClamp is still needed.
+-    auto boxQuadInContainer = box.localToContainerQuad(FloatQuad { FloatRect { localRect } }, &container, { MapCoordinatesMode::UseTransforms, MapCoordinatesMode::ClampOverscroll }, &wasFixed);
++    auto boxQuadInContainer = box.localToContainerQuad(FloatQuad { localRect }, &container, { MapCoordinatesMode::UseTransforms, MapCoordinatesMode::ClampOverscroll }, &wasFixed);
+     LayoutRect boundingBox { boxQuadInContainer.boundingBox() };
+ 
+     if (wasFixed) {
 diff --git a/Source/WebCore/style/RuleSetBuilder.cpp b/Source/WebCore/style/RuleSetBuilder.cpp
 index b37af82d2bcf05a0d43b905a9231510b172ad917..e2f2b9bcddbbbd99e5bcf2068e0b4cbe0003e123 100644
 --- a/Source/WebCore/style/RuleSetBuilder.cpp
