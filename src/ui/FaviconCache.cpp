@@ -152,7 +152,10 @@ const BBitmap* FaviconCache::Icon(const std::string& pageURL)
 std::string FaviconCache::DataURL(const std::string& pageURL)
 {
     auto* entry = Find(pageURL);
-    return entry ? "data:image/png;base64," + Base64(entry->png) : std::string();
+    if (!entry) return {};
+    if (entry->dataURL.empty())
+        entry->dataURL = "data:image/png;base64," + Base64(entry->png);
+    return entry->dataURL;
 }
 
 void FaviconCache::Forget(const std::string& pageURL)

@@ -39,6 +39,7 @@ private:
     struct Entry {
         std::unique_ptr<BBitmap> bitmap;
         std::string png;
+        std::string dataURL{}; // Encoded on first use by a built-in page.
     };
     Entry* Find(const std::string& pageURL);
     Entry* Load(const std::string& key);
