@@ -1,0 +1,60 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>RTP scalability modes on active and inactive encodings</title>
+<pre id="result"></pre>
+<script>
+async function errorName(action) {
+    try {
+        await action();
+        return '';
+    } catch (error) {
+        return error.name;
+    }
+}
+
+(async () => {
+    const pc = new RTCPeerConnection({iceServers: []});
+    const add = (kind, sendEncodings) => pc.addTransceiver(kind, {sendEncodings}).sender;
+    const modes = (first, second) => [{rid: 'low', ...first}, {rid: 'high', ...second}];
+    const checks = {};
+    try {
+        checks.audioAdd = await errorName(() => add('audio', [{scalabilityMode: 'L1T1'}])) === 'OperationError';
+        const audio = add('audio', [{}]);
+        const audioParams = audio.getParameters();
+        audioParams.encodings[0].scalabilityMode = 'L1T1';
+        checks.audioSet = await errorName(() => audio.setParameters(audioParams)) === 'InvalidModificationError';
+        checks.audioRead = !('scalabilityMode' in audio.getParameters().encodings[0]);
+        checks.mixedAdd = await errorName(() => add('video', modes({scalabilityMode: 'S2T1'}, {}))) === 'OperationError';
+        const sender = add('video', modes({scalabilityMode: 'L1T1'}, {scalabilityMode: 'L1T2'}));
+        const read = () => sender.getParameters().encodings;
+        checks.initial = read()[0].scalabilityMode === 'L1T1' && read()[1].scalabilityMode === 'L1T2';
+        const invalid = sender.getParameters();
+        invalid.encodings[0].scalabilityMode = 'S2T1';
+        checks.mixedSet = await errorName(() => sender.setParameters(invalid)) === 'InvalidModificationError';
+        checks.rejectedChange = read()[0].scalabilityMode === 'L1T1';
+        const single = sender.getParameters();
+        single.encodings[0].scalabilityMode = 'S2T1';
+        single.encodings[1].active = false;
+        checks.singleActive = !(await errorName(() => sender.setParameters(single))) && read()[0].scalabilityMode === 'S2T1';
+        const inactive = sender.getParameters();
+        inactive.encodings[0].active = false;
+        inactive.encodings[1].active = true;
+        checks.inactiveSMode = !(await errorName(() => sender.setParameters(inactive))) && !read()[0].active;
+        const clear = sender.getParameters();
+        delete clear.encodings[0].scalabilityMode;
+        checks.clear = !(await errorName(() => sender.setParameters(clear))) && !('scalabilityMode' in read()[0])
+            && read()[1].scalabilityMode === 'L1T2';
+        const vp8 = RTCRtpSender.getCapabilities('video').codecs.find(codec => codec.mimeType.toLowerCase() === 'video/vp8');
+        checks.unsupportedCodec = await errorName(() => add('video', [{codec: vp8, scalabilityMode: 'L3T3'}])) === 'OperationError';
+        const vp9 = RTCRtpSender.getCapabilities('video').codecs.find(codec => codec.mimeType.toLowerCase() === 'video/vp9');
+        const split = add('video', modes({codec: vp9, scalabilityMode: 'L1T1'}, {codec: vp9, scalabilityMode: 'L3T3'}));
+        const layers = split.getParameters().encodings;
+        checks.perLayerMode = layers[0].scalabilityMode === 'L1T1' && layers[1].scalabilityMode === 'L3T3';
+    } catch (error) {
+        checks.error = error.name;
+    } finally {
+        pc.close();
+        document.getElementById('result').textContent = JSON.stringify(checks);
+    }
+})();
+</script>

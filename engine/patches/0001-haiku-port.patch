@@ -3388,6 +3388,120 @@ index 0000000000000000000000000000000000000000..a3f65afe9e3ab1693ee1b8b5cd10d86d
 +#define OPENH264_RESERVED (2401)
 +
 +#endif  // CODEC_VER_H
+diff --git a/Source/ThirdParty/libwebrtc/Source/webrtc/media/base/media_engine.cc b/Source/ThirdParty/libwebrtc/Source/webrtc/media/base/media_engine.cc
+index 281837ee33d93fbb8b8c470c89d9a6c135dc82a5..22e79d37e1a131a1f8791aa753cb77cd10ea177f 100644
+--- a/Source/ThirdParty/libwebrtc/Source/webrtc/media/base/media_engine.cc
++++ b/Source/ThirdParty/libwebrtc/Source/webrtc/media/base/media_engine.cc
+@@ -95,6 +95,17 @@ GetDefaultEnabledRtpHeaderCapabilities(
+ RTCError CheckScalabilityModeValues(const RtpParameters& rtp_parameters,
+                                     std::span<const Codec> send_codecs,
+                                     std::optional<Codec> send_codec) {
++  // A single-stream simulcast mode cannot share the sender with another
++  // active RTP encoding.
++  if (absl::c_any_of(rtp_parameters.encodings, [](const auto& encoding) {
++        return encoding.active && encoding.scalability_mode &&
++               encoding.scalability_mode->starts_with("S");
++      }) &&
++      absl::c_count_if(rtp_parameters.encodings,
++                       [](const auto& encoding) { return encoding.active; }) > 1) {
++    return RTCError(RTCErrorType::INVALID_MODIFICATION,
++                    "An S mode requires a single active encoding.");
++  }
+   if (send_codecs.empty()) {
+     // This is an audio sender or an extra check in the stack where the codec
+     // list is not available and we can't check the scalability_mode values.
+@@ -102,60 +113,27 @@ RTCError CheckScalabilityModeValues(const RtpParameters& rtp_parameters,
+   }
+ 
+   for (size_t i = 0; i < rtp_parameters.encodings.size(); ++i) {
+-    if (rtp_parameters.encodings[i].codec) {
+-      bool codecFound = false;
+-      for (const Codec& codec : send_codecs) {
+-        if (IsSameRtpCodecIgnoringLevel(codec,
+-                                        *rtp_parameters.encodings[i].codec) &&
+-            SupportsMode(codec, rtp_parameters.encodings[i].scalability_mode)) {
+-          codecFound = true;
+-          send_codec = codec;
+-          break;
+-        }
+-      }
+-      if (!codecFound) {
++    const auto& encoding = rtp_parameters.encodings[i];
++    if (encoding.codec) {
++      if (!absl::c_any_of(send_codecs, [&](const Codec& codec) {
++            return IsSameRtpCodecIgnoringLevel(codec, *encoding.codec) &&
++                   SupportsMode(codec, encoding.scalability_mode);
++          })) {
+         return RTC_LOG_ERROR(
+             RTCError(RTCErrorType::INVALID_MODIFICATION)
+             << "Attempted to use an unsupported codec for layer " << i);
+       }
++      continue;
+     }
+-    if (rtp_parameters.encodings[i].scalability_mode) {
+-      if (!send_codec) {
+-        bool scalabilityModeFound = false;
+-        for (const Codec& codec : send_codecs) {
+-          for (const auto& scalability_mode : codec.scalability_modes) {
+-            if (ScalabilityModeToString(scalability_mode) ==
+-                *rtp_parameters.encodings[i].scalability_mode) {
+-              scalabilityModeFound = true;
+-              break;
+-            }
+-          }
+-          if (scalabilityModeFound)
+-            break;
+-        }
+-
+-        if (!scalabilityModeFound) {
+-          return RTC_LOG_ERROR(
+-              RTCError(RTCErrorType::INVALID_MODIFICATION)
+-              << "Attempted to set RtpParameters scalabilityMode "
+-                 "to an unsupported value for the current codecs.");
+-        }
+-      } else {
+-        bool scalabilityModeFound = false;
+-        for (const auto& scalability_mode : send_codec->scalability_modes) {
+-          if (ScalabilityModeToString(scalability_mode) ==
+-              *rtp_parameters.encodings[i].scalability_mode) {
+-            scalabilityModeFound = true;
+-            break;
+-          }
+-        }
+-        if (!scalabilityModeFound) {
+-          return RTC_LOG_ERROR(
+-              RTCError(RTCErrorType::INVALID_MODIFICATION)
+-              << "Attempted to set RtpParameters scalabilityMode "
+-                 "to an unsupported value for the current codecs.");
+-        }
+-      }
++    if (encoding.scalability_mode &&
++        !(send_codec ? SupportsMode(*send_codec, encoding.scalability_mode)
++                     : absl::c_any_of(send_codecs, [&](const Codec& codec) {
++                         return SupportsMode(codec, encoding.scalability_mode);
++                       }))) {
++      return RTC_LOG_ERROR(
++          RTCError(RTCErrorType::INVALID_MODIFICATION)
++          << "Attempted to set RtpParameters scalabilityMode "
++             "to an unsupported value for the current codecs.");
+     }
+   }
+ 
+diff --git a/Source/ThirdParty/libwebrtc/Source/webrtc/media/engine/webrtc_video_engine.cc b/Source/ThirdParty/libwebrtc/Source/webrtc/media/engine/webrtc_video_engine.cc
+index 0baa3b62d35776297d06d444b3f3ba0bb9186751..ca38094d31629267a1deeb775954d95dabdaf282 100644
+--- a/Source/ThirdParty/libwebrtc/Source/webrtc/media/engine/webrtc_video_engine.cc
++++ b/Source/ThirdParty/libwebrtc/Source/webrtc/media/engine/webrtc_video_engine.cc
+@@ -2380,7 +2380,9 @@ WebRtcVideoSendChannel::WebRtcVideoSendStream::CreateVideoEncoderConfig(
+   // number of negotiated ssrcs but this may be capped below depending on the
+   // `legacy_scalability_mode` and codec used.
+   encoder_config.number_of_streams = parameters_.config.rtp.ssrcs.size();
+-  bool legacy_scalability_mode = true;
++  // Distinct negotiated RIDs require distinct RTP streams, including when
++  // the application leaves the scalability mode at its codec default.
++  bool legacy_scalability_mode = parameters_.config.rtp.rids.size() < 2;
+   for (const RtpEncodingParameters& encoding : rtp_parameters_.encodings) {
+     if (encoding.scalability_mode.has_value() &&
+         (encoding.scale_resolution_down_by.has_value() ||
 diff --git a/Source/ThirdParty/libwebrtc/Source/webrtc/modules/video_coding/codecs/h264/h264_encoder_haiku.cc b/Source/ThirdParty/libwebrtc/Source/webrtc/modules/video_coding/codecs/h264/h264_encoder_haiku.cc
 new file mode 100644
 index 0000000000000000000000000000000000000000..505868e4a7e3ce17f7114491d78754d7c522eadc
@@ -15655,6 +15769,30 @@ index faf204b73c9cf877d9aff64231192d1193c9ff05..4f31dde92d78716f2cbe76c25fafeb15
  // https://w3c.github.io/webrtc-pc/#dom-rtcrtpcapabilities
  [
      Conditional=WEB_RTC,
+diff --git a/Source/WebCore/Modules/mediastream/RTCRtpEncodingParameters.h b/Source/WebCore/Modules/mediastream/RTCRtpEncodingParameters.h
+index 93510727d78e2762b40b95c423db31438e2b32e2..50687f850fdd02b3c6490f90109c5a0e78e9651a 100644
+--- a/Source/WebCore/Modules/mediastream/RTCRtpEncodingParameters.h
++++ b/Source/WebCore/Modules/mediastream/RTCRtpEncodingParameters.h
+@@ -41,6 +41,7 @@ struct RTCRtpEncodingParameters : RTCRtpCodingParameters {
+     std::optional<unsigned long> maxBitrate;
+     std::optional<double> maxFramerate;
+     std::optional<double> scaleResolutionDownBy;
++    String scalabilityMode;
+ 
+     RTCPriorityType priority { RTCPriorityType::Low };
+     std::optional<RTCPriorityType> networkPriority;
+diff --git a/Source/WebCore/Modules/mediastream/RTCRtpEncodingParameters.idl b/Source/WebCore/Modules/mediastream/RTCRtpEncodingParameters.idl
+index e05a6033d2289cff714f9a1b114b459ee3dcff8e..c5bf54670e7935e640f05b99100d241a0a5c2c93 100644
+--- a/Source/WebCore/Modules/mediastream/RTCRtpEncodingParameters.idl
++++ b/Source/WebCore/Modules/mediastream/RTCRtpEncodingParameters.idl
+@@ -37,6 +37,7 @@
+     unsigned long maxBitrate;
+     double maxFramerate;
+     double scaleResolutionDownBy;
++    DOMString scalabilityMode;
+ 
+     RTCPriorityType priority = "low";
+     RTCPriorityType networkPriority;
 diff --git a/Source/WebCore/Modules/mediastream/RTCRtpHeaderExtensionCapability.idl b/Source/WebCore/Modules/mediastream/RTCRtpHeaderExtensionCapability.idl
 new file mode 100644
 index 0000000000000000000000000000000000000000..d261dfd820c23510d86381587029d9306e2e541c
@@ -16142,7 +16280,7 @@ index 0ebfebd7394123d8b78d400aaf3317fede16cc9b..3857f9b387f9dbb17a9abbe8934e5980
  
  } // namespace WebCore
 diff --git a/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCUtils.cpp b/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCUtils.cpp
-index f9e2d242d7915918856c95986d936682b967c4d8..224dafeb8558ddfbfb59af12a7255508b5bc56b3 100644
+index f9e2d242d7915918856c95986d936682b967c4d8..50da0d901f2d66ab11a4799dfd157f4ac99b3e66 100644
 --- a/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCUtils.cpp
 +++ b/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCUtils.cpp
 @@ -33,7 +33,9 @@
@@ -16173,6 +16311,35 @@ index f9e2d242d7915918856c95986d936682b967c4d8..224dafeb8558ddfbfb59af12a7255508
  webrtc::Priority fromRTCPriorityType(RTCPriorityType priority)
  {
      switch (priority) {
+@@ -167,6 +180,8 @@ static inline RTCRtpEncodingParameters toRTCEncodingParameters(const webrtc::Rtp
+         parameters.maxFramerate = *rtcParameters.max_framerate;
+     if (rtcParameters.rid.length())
+         parameters.rid = fromStdString(rtcParameters.rid);
++    if (rtcParameters.scalability_mode)
++        parameters.scalabilityMode = fromStdString(*rtcParameters.scalability_mode);
+     if (rtcParameters.scale_resolution_down_by && !isAudio)
+         parameters.scaleResolutionDownBy = *rtcParameters.scale_resolution_down_by;
+ 
+@@ -216,6 +231,8 @@ static inline webrtc::RtpEncodingParameters fromRTCEncodingParameters(const RTCR
+     if (parameters.maxFramerate)
+         rtcParameters.max_framerate = parameters.maxFramerate;
+     rtcParameters.rid = parameters.rid.utf8().toStdString();
++    if (!parameters.scalabilityMode.isNull())
++        rtcParameters.scalability_mode = parameters.scalabilityMode.utf8().toStdString();
+     if (parameters.scaleResolutionDownBy)
+         rtcParameters.scale_resolution_down_by = parameters.scaleResolutionDownBy;
+ 
+@@ -321,6 +338,10 @@ void updateRTCRtpSendParameters(const RTCRtpSendParameters& parameters, webrtc::
+             rtcParameters.encodings[i].scale_resolution_down_by = *parameters.encodings[i].scaleResolutionDownBy;
+         else
+             rtcParameters.encodings[i].scale_resolution_down_by = std::nullopt;
++        if (parameters.encodings[i].scalabilityMode.isNull())
++            rtcParameters.encodings[i].scalability_mode.reset();
++        else
++            rtcParameters.encodings[i].scalability_mode = parameters.encodings[i].scalabilityMode.utf8().toStdString();
+         rtcParameters.encodings[i].bitrate_priority = toWebRTCBitRatePriority(parameters.encodings[i].priority);
+         if (parameters.encodings[i].networkPriority)
+             rtcParameters.encodings[i].network_priority = fromRTCPriorityType(*parameters.encodings[i].networkPriority);
 diff --git a/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCUtils.h b/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCUtils.h
 index 9ce718e56e3d8c6f1cbb04b6ecd5da06f925a463..83a04df16b294e7968691b4f55a06dd7b9578920 100644
 --- a/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCUtils.h
