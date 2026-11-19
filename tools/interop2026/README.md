@@ -9,6 +9,9 @@ First run, 3 Nov 2026 (Summit 0.1.0~git20261103.0306): **90.9** best estimate
 (89.3 plain), Safari Technology Preview 99.6, Safari 27.2 79.6. The whole
 suite (1714 tests) takes about 30 minutes.
 
+The November 19 follow-up lists results for every previously unresolved URL across
+the 2025 and 2026 focus areas. [Follow-up report and per-URL results](../../docs/interop-2025-2026-followup-2026-11-19.md)
+
 ## Pieces
 
 | File | What it does |
