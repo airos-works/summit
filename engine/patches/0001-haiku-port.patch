@@ -71927,7 +71927,7 @@ index 74cfeb60ac3daa537785693be3917358aa26a2b5..1f2cec305c01df570bc8b2646cd0e7bc
  
  void FontCache::platformPurgeInactiveFontData()
 diff --git a/Source/WebCore/platform/graphics/skia/FontSkia.cpp b/Source/WebCore/platform/graphics/skia/FontSkia.cpp
-index a322e5f3f28177dbb62613a726a819d673e0927f..a52ace46086178dc8139ef569d9fd0687227101d 100644
+index a322e5f3f28177dbb62613a726a819d673e0927f..175fad5329084bbf84effa98042081b677afa725 100644
 --- a/Source/WebCore/platform/graphics/skia/FontSkia.cpp
 +++ b/Source/WebCore/platform/graphics/skia/FontSkia.cpp
 @@ -92,6 +92,10 @@ float Font::platformWidthForGlyph(Glyph glyph) const
@@ -71941,6 +71941,30 @@ index a322e5f3f28177dbb62613a726a819d673e0927f..a52ace46086178dc8139ef569d9fd068
  
      return SkScalarToFloat(width);
  }
+@@ -232,13 +236,22 @@ sk_sp<SkTextBlob> FontBase::buildTextBlob(std::span<const GlyphBufferGlyph> glyp
+     auto edging = allowsAntialiasing() ? edgingForFontSmoothingMode(font, smoothingMode) : SkFont::Edging::kAlias;
+     bool isVertical = m_platformData.orientation() == FontOrientation::Vertical;
+ 
++    bool useSubpixel = font.isSubpixel();
++#if PLATFORM(HAIKU)
++    // A one-bit mask can only represent whole pixels. Select its strike at
++    // an integral device position while keeping the measured glyph advances.
++    if (edging == SkFont::Edging::kAlias)
++        useSubpixel = false;
++#endif
++
+     SkTextBlobBuilder builder;
+     const auto& buffer = [&]() {
+-        if (font.getEdging() == edging)
++        if (font.getEdging() == edging && font.isSubpixel() == useSubpixel)
+             return isVertical ? builder.allocRunPos(font, glyphs.size()) : builder.allocRunPosH(font, glyphs.size(), 0);
+ 
+         SkFont copiedFont = font;
+         copiedFont.setEdging(edging);
++        copiedFont.setSubpixel(useSubpixel);
+         return isVertical ? builder.allocRunPos(copiedFont, glyphs.size()) : builder.allocRunPosH(copiedFont, glyphs.size(), 0);
+     }();
+ 
 diff --git a/Source/WebCore/platform/graphics/skia/GraphicsContextSkia.cpp b/Source/WebCore/platform/graphics/skia/GraphicsContextSkia.cpp
 index a3cb981bd76fc7f7946862f8f7be53fe133bae79..6fc74815608850f78219c76d0e9c0cff5721a7f9 100644
 --- a/Source/WebCore/platform/graphics/skia/GraphicsContextSkia.cpp
