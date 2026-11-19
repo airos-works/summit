@@ -101613,7 +101613,7 @@ index 820170c9ccbad7e487a557bcd6549aaeaeb0d9b0..7996a4aa1830960e51de28b8e426f715
  }
  
 diff --git a/Source/WebCore/rendering/RenderBox.cpp b/Source/WebCore/rendering/RenderBox.cpp
-index b69c7bf9751cc17db10467583c079ebdedd9f1ae..ceccd5eaa3071cf057b3fdef65bd4e97fcd7aee4 100644
+index b69c7bf9751cc17db10467583c079ebdedd9f1ae..44f56e34a5a40acf526632f5aa7fc1f49a87b69d 100644
 --- a/Source/WebCore/rendering/RenderBox.cpp
 +++ b/Source/WebCore/rendering/RenderBox.cpp
 @@ -132,6 +132,24 @@
@@ -101788,7 +101788,27 @@ index b69c7bf9751cc17db10467583c079ebdedd9f1ae..ceccd5eaa3071cf057b3fdef65bd4e97
              view().repaintRootContents();
              if (Style::hasEntirelyFixedBackground(oldStyle->backgroundLayers()) != Style::hasEntirelyFixedBackground(newStyle.backgroundLayers()))
                  view().compositor().rootLayerConfigurationChanged();
-@@ -3474,6 +3624,12 @@ RenderBox::LogicalExtentComputedValues RenderBox::computeLogicalHeight(LayoutUni
+@@ -464,6 +614,19 @@ void RenderBox::styleDidChange(Style::Difference diff, const Style::ComputedStyl
+ 
+     RenderBoxModelObject::styleDidChange(diff, oldStyle);
+ 
++    if (oldStyle && mayHaveLayerInSubtree() && parent() && (parent()->isRenderFlexibleBox() || parent()->isRenderGrid())) {
++        auto previousOrder = oldStyle->hasOutOfFlowPosition() ? 0 : oldStyle->order().value;
++        auto currentOrder = style().hasOutOfFlowPosition() ? 0 : style().order().value;
++        if (previousOrder != currentOrder) {
++            if (auto* enclosing = parent()->enclosingLayer()) {
++                enclosing->dirtyNormalFlowList();
++                if (auto* context = enclosing->enclosingStackingContext())
++                    context->dirtyZOrderLists();
++            }
++            parent()->repaint();
++        }
++    }
++
+     const Style::ComputedStyle& newStyle = style();
+     if (needsLayout() && oldStyle) {
+         RenderBlock::removePercentHeightDescendant(*this);
+@@ -3474,6 +3637,12 @@ RenderBox::LogicalExtentComputedValues RenderBox::computeLogicalHeight(LayoutUni
  
          if (intrinsicHeight)
              *intrinsicHeight -= borderAndPaddingLogicalHeight();
@@ -101801,7 +101821,7 @@ index b69c7bf9751cc17db10467583c079ebdedd9f1ae..ceccd5eaa3071cf057b3fdef65bd4e97
          auto mainOrPreferredHeight = computeLogicalHeightUsing(computedLogicalHeight, intrinsicHeight).value_or(computedValues.extent);
          return constrainLogicalHeightByMinMax(mainOrPreferredHeight, intrinsicHeight, isComputingIntrinsicSize);
      };
-@@ -3559,7 +3715,11 @@ LayoutUnit RenderBox::computeIntrinsicLogicalHeight()
+@@ -3559,7 +3728,11 @@ LayoutUnit RenderBox::computeIntrinsicLogicalHeight()
      // height. A descendant that does not resolve against this box's logical height is unaffected and need not lay out again.
      layoutIfNeeded();
      auto blockSize = logicalHeight();
@@ -102699,7 +102719,7 @@ index d4011dc069a914499be7b756d26e1fc39e5d1905..a33c83943cb503a187efb885d28813fb
      unsigned NODELETE nonCollapsedTracks(Style::GridTrackSizingDirection) const;
  
 diff --git a/Source/WebCore/rendering/RenderLayer.cpp b/Source/WebCore/rendering/RenderLayer.cpp
-index 4bd303aa17e5da8a780da294d7a1337b8978d6ea..541b73c603d6df7283e0dcca23d9ec16518836ad 100644
+index 4bd303aa17e5da8a780da294d7a1337b8978d6ea..b6c7e402e2cd20695b6c1aeff76f81080f0ff9f8 100644
 --- a/Source/WebCore/rendering/RenderLayer.cpp
 +++ b/Source/WebCore/rendering/RenderLayer.cpp
 @@ -173,6 +173,9 @@
@@ -102736,7 +102756,126 @@ index 4bd303aa17e5da8a780da294d7a1337b8978d6ea..541b73c603d6df7283e0dcca23d9ec16
  }
  
  bool RenderLayer::setIsNormalFlowOnly(bool isNormalFlowOnly)
-@@ -1363,6 +1374,11 @@ void RenderLayer::recursiveUpdateLayerPositions(OptionSet<UpdateLayerPositionsFl
+@@ -810,6 +821,73 @@ void RenderLayer::dirtyNormalFlowList()
+         setNeedsCompositingPaintOrderChildrenUpdate();
+ }
+ 
++// A layer's nearest enclosing layer can be several renderers above it. Collect
++// layer siblings in the paint order of their renderer branches before sorting
++// by z-index. This also orders positioned descendants of layerless grid items.
++template<typename F>
++static void visitChildLayersInPaintOrder(const RenderLayer& parent, F&& visit)
++{
++    auto* first = parent.firstChild();
++    if (!first)
++        return;
++    if (!first->nextSibling()) {
++        visit(first);
++        return;
++    }
++
++    auto hasReorderedAncestor = [&](const RenderLayer& child) {
++        for (const RenderElement* item = &child.renderer(); item && item != &parent.renderer(); item = item->parent()) {
++            auto* container = item->parent();
++            if (container && (container->isRenderFlexibleBox() || container->isRenderGrid()) && !item->isOutOfFlowPositioned() && item->style().order().value)
++                return true;
++        }
++        return false;
++    };
++    auto* reordered = first;
++    while (reordered && !hasReorderedAncestor(*reordered))
++        reordered = reordered->nextSibling();
++    if (!reordered) {
++        for (auto* child = first; child; child = child->nextSibling())
++            visit(child);
++        return;
++    }
++
++    Vector<RenderElement*, 16> pending;
++    auto pushChildren = [&](RenderElement& container) {
++        auto start = pending.size();
++        for (auto* child = container.lastChild(); child; child = child->previousSibling()) {
++            if (auto* element = dynamicDowncast<RenderElement>(child); element && element->mayHaveLayerInSubtree())
++                pending.append(element);
++        }
++        if (container.isRenderFlexibleBox() || container.isRenderGrid()) {
++            auto order = [](const RenderElement* item) { return item->isOutOfFlowPositioned() ? 0 : item->style().order().value; };
++            auto siblings = pending.mutableSpan().subspan(start);
++            // The stack pops in the opposite order. Equal orders retain tree order.
++            std::stable_sort(siblings.begin(), siblings.end(), [&](auto* a, auto* b) { return order(a) > order(b); });
++        }
++    };
++    Vector<RenderLayer*, 16> ordered;
++    HashSet<RenderLayer*> collected;
++    pushChildren(parent.renderer());
++    while (!pending.isEmpty()) {
++        auto* item = pending.takeLast();
++        if (!item->hasLayer()) {
++            pushChildren(*item);
++            continue;
++        }
++        auto* layer = downcast<RenderLayerModelObject>(*item).layer();
++        if (layer->parent() == &parent) {
++            collected.add(layer);
++            ordered.append(layer);
++        }
++    }
++
++    // Special layers attached outside their renderer subtree retain their slots.
++    size_t index = 0;
++    for (auto* child = first; child; child = child->nextSibling())
++        visit(collected.contains(child) ? ordered[index++] : child);
++}
++
+ void RenderLayer::updateNormalFlowList()
+ {
+     if (!m_normalFlowListDirty)
+@@ -817,7 +895,7 @@ void RenderLayer::updateNormalFlowList()
+ 
+     ASSERT(layerListMutationAllowed());
+ 
+-    for (RenderLayer* child = firstChild(); child; child = child->nextSibling()) {
++    visitChildLayersInPaintOrder(*this, [&](RenderLayer* child) {
+         // Ignore non-overflow layers and reflections.
+         if (child->isNormalFlowOnly() && !isReflectionLayer(*child)) {
+             if (!m_normalFlowList)
+@@ -825,7 +903,7 @@ void RenderLayer::updateNormalFlowList()
+             m_normalFlowList->append(child);
+             child->setWasIncludedInZOrderTree();
+         }
+-    }
++    });
+ 
+     if (m_normalFlowList)
+         m_normalFlowList->shrinkToFit();
+@@ -865,10 +943,10 @@ void RenderLayer::rebuildZOrderLists()
+ 
+ void RenderLayer::rebuildZOrderLists(std::unique_ptr<Vector<RenderLayer*>>& posZOrderList, std::unique_ptr<Vector<RenderLayer*>>& negZOrderList, OptionSet<Compositing>& accumulatedDirtyFlags)
+ {
+-    for (RenderLayer* child = firstChild(); child; child = child->nextSibling()) {
++    visitChildLayersInPaintOrder(*this, [&](RenderLayer* child) {
+         if (!isReflectionLayer(*child))
+             child->collectLayers(posZOrderList, negZOrderList, accumulatedDirtyFlags);
+-    }
++    });
+ 
+     auto compareZIndex = [] (const RenderLayer* first, const RenderLayer* second) -> bool {
+         return first->zIndex() < second->zIndex();
+@@ -972,11 +1050,11 @@ void RenderLayer::collectLayers(std::unique_ptr<Vector<RenderLayer*>>& positiveZ
+     // Recur into our children to collect more layers, but only if we don't establish
+     // a stacking context/container.
+     if (!isStacking) {
+-        for (RenderLayer* child = firstChild(); child; child = child->nextSibling()) {
++        visitChildLayersInPaintOrder(*this, [&](RenderLayer* child) {
+             // Ignore reflections.
+             if (!isReflectionLayer(*child))
+                 child->collectLayers(positiveZOrderList, negativeZOrderList, accumulatedDirtyFlags);
+-        }
++        });
+     }
+ }
+ 
+@@ -1363,6 +1441,11 @@ void RenderLayer::recursiveUpdateLayerPositions(OptionSet<UpdateLayerPositionsFl
  
          if (checkForRepaint && shouldRepaintAfterLayout() && newRects) {
              auto needsFullRepaint = repaintStatus() == RepaintStatus::NeedsFullRepaint ? RequiresFullRepaint::Yes : RequiresFullRepaint::No;
@@ -102748,7 +102887,7 @@ index 4bd303aa17e5da8a780da294d7a1337b8978d6ea..541b73c603d6df7283e0dcca23d9ec16
              auto resolvedOldRects = valueOrDefault(oldRects);
              renderer().repaintAfterLayoutIfNeeded(WTF::move(repaintContainer), needsFullRepaint, resolvedOldRects, *newRects);
          }
-@@ -3276,6 +3292,15 @@ void RenderLayer::paint(GraphicsContext& context, const LayoutRect& damageRect,
+@@ -3276,6 +3359,15 @@ void RenderLayer::paint(GraphicsContext& context, const LayoutRect& damageRect,
          widget->setOverlapTestResult(false);
  }
  
@@ -102764,7 +102903,7 @@ index 4bd303aa17e5da8a780da294d7a1337b8978d6ea..541b73c603d6df7283e0dcca23d9ec16
  void RenderLayer::clipToRect(GraphicsContext& context, GraphicsContextStateSaver& stateSaver, RegionContextStateSaver& regionContextStateSaver, const LayerPaintingInfo& paintingInfo, OptionSet<PaintBehavior> paintBehavior, const ClipRect& clipRect, BorderRadiusClippingRule rule)
  {
      bool needsClipping = !clipRect.isInfinite() && clipRect.rect() != paintingInfo.paintDirtyRect;
-@@ -3570,6 +3595,20 @@ RenderLayerFilters* RenderLayer::filtersForPainting(GraphicsContext& context, Op
+@@ -3570,6 +3662,20 @@ RenderLayerFilters* RenderLayer::filtersForPainting(GraphicsContext& context, Op
      return &ensureLayerFilters();
  }
  
@@ -102785,7 +102924,7 @@ index 4bd303aa17e5da8a780da294d7a1337b8978d6ea..541b73c603d6df7283e0dcca23d9ec16
  GraphicsContext* RenderLayer::setupFilters(GraphicsContext& destinationContext, LayerPaintingInfo& paintingInfo, OptionSet<PaintLayerFlag>& paintFlags, const LayoutSize& offsetFromRoot, const ClipRect& backgroundRect)
  {
      auto* paintingFilters = filtersForPainting(destinationContext, paintFlags, paintingInfo.paintBehavior);
-@@ -3579,6 +3618,13 @@ GraphicsContext* RenderLayer::setupFilters(GraphicsContext& destinationContext,
+@@ -3579,6 +3685,13 @@ GraphicsContext* RenderLayer::setupFilters(GraphicsContext& destinationContext,
      LayoutRect filterRepaintRect = paintingFilters->dirtySourceRect();
      filterRepaintRect.move(offsetFromRoot);
  
@@ -102799,7 +102938,7 @@ index 4bd303aa17e5da8a780da294d7a1337b8978d6ea..541b73c603d6df7283e0dcca23d9ec16
      auto rootRelativeBounds = calculateLayerBounds(paintingInfo.rootLayer, offsetFromRoot, { });
  
      // When the filter is applied via a transparency layer directly on the destination context (e.g. CG drop-shadow),
-@@ -3999,8 +4045,12 @@ void RenderLayer::paintLayerContents(GraphicsContext& context, const LayerPainti
+@@ -3999,8 +4112,12 @@ void RenderLayer::paintLayerContents(GraphicsContext& context, const LayerPainti
          }
  
          if (applySVGClippingMask || (!(paintFlags & PaintLayerFlag::PaintingCompositingMaskPhase) && (paintFlags & PaintLayerFlag::PaintingCompositingClipPathPhase))) {
@@ -102814,7 +102953,7 @@ index 4bd303aa17e5da8a780da294d7a1337b8978d6ea..541b73c603d6df7283e0dcca23d9ec16
          }
  
          if (localPaintFlags & PaintLayerFlag::PaintingChildClippingMaskPhase) {
-@@ -5752,6 +5802,14 @@ LayoutRect RenderLayer::calculateLayerBounds(const RenderLayer* ancestorLayer, c
+@@ -5752,6 +5869,14 @@ LayoutRect RenderLayer::calculateLayerBounds(const RenderLayer* ancestorLayer, c
          // FIXME: border-radius not accounted for.
          // FIXME: Regions not accounted for.
          const RenderLayer* clippingRootLayer = flags & UseLocalClipRectExcludingCompositingIfPossible ? this : clippingRootForPainting();
@@ -102829,7 +102968,7 @@ index 4bd303aa17e5da8a780da294d7a1337b8978d6ea..541b73c603d6df7283e0dcca23d9ec16
          LayoutSize offsetFromRoot = offsetFromAncestor(clippingRootLayer);
          LayoutRect clipRect = clipRectRelativeToAncestor(clippingRootLayer, offsetFromRoot, infiniteRect);
          if (clipRect.isInfinite())
-@@ -6299,7 +6357,10 @@ bool RenderLayer::isVisuallyNonEmpty(PaintedContentRequest* request) const
+@@ -6299,7 +6424,10 @@ bool RenderLayer::isVisuallyNonEmpty(PaintedContentRequest* request) const
  void RenderLayer::styleChanged(Style::Difference diff, const Style::ComputedStyle* oldStyle)
  {
      setIsNormalFlowOnly(shouldBeNormalFlowOnly());
