@@ -71927,7 +71927,7 @@ index 74cfeb60ac3daa537785693be3917358aa26a2b5..1f2cec305c01df570bc8b2646cd0e7bc
  
  void FontCache::platformPurgeInactiveFontData()
 diff --git a/Source/WebCore/platform/graphics/skia/FontSkia.cpp b/Source/WebCore/platform/graphics/skia/FontSkia.cpp
-index a322e5f3f28177dbb62613a726a819d673e0927f..175fad5329084bbf84effa98042081b677afa725 100644
+index a322e5f3f28177dbb62613a726a819d673e0927f..df2fd5174a38b8f30e40a6f6ad9a9cdb18179f44 100644
 --- a/Source/WebCore/platform/graphics/skia/FontSkia.cpp
 +++ b/Source/WebCore/platform/graphics/skia/FontSkia.cpp
 @@ -92,6 +92,10 @@ float Font::platformWidthForGlyph(Glyph glyph) const
@@ -71941,7 +71941,7 @@ index a322e5f3f28177dbb62613a726a819d673e0927f..175fad5329084bbf84effa98042081b6
  
      return SkScalarToFloat(width);
  }
-@@ -232,13 +236,22 @@ sk_sp<SkTextBlob> FontBase::buildTextBlob(std::span<const GlyphBufferGlyph> glyp
+@@ -232,31 +236,48 @@ sk_sp<SkTextBlob> FontBase::buildTextBlob(std::span<const GlyphBufferGlyph> glyp
      auto edging = allowsAntialiasing() ? edgingForFontSmoothingMode(font, smoothingMode) : SkFont::Edging::kAlias;
      bool isVertical = m_platformData.orientation() == FontOrientation::Vertical;
  
@@ -71965,6 +71965,38 @@ index a322e5f3f28177dbb62613a726a819d673e0927f..175fad5329084bbf84effa98042081b6
          return isVertical ? builder.allocRunPos(copiedFont, glyphs.size()) : builder.allocRunPosH(copiedFont, glyphs.size(), 0);
      }();
  
+     auto bufferGlyphs = unsafeMakeSpan<SkGlyphID>(buffer.glyphs, glyphs.size());
+     auto bufferPositions = unsafeMakeSpan<SkScalar>(buffer.pos, glyphs.size() * (isVertical ? 2 : 1));
+ 
++#if PLATFORM(HAIKU)
++    auto* verticalMetrics = isVertical ? m_platformData.skiaHarfBuzzFont() : nullptr;
++#endif
+     FloatSize glyphPosition;
+     for (size_t i = 0; i < glyphs.size(); ++i) {
+         bufferGlyphs[i] = glyphs[i];
+ 
+         if (isVertical) {
+-            glyphPosition += advances[i];
+-            bufferPositions[2 * i] = glyphPosition.height();
+-            bufferPositions[2 * i + 1] = glyphPosition.width();
+-        } else {
++            float inlineOffset = advances[i].width();
++#if PLATFORM(HAIKU)
++            // Skia paints from the horizontal baseline. Place it at the
++            // vertical origin of this glyph, before advancing to the next.
++            if (verticalMetrics)
++                inlineOffset = verticalMetrics->verticalOriginYHaiku(font, glyphs[i]).value_or(inlineOffset);
++#endif
++            bufferPositions[2 * i] = glyphPosition.height() + advances[i].height();
++            bufferPositions[2 * i + 1] = glyphPosition.width() + inlineOffset;
++        } else
+             bufferPositions[i] = glyphPosition.width();
+-            glyphPosition += advances[i];
+-        }
++        glyphPosition += advances[i];
+     }
+ 
+     return builder.make();
 diff --git a/Source/WebCore/platform/graphics/skia/GraphicsContextSkia.cpp b/Source/WebCore/platform/graphics/skia/GraphicsContextSkia.cpp
 index a3cb981bd76fc7f7946862f8f7be53fe133bae79..6fc74815608850f78219c76d0e9c0cff5721a7f9 100644
 --- a/Source/WebCore/platform/graphics/skia/GraphicsContextSkia.cpp
@@ -72931,7 +72963,7 @@ index 776466ea87d3d721d32ac4e52db702bb2b544e46..6684517a6c57ba91fbb37fb77648b4d7
      m_skiaGLContexts.add(*s_skiaGLContext);
  }
 diff --git a/Source/WebCore/platform/graphics/skia/SkiaHarfBuzzFont.cpp b/Source/WebCore/platform/graphics/skia/SkiaHarfBuzzFont.cpp
-index daeed3e5dc0bf77c433fb0df23a09ecf4a677d10..8b6ddc0b5d0b8dc714e552274b67740d9d788538 100644
+index daeed3e5dc0bf77c433fb0df23a09ecf4a677d10..f71ce7709d3207fe0d621d436e93f84c6ef00ae5 100644
 --- a/Source/WebCore/platform/graphics/skia/SkiaHarfBuzzFont.cpp
 +++ b/Source/WebCore/platform/graphics/skia/SkiaHarfBuzzFont.cpp
 @@ -33,6 +33,7 @@
@@ -72942,7 +72974,20 @@ index daeed3e5dc0bf77c433fb0df23a09ecf4a677d10..8b6ddc0b5d0b8dc714e552274b67740d
  
  WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
  #include <skia/core/SkStream.h>
-@@ -194,11 +195,42 @@ std::optional<hb_codepoint_t> SkiaHarfBuzzFont::glyph(hb_codepoint_t unicode, st
+@@ -128,6 +129,12 @@ SkiaHarfBuzzFont::SkiaHarfBuzzFont(SkTypeface& typeface)
+     : m_uniqueID(typeface.uniqueID())
+     , m_isColorBitmapFont(FontPlatformData::skiaTypefaceHasAnySupportedColorTable(typeface))
+ {
++#if PLATFORM(HAIKU)
++    // HarfBuzz reads a stored vertical origin from VORG, or from a
++    // TrueType outline with vertical metrics. Otherwise it synthesizes one.
++    m_hasVerticalGlyphOrigins = typeface.getTableSize(SkSetFourByteTag('V', 'O', 'R', 'G'))
++        || (typeface.getTableSize(SkSetFourByteTag('g', 'l', 'y', 'f')) && typeface.getTableSize(SkSetFourByteTag('v', 'm', 't', 'x')));
++#endif
+     auto hbFace = createHarfBuzzFace(typeface);
+     HbUniquePtr<hb_font_t> hbFont(hb_font_create(hbFace.get()));
+ 
+@@ -194,11 +201,55 @@ std::optional<hb_codepoint_t> SkiaHarfBuzzFont::glyph(hb_codepoint_t unicode, st
      return std::nullopt;
  }
  
@@ -72971,6 +73016,19 @@ index daeed3e5dc0bf77c433fb0df23a09ecf4a677d10..8b6ddc0b5d0b8dc714e552274b67740d
 +        return width;
 +    return static_cast<SkScalar>(exact);
 +}
++
++std::optional<SkScalar> SkiaHarfBuzzFont::verticalOriginYHaiku(const SkFont& font, hb_codepoint_t glyph) const
++{
++    if (!m_hasVerticalGlyphOrigins)
++        return std::nullopt;
++    auto* parent = hb_font_get_parent(m_font.get());
++    int xScale, yScale;
++    hb_font_get_scale(parent, &xScale, &yScale);
++    hb_position_t x, y;
++    if (yScale <= 0 || !hb_font_get_glyph_v_origin(parent, glyph, &x, &y))
++        return std::nullopt;
++    return static_cast<SkScalar>(static_cast<double>(y) * font.getSize() / yScale);
++}
 +#endif
 +
  hb_position_t SkiaHarfBuzzFont::glyphWidth(hb_codepoint_t glyph)
@@ -72985,7 +73043,7 @@ index daeed3e5dc0bf77c433fb0df23a09ecf4a677d10..8b6ddc0b5d0b8dc714e552274b67740d
      return skScalarToHarfBuzzPosition(width);
  }
  
-@@ -218,6 +250,12 @@ void SkiaHarfBuzzFont::glyphWidths(unsigned count, const hb_codepoint_t* glyphs,
+@@ -218,6 +269,12 @@ void SkiaHarfBuzzFont::glyphWidths(unsigned count, const hb_codepoint_t* glyphs,
          for (unsigned i = 0; i < count; ++i)
              widths[i] = SkScalarRoundToInt(widths[i]);
      }
@@ -72999,10 +73057,10 @@ index daeed3e5dc0bf77c433fb0df23a09ecf4a677d10..8b6ddc0b5d0b8dc714e552274b67740d
      for (unsigned i = 0; i < count; ++i) {
          *advances = skScalarToHarfBuzzPosition(widths[i]);
 diff --git a/Source/WebCore/platform/graphics/skia/SkiaHarfBuzzFont.h b/Source/WebCore/platform/graphics/skia/SkiaHarfBuzzFont.h
-index c2d6ac748ed19ad7daf8887b9678a32eef10e3f5..e1edefcf3bb920ab49e1bd244577ff75e1c288ac 100644
+index c2d6ac748ed19ad7daf8887b9678a32eef10e3f5..01498b16679a9f76eaf6d82a4c6900537874abb2 100644
 --- a/Source/WebCore/platform/graphics/skia/SkiaHarfBuzzFont.h
 +++ b/Source/WebCore/platform/graphics/skia/SkiaHarfBuzzFont.h
-@@ -49,6 +49,11 @@ public:
+@@ -49,6 +49,12 @@ public:
      hb_position_t glyphWidth(hb_codepoint_t);
      void glyphWidths(unsigned count, const hb_codepoint_t* glyphs, unsigned glyphStride, hb_position_t* advances, unsigned advanceStride);
      void glyphExtents(hb_codepoint_t, hb_glyph_extents_t*);
@@ -73010,10 +73068,21 @@ index c2d6ac748ed19ad7daf8887b9678a32eef10e3f5..e1edefcf3bb920ab49e1bd244577ff75
 +    // A subpixel font's glyph width, Skia's width without FreeType's scale
 +    // rounding.
 +    SkScalar exactWidthHaiku(const SkFont&, hb_codepoint_t, SkScalar width) const;
++    std::optional<SkScalar> verticalOriginYHaiku(const SkFont&, hb_codepoint_t) const;
 +#endif
  
      bool isColorBitmapFont() const { return m_isColorBitmapFont; }
  
+@@ -63,6 +69,9 @@ private:
+     HbUniquePtr<hb_font_t> m_font;
+     SkFont m_scaledFont;
+     bool m_isColorBitmapFont { false };
++#if PLATFORM(HAIKU)
++    bool m_hasVerticalGlyphOrigins { false };
++#endif
+ };
+ 
+ } // namespace WebCore
 diff --git a/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.cpp b/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.cpp
 index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..5919dc5b6e7e87c71deb951fe0b40e20779fbbef 100644
 --- a/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.cpp
