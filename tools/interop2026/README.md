@@ -48,6 +48,10 @@ curl -sL https://raw.githubusercontent.com/web-platform-tests/wpt.fyi/main/webap
 For the combined 2025 and 2026 review, use the saved dashboard configuration
 and the metadata checkout from the review. The combined `labels.json` uses
 year-qualified area names. `all.txt` lists each test URL once across both years.
+`score.py` reports a mean for each year's focus areas. Each URL in `tests.json`
+has an `areas` list with every matching focus area and retains the legacy
+`area` field. `gaps.py` weights a URL in each area to which it belongs when
+estimating the annual point gain. Its issue list includes each URL once.
 
 ```sh
 python3 "$KIT/labels.py" wpt-metadata both-years --year 2025 --year 2026 --interop-data interop-data.json

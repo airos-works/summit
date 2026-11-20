@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""score.py REPORT.json [REPORT2.json ...]: Interop 2026 scores for Summit's
+"""score.py REPORT.json [REPORT2.json ...]: annual Interop focus-area scores for Summit's
 wptreport(s) next to Safari Technology Preview and Safari stable (wpt.fyi
 summaries), per focus area, plus a per-test table (tests.json) for triage.
 
@@ -7,6 +7,9 @@ Per-test score = passing subtests / subtests (a test without subtests: 1 when
 it passes); area score = mean over the area's tests, x1000, as wpt.fyi does.
 Later reports override earlier ones test by test (reruns)."""
 import json, sys, os
+from statistics import mean
+
+from focus_areas import areas_by_year, display_area
 
 ROOT = os.environ.get("INTEROP_ROOT", "/data1/airos/interop2026")
 labels = json.load(open(f"{ROOT}/labels.json"))
@@ -39,22 +42,28 @@ summit = summit_scores(sys.argv[1:])
 stp = safari_scores(f"{ROOT}/stp-summary.json")
 stable = safari_scores(f"{ROOT}/safari-summary.json")
 
-rows, tests = [], {}
-for area in sorted(labels):
-    ts = labels[area]
-    ran = [t for t in ts if t in summit]
-    s = sum(summit[t]["score"] for t in ts if t in summit) / len(ts) * 1000
-    p = sum(stp.get(t, 0) for t in ts) / len(ts) * 1000
-    q = sum(stable.get(t, 0) for t in ts) / len(ts) * 1000
-    rows.append((area.replace("interop-2025-", "").replace("interop-2026-", ""), len(ts), len(ran), s, p, q))
-    for t in ts:
-        e = dict(summit.get(t, {"score": None, "status": "NOT RUN"}))
-        e.update(area=area, stp=stp.get(t), safari=stable.get(t))
-        tests[t] = e
-
+tests = {}
 print(f"{'area':36} {'tests':>5} {'ran':>5} {'Summit':>7} {'STP':>7} {'Safari':>7}")
-for name, n, ran, s, p, q in rows:
-    print(f"{name:36} {n:5} {ran:5} {s:7.1f} {p:7.1f} {q:7.1f}")
-k = len(rows)
-print(f"{'TOTAL (mean of areas)':36} {'':5} {'':5} {sum(r[3] for r in rows)/k:7.1f} {sum(r[4] for r in rows)/k:7.1f} {sum(r[5] for r in rows)/k:7.1f}")
+for year, areas in sorted(areas_by_year(labels).items()):
+    scores = []
+    for area, urls in sorted(areas.items()):
+        ran = sum(url in summit for url in urls)
+        summit_score = sum(summit[url]["score"] for url in urls if url in summit) / len(urls) * 1000
+        stp_score = mean(stp.get(url, 0) for url in urls) * 1000
+        stable_score = mean(stable.get(url, 0) for url in urls) * 1000
+        scores.append((summit_score, stp_score, stable_score))
+        name = display_area(area)
+        print(f"{name:36} {len(urls):5} {ran:5} {summit_score:7.1f} {stp_score:7.1f} {stable_score:7.1f}")
+
+        for url in urls:
+            if url not in tests:
+                entry = dict(summit.get(url, {"score": None, "status": "NOT RUN"}))
+                entry.update(areas=[], stp=stp.get(url), safari=stable.get(url))
+                tests[url] = entry
+            tests[url]["areas"].append(area)
+            tests[url]["area"] = area  # Keep the legacy last-area field for existing readers.
+
+    title = f"{year} TOTAL (mean of areas)".lstrip()
+    summit_mean, stp_mean, stable_mean = map(mean, zip(*scores))
+    print(f"{title:36} {'':5} {'':5} {summit_mean:7.1f} {stp_mean:7.1f} {stable_mean:7.1f}")
 json.dump(tests, open(f"{ROOT}/results/tests.json", "w"), indent=1)
