@@ -32752,6 +32752,61 @@ index e1a87c9b816ea7528a88fad4010baada131183dc..2113de8d3c4ee98bf10ecc8af2d93a43
              ASSERT(cachedWidth == nonWhitespaceContentWidth(inlineTextBox, startPosition, endPosition, mayHaveGlyphOverflow).width);
              ASSERT(!mayHaveGlyphOverflow);
              return { cachedWidth, { } };
+diff --git a/Source/WebCore/layout/formattingContexts/inline/InlineLineBuilder.cpp b/Source/WebCore/layout/formattingContexts/inline/InlineLineBuilder.cpp
+index 120eabfb07a328ff828b367d3dbe18bc1734743e..f46651d93bd1b2e25810119b5c4dbbe416f79f8b 100644
+--- a/Source/WebCore/layout/formattingContexts/inline/InlineLineBuilder.cpp
++++ b/Source/WebCore/layout/formattingContexts/inline/InlineLineBuilder.cpp
+@@ -1075,11 +1075,40 @@ void LineBuilder::candidateContentForLine(LineCandidate& lineCandidate, std::pai
+     auto isFirstFormattedLineCandidate = this->isFirstFormattedLineCandidate();
+     lineCandidate.reset();
+ 
++#if PLATFORM(HAIKU)
++    // A glyph run stays fractional internally. At a change of font or an
++    // atomic box, use the same edge as the LayoutUnit-based intrinsic size.
++    auto widthAtTextBoundary = [&](size_t index, InlineLayoutUnit width, InlineLayoutUnit wordSpacing) {
++        auto nextIndex = index + 1;
++        while (nextIndex < layoutRange.endIndex() && m_inlineItemList[nextIndex].isInlineBoxStartOrEnd())
++            ++nextIndex;
++        if (nextIndex == layoutRange.endIndex() || width <= 0)
++            return width;
++
++        auto& item = m_inlineItemList[index];
++        auto& next = m_inlineItemList[nextIndex];
++        if (!next.isAtomicInlineBox()) {
++            if (!next.isText() || &item.layoutBox() == &next.layoutBox())
++                return width;
++            auto& currentStyle = isFirstFormattedLineCandidate ? item.firstLineStyle() : item.style();
++            auto& nextStyle = isFirstFormattedLineCandidate ? next.firstLineStyle() : next.style();
++            if (currentStyle.fontCascade() == nextStyle.fontCascade())
++                return width;
++        }
++        auto right = currentLogicalRight + width + wordSpacing;
++        auto adjustment = LayoutUnit::fromFloatCeil(right).toFloat() - right;
++        return adjustment > 0 && adjustment <= LayoutUnit::epsilon() ? width + adjustment : width;
++    };
++#endif
++
+     auto isLeadingPartiaContent = startEndIndex.first == layoutRange.startIndex() && m_partialLeadingTextItem;
+     if (isLeadingPartiaContent) {
+         ASSERT(!m_overflowingLogicalWidth);
+         // Handle leading partial content first (overflowing text from the previous line).
+         auto itemWidth = formattingContext().formattingUtils().inlineItemWidth(*m_partialLeadingTextItem, m_lineContentEdgeOffset + currentLogicalRight, isFirstFormattedLineCandidate);
++#if PLATFORM(HAIKU)
++        itemWidth = widthAtTextBoundary(startEndIndex.first, itemWidth, 0);
++#endif
+         lineCandidate.inlineContent.appendInlineItem(*m_partialLeadingTextItem, m_partialLeadingTextItem->style(), itemWidth);
+         currentLogicalRight += itemWidth;
+         ++startEndIndex.first;
+@@ -1118,6 +1147,9 @@ void LineBuilder::candidateContentForLine(LineCandidate& lineCandidate, std::pai
+                 if (auto trimmableSpacing = m_textSpacingContext.trimmableTextSpacings.find(index); trimmableSpacing != m_textSpacingContext.trimmableTextSpacings.end())
+                     logicalWidth -= trimmableSpacing->value;
+             }
++#if PLATFORM(HAIKU)
++            logicalWidth = widthAtTextBoundary(index, logicalWidth, inlineTextItem->isWordSeparator() ? style.fontCascade().wordSpacing() : 0.f);
++#endif
+             lineCandidate.inlineContent.appendInlineItem(*inlineTextItem, style, logicalWidth);
+             // Word spacing does not make the run longer, but it produces an offset instead. See Line::appendTextContent as well.
+             currentLogicalRight += logicalWidth + (inlineTextItem->isWordSeparator() ? style.fontCascade().wordSpacing() : 0.f);
 diff --git a/Source/WebCore/layout/formattingContexts/inline/text/TextUtil.cpp b/Source/WebCore/layout/formattingContexts/inline/text/TextUtil.cpp
 index 3ddfafe7bd2cd8dde2682df00f9c2240fb3d2867..f76efe98e22761e64271c8e071c17096abe17953 100644
 --- a/Source/WebCore/layout/formattingContexts/inline/text/TextUtil.cpp
