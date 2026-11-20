@@ -26041,7 +26041,7 @@ index c4227c5e6920c9454e24b185e60c6d1a403b34ee..34acd051890f7194b85c26a8a2750e68
          URL responseURL = loader.responseURL();
          if (!loader.retrievedFromServiceWorkerCache()) {
 diff --git a/Source/WebCore/bindings/js/WebCoreBuiltinNames.h b/Source/WebCore/bindings/js/WebCoreBuiltinNames.h
-index 6d3962f03ae12aa4f41c8cba628877c5efa76bba..642550f93f045ccd71b94a548e927c802476e63f 100644
+index 6d3962f03ae12aa4f41c8cba628877c5efa76bba..83ec7c44176c2a579fef2d181764c46ddd0fcef0 100644
 --- a/Source/WebCore/bindings/js/WebCoreBuiltinNames.h
 +++ b/Source/WebCore/bindings/js/WebCoreBuiltinNames.h
 @@ -414,6 +414,7 @@ namespace WebCore {
@@ -26085,6 +26085,14 @@ index 6d3962f03ae12aa4f41c8cba628877c5efa76bba..642550f93f045ccd71b94a548e927c80
      macro(UndoItem) \
      macro(UndoManager) \
      macro(VideoDecoder) \
+@@ -692,6 +719,7 @@ namespace WebCore {
+     macro(ondeviceorientation) \
+     macro(onnotificationclick) \
+     macro(onnotificationclose) \
++    macro(onpointerrawupdate) \
+     macro(onpush) \
+     macro(onpushsubscriptionchange) \
+     macro(onrtctransform) \
 diff --git a/Source/WebCore/contentextensions/ContentExtension.cpp b/Source/WebCore/contentextensions/ContentExtension.cpp
 index 369fb6f3979e2f42a0a84bb659f3c30789084568..1edc19de057fe7e9a35a498a087377fa8c82f767 100644
 --- a/Source/WebCore/contentextensions/ContentExtension.cpp
@@ -28871,10 +28879,18 @@ index 677f2e8a4fb88f674f1542b6dbf72e8316739ed4..e8f5938b5a9e4b26b3a4d2ef26526fb4
 +
 +ValueEvent conditional=WEB_BLUETOOTH
 diff --git a/Source/WebCore/dom/EventNames.json b/Source/WebCore/dom/EventNames.json
-index 444e32e4b5800f31c5a3f07e8dd21fdf0478c717..37cf9c0cb2ae53ab809594e3bc0ab3e89bf8ed57 100644
+index 444e32e4b5800f31c5a3f07e8dd21fdf0478c717..eb8973088d40532d34c824724b56f3d92cc471aa 100644
 --- a/Source/WebCore/dom/EventNames.json
 +++ b/Source/WebCore/dom/EventNames.json
-@@ -325,6 +325,10 @@
+@@ -200,6 +200,7 @@
+     "pointermove": { "categories": ["TouchRelated", "ExtendedTouchRelated"], "defaultEventHandler": true },
+     "pointerout": { "categories": ["TouchRelated", "ExtendedTouchRelated", "EventTimingEligible"], "defaultEventHandler": true },
+     "pointerover": { "categories": ["TouchRelated", "ExtendedTouchRelated", "EventTimingEligible"], "defaultEventHandler": true },
++    "pointerrawupdate": { "categories": ["TouchRelated", "ExtendedTouchRelated"], "defaultEventHandler": true },
+     "pointerup": { "categories": ["TouchRelated", "ExtendedTouchRelated", "EventTimingEligible"], "defaultEventHandler": true },
+     "popstate": { },
+     "previoustrack": { },
+@@ -325,6 +326,10 @@
      "webkitmouseforcewillbegin": { },
      "webkitneedkey": { },
      "webkitnetworkinfochange": { },
@@ -28991,6 +29007,20 @@ index a503201bfcf8a65e2591c30245a88c6c5b8d31f3..593f339fa2d8a14b5275a2259b2483a1
  }
  
  void ExtensionStyleSheets::removePageSpecificUserStyleSheet(const UserStyleSheet& userStyleSheet)
+diff --git a/Source/WebCore/dom/GlobalEventHandlers+PointerEvents.idl b/Source/WebCore/dom/GlobalEventHandlers+PointerEvents.idl
+index 4957a02fc53a6aa471f5256f14ea50036e37933c..393225e059bdb0fe940043e74c36655cc2a4a355 100644
+--- a/Source/WebCore/dom/GlobalEventHandlers+PointerEvents.idl
++++ b/Source/WebCore/dom/GlobalEventHandlers+PointerEvents.idl
+@@ -29,8 +29,7 @@ partial interface mixin GlobalEventHandlers {
+     attribute EventHandler onlostpointercapture;
+     attribute EventHandler onpointerdown;
+     attribute EventHandler onpointermove;
+-    // FIXME: Implement this.
+-    // [SecureContext] attribute EventHandler onpointerrawupdate;
++    [Conditional=POINTER_RAW_UPDATE, SecureContext] attribute EventHandler onpointerrawupdate;
+     attribute EventHandler onpointerup;
+     attribute EventHandler onpointercancel;
+     attribute EventHandler onpointerover;
 diff --git a/Source/WebCore/dom/MouseEvent.cpp b/Source/WebCore/dom/MouseEvent.cpp
 index 440e031d6cc0261d2821f47e0c75305ba858d21c..fafd8f32ed50c540d82310c767f13902f35e0f6b 100644
 --- a/Source/WebCore/dom/MouseEvent.cpp
@@ -29086,11 +29116,33 @@ index 2d5334014685d35d974eed8d6ec9be5c0865344b..5d344747f435031557ca31614aaebe4a
  
      // FIXME: non-standard.
      double movementX = 0;
+diff --git a/Source/WebCore/dom/MouseRelatedEvent.cpp b/Source/WebCore/dom/MouseRelatedEvent.cpp
+index 6faad9e9d37eb57e560df1b47dbc6c904b2a85a9..143c3ea0597790a862b53993b3c2cc58b2d69dad 100644
+--- a/Source/WebCore/dom/MouseRelatedEvent.cpp
++++ b/Source/WebCore/dom/MouseRelatedEvent.cpp
+@@ -99,6 +99,7 @@ static inline bool isMoveEventType(const AtomString& eventType)
+     auto& eventNames = WebCore::eventNames();
+     return eventType == eventNames.mousemoveEvent
+         || eventType == eventNames.pointermoveEvent
++        || eventType == eventNames.pointerrawupdateEvent
+         || eventType == eventNames.touchmoveEvent;
+ }
+ 
 diff --git a/Source/WebCore/dom/PointerEvent.cpp b/Source/WebCore/dom/PointerEvent.cpp
-index dd8c59fe17c70a72f03df3c884b5a92f8f655e61..3b0a4e60a19bbb0fe8bbe9f38a64bc542df69298 100644
+index dd8c59fe17c70a72f03df3c884b5a92f8f655e61..3ba23dc2dc6419d05a1e573a3d133c05652c0ec8 100644
 --- a/Source/WebCore/dom/PointerEvent.cpp
 +++ b/Source/WebCore/dom/PointerEvent.cpp
-@@ -128,10 +128,23 @@ auto PointerEvent::angleFromTilt(long tiltX, long tiltY) -> PointerEventAngle
+@@ -80,7 +80,8 @@ Ref<PointerEvent> PointerEvent::create(const AtomString& type, MouseButton butto
+ 
+ Ref<PointerEvent> PointerEvent::create(const AtomString& type, MouseButton button, const MouseEvent& mouseEvent, PointerID pointerId, const String& pointerType, CanBubble canBubble, IsCancelable isCancelable)
+ {
+-    return adoptRef(*new PointerEvent(type, button, mouseEvent, pointerId, pointerType, canBubble, isCancelable, typeIsComposed(type)));
++    auto composed = canBubble == CanBubble::No ? IsComposed::No : typeIsComposed(type);
++    return adoptRef(*new PointerEvent(type, button, mouseEvent, pointerId, pointerType, canBubble, isCancelable, composed));
+ }
+ 
+ Ref<PointerEvent> PointerEvent::create(const AtomString& type, PointerID pointerId, const String& pointerType, IsPrimary isPrimary)
+@@ -128,10 +129,23 @@ auto PointerEvent::angleFromTilt(long tiltX, long tiltY) -> PointerEventAngle
  // This algorithm is equivalent to the one provided in https://w3c.github.io/pointerevents/#converting-between-tiltx-tilty-and-altitudeangle-azimuthangle.
  auto PointerEvent::tiltFromAngle(double altitudeAngle, double azimuthAngle) -> PointerEventTilt
  {
@@ -29117,7 +29169,7 @@ index dd8c59fe17c70a72f03df3c884b5a92f8f655e61..3b0a4e60a19bbb0fe8bbe9f38a64bc54
  }
  
  PointerEvent::PointerEvent(const AtomString& type, Init&& initializer, IsTrusted isTrusted)
-@@ -141,28 +154,27 @@ PointerEvent::PointerEvent(const AtomString& type, Init&& initializer, IsTrusted
+@@ -141,33 +155,32 @@ PointerEvent::PointerEvent(const AtomString& type, Init&& initializer, IsTrusted
      , m_height(initializer.height)
      , m_pressure(initializer.pressure)
      , m_tangentialPressure(initializer.tangentialPressure)
@@ -29160,6 +29212,43 @@ index dd8c59fe17c70a72f03df3c884b5a92f8f655e61..3b0a4e60a19bbb0fe8bbe9f38a64bc54
  }
  
  static Vector<Ref<PointerEvent>> createCoalescedPointerEvents(const AtomString& type, MouseButton button, const MouseEvent& mouseEvent, PointerID pointerId, const String& pointerType)
+ {
+-    if (type != eventNames().pointermoveEvent)
++    if (type != eventNames().pointermoveEvent && type != eventNames().pointerrawupdateEvent)
+         return { };
+ 
+     // Populated in accordance with the https://www.w3.org/TR/pointerevents3/#populating-and-maintaining-the-coalesced-and-predicted-events-lists spec.
+@@ -178,6 +191,8 @@ static Vector<Ref<PointerEvent>> createCoalescedPointerEvents(const AtomString&
+         result.append(WTF::move(pointerEvent));
+     }
+ 
++    if (result.isEmpty())
++        result.append(PointerEvent::create(type, button, mouseEvent, pointerId, pointerType, Event::CanBubble::No, Event::IsCancelable::No));
+     return result;
+ }
+ 
+@@ -239,8 +254,8 @@ PointerEvent::PointerEvent(
+     , m_pointerType(pointerType)
+     , m_isPrimary(true)
+     , m_fractionalCoordinatesAllowed(fractionalCoordinatesAllowedForType(type))
+-    , m_coalescedEvents(createCoalescedPointerEvents(type, button, mouseEvent, pointerId, pointerType))
+-    , m_predictedEvents(createPredictedPointerEvents(type, button, mouseEvent, pointerId, pointerType))
++    , m_coalescedEvents(canBubble == CanBubble::Yes ? createCoalescedPointerEvents(type, button, mouseEvent, pointerId, pointerType) : Vector<Ref<PointerEvent>> { })
++    , m_predictedEvents(canBubble == CanBubble::Yes ? createPredictedPointerEvents(type, button, mouseEvent, pointerId, pointerType) : Vector<Ref<PointerEvent>> { })
+ {
+ }
+ 
+@@ -281,8 +296,8 @@ Vector<Ref<PointerEvent>> PointerEvent::getCoalescedEvents() const
+ #if ASSERT_ENABLED
+     if (isTrusted()) {
+         auto& names = eventNames();
+-        if (type() == names.pointermoveEvent)
+-            ASSERT(!m_coalescedEvents.isEmpty(), "Trusted pointermove events must have more than zero coalesced events.");
++        if ((type() == names.pointermoveEvent || type() == names.pointerrawupdateEvent) && bubbles())
++            ASSERT(!m_coalescedEvents.isEmpty(), "A dispatched movement event must include a sample.");
+         else
+             ASSERT(m_coalescedEvents.isEmpty(), "Trusted non-pointermove events must have zero coalesced events.");
+ 
 diff --git a/Source/WebCore/dom/PointerEvent.h b/Source/WebCore/dom/PointerEvent.h
 index a9ad0f77eedb629a360c8ec77257e84e59418dbf..90bd7faf72438b58473914dded0a2b5c4a1d4231 100644
 --- a/Source/WebCore/dom/PointerEvent.h
@@ -30034,6 +30123,18 @@ index 205fd8d4e80e6c9bfe0e2374676062012d50281c..e96d43642c5b5ff55754b96bcc6cbad2
      using CachedFrameBase::view;
      using CachedFrameBase::url;
      DocumentLoader* documentLoader() const { return m_documentLoader.get(); }
+diff --git a/Source/WebCore/html/HTMLAttributeNames.in b/Source/WebCore/html/HTMLAttributeNames.in
+index 69cdf33473f25d81d415289b8390791f03279282..35ead79216897eae7ee4c404c353055307578639 100644
+--- a/Source/WebCore/html/HTMLAttributeNames.in
++++ b/Source/WebCore/html/HTMLAttributeNames.in
+@@ -312,6 +312,7 @@ onpointerleave
+ onpointermove
+ onpointerout
+ onpointerover
++onpointerrawupdate
+ onpointerup
+ onpopstate
+ onprogress
 diff --git a/Source/WebCore/html/HTMLCanvasElement.cpp b/Source/WebCore/html/HTMLCanvasElement.cpp
 index 9ca0df74c9d224f9cde8226eda2e99798d08dd72..31e0ca8c242fb7d8d7fd589c4749505b3275fa48 100644
 --- a/Source/WebCore/html/HTMLCanvasElement.cpp
@@ -34299,7 +34400,7 @@ index 20fa89dbac43fca28edabb48235e4a35ac61b8f2..e285f6f84746eccd908c89ee80b846d9
      virtual unsigned remoteImagesCountForTesting() const { return 0; }
  
 diff --git a/Source/WebCore/page/EventHandler.cpp b/Source/WebCore/page/EventHandler.cpp
-index 4555034d8312449920f8f16e8a9c252277d25003..65f28b06cdc20feebc1514c94cfed0c2fc43cba8 100644
+index 4555034d8312449920f8f16e8a9c252277d25003..1946a0eb78565eee67ba9d28d1586e653ca823b6 100644
 --- a/Source/WebCore/page/EventHandler.cpp
 +++ b/Source/WebCore/page/EventHandler.cpp
 @@ -2568,10 +2568,9 @@ bool EventHandler::swallowAnyClickEvent(const PlatformMouseEvent& platformMouseE
@@ -34328,7 +34429,79 @@ index 4555034d8312449920f8f16e8a9c252277d25003..65f28b06cdc20feebc1514c94cfed0c2
      if (element)
          updateMouseEventTargetNode(eventNames().gotpointercaptureEvent, element, m_lastPlatformMouseEvent, FireMouseOverOut::Yes);
  }
-@@ -3466,6 +3463,7 @@ bool EventHandler::dispatchMouseEvent(const AtomString& eventType, Node* targetN
+@@ -3178,7 +3175,7 @@ static RefPtr<Element> getElementOrAncestorElementForNode(Node* targetNode)
+     return targetElement;
+ }
+ 
+-void EventHandler::updateMouseEventTargetNode(const AtomString& eventType, Node* targetNode, const PlatformMouseEvent& platformMouseEvent, FireMouseOverOut fireMouseOverOut)
++void EventHandler::updateMouseEventTargetNode(const AtomString& eventType, Node* targetNode, const PlatformMouseEvent& platformMouseEvent, FireMouseOverOut fireMouseOverOut, DispatchPointerBoundaryEvents dispatchPointerBoundaryEvents)
+ {
+     Ref frame = m_frame.get();
+     RefPtr<Element> targetElement;
+@@ -3243,16 +3240,17 @@ void EventHandler::updateMouseEventTargetNode(const AtomString& eventType, Node*
+                 enteredElementsChain.shrink(enteredElementsChain.size() - i);
+             }
+ 
++            auto sendPointer = dispatchPointerBoundaryEvents == DispatchPointerBoundaryEvents::Yes ? Element::ShouldDispatchPointerEvent::Yes : Element::ShouldDispatchPointerEvent::No;
+             if (auto lastElementUnderMouse = m_lastElementUnderMouse)
+-                lastElementUnderMouse->dispatchMouseEvent(platformMouseEvent, eventNames.mouseoutEvent, 0, m_elementUnderMouse);
++                lastElementUnderMouse->dispatchMouseEvent(platformMouseEvent, eventNames.mouseoutEvent, 0, m_elementUnderMouse, IsSyntheticClick::No, sendPointer);
+ 
+             for (auto& chain : leftElementsChain) {
+                 if (hasCapturingMouseLeaveListener || chain->hasEventListeners(eventNames.pointerleaveEvent) || chain->hasEventListeners(eventNames.mouseleaveEvent))
+-                    chain->dispatchMouseEvent(platformMouseEvent, eventNames.mouseleaveEvent, 0, m_elementUnderMouse);
++                    chain->dispatchMouseEvent(platformMouseEvent, eventNames.mouseleaveEvent, 0, m_elementUnderMouse, IsSyntheticClick::No, sendPointer);
+             }
+ 
+             if (auto elementUnderMouse = m_elementUnderMouse)
+-                elementUnderMouse->dispatchMouseEvent(platformMouseEvent, eventNames.mouseoverEvent, 0, m_lastElementUnderMouse);
++                elementUnderMouse->dispatchMouseEvent(platformMouseEvent, eventNames.mouseoverEvent, 0, m_lastElementUnderMouse, IsSyntheticClick::No, sendPointer);
+ 
+             for (auto& chain : enteredElementsChain | std::views::reverse) {
+                 if (!chain)
+@@ -3260,7 +3258,7 @@ void EventHandler::updateMouseEventTargetNode(const AtomString& eventType, Node*
+ 
+                 if ((hasCapturingMouseEnterListener || chain->hasEventListeners(eventNames.pointerenterEvent) || chain->hasEventListeners(eventNames.mouseenterEvent))
+                     && !isElementAnAncestorOfLastElementUnderMouse(chain.get())) {
+-                    chain->dispatchMouseEvent(platformMouseEvent, eventNames.mouseenterEvent, 0, m_lastElementUnderMouse);
++                    chain->dispatchMouseEvent(platformMouseEvent, eventNames.mouseenterEvent, 0, m_lastElementUnderMouse, IsSyntheticClick::No, sendPointer);
+                 }
+             }
+ 
+@@ -3448,7 +3446,31 @@ bool EventHandler::dispatchMouseEvent(const AtomString& eventType, Node* targetN
+         if (RefPtr window = frame->window())
+             window->updateLastUserClickEvent(platformMouseEvent.modifiers());
+     }
+-    updateMouseEventTargetNode(eventType, targetNode, platformMouseEvent, fireMouseOverOut);
++    auto dispatchPointerBoundaryEvents = DispatchPointerBoundaryEvents::Yes;
++    RefPtr<Node> mouseTarget = targetNode;
++#if ENABLE(POINTER_RAW_UPDATE)
++    RefPtr document = frame->document();
++    RefPtr rawTarget = m_capturingMouseEventsElement ? m_capturingMouseEventsElement : getElementOrAncestorElementForNode(targetNode);
++    if (RefPtr page = frame->page(); !m_dispatchingFakeMouseMove && page && rawTarget && document == &rawTarget->document()) {
++        auto& controller = page->pointerCaptureController();
++        if (RefPtr rawEvent = controller.rawUpdateForMouseEvent(*rawTarget, platformMouseEvent, eventType)) {
++            if (fireMouseOverOut == FireMouseOverOut::Yes)
++                controller.dispatchMousePointerBoundaryEvents(m_lastElementUnderMouse.get(), rawTarget.get(), platformMouseEvent);
++            if (rawTarget->isConnected() && &rawTarget->document() == document.get())
++                controller.dispatchEvent(*rawEvent, rawTarget.get());
++            // Capture and hit testing for the following pointermove reflect changes
++            // made by the raw listener. Mouse boundary events still follow below.
++            if (document != frame->document() || !frame->view())
++                return true;
++            mouseTarget = prepareMouseEvent(hoverTimerHitType, platformMouseEvent).targetNode();
++            RefPtr nextTarget = m_capturingMouseEventsElement ? m_capturingMouseEventsElement : getElementOrAncestorElementForNode(mouseTarget.get());
++            if (fireMouseOverOut == FireMouseOverOut::Yes)
++                controller.dispatchMousePointerBoundaryEvents(rawTarget.get(), nextTarget.get(), platformMouseEvent);
++            dispatchPointerBoundaryEvents = DispatchPointerBoundaryEvents::No;
++        }
++    }
++#endif
++    updateMouseEventTargetNode(eventType, mouseTarget.get(), platformMouseEvent, fireMouseOverOut, dispatchPointerBoundaryEvents);
+ 
+     bool isMouseDownEvent = eventType == eventNames().mousedownEvent;
+ 
+@@ -3466,6 +3488,7 @@ bool EventHandler::dispatchMouseEvent(const AtomString& eventType, Node* targetN
  
      if (elementUnderMouse) {
          auto shouldDispatchPointerEvent = didRetargetToMouseMoveTargetOverride ? Element::ShouldDispatchPointerEvent::No : Element::ShouldDispatchPointerEvent::Yes;
@@ -34336,7 +34509,7 @@ index 4555034d8312449920f8f16e8a9c252277d25003..65f28b06cdc20feebc1514c94cfed0c2
          auto [eventIsDispatched, eventIsDefaultPrevented] = elementUnderMouse->dispatchMouseEvent(platformMouseEvent, eventType, clickCount, nullptr, IsSyntheticClick::No, shouldDispatchPointerEvent);
          m_mouseMoveTargetOverride = nullptr;
          m_capturesDragging = CapturesDragging::InabilityReason::Unknown;
-@@ -3475,6 +3473,12 @@ bool EventHandler::dispatchMouseEvent(const AtomString& eventType, Node* targetN
+@@ -3475,6 +3498,12 @@ bool EventHandler::dispatchMouseEvent(const AtomString& eventType, Node* targetN
              else if (eventType == eventNames().mousemoveEvent)
                  m_capturesDragging = CapturesDragging::InabilityReason::MouseMoveIsCancelled;
          }
@@ -34349,7 +34522,17 @@ index 4555034d8312449920f8f16e8a9c252277d25003..65f28b06cdc20feebc1514c94cfed0c2
          if (eventIsDispatched == Element::EventIsDispatched::No)
              return false;
      }
-@@ -5177,7 +5181,9 @@ bool EventHandler::defaultKeyboardScrollEventHandler(KeyboardEvent& event, Scrol
+@@ -4209,6 +4238,9 @@ void EventHandler::fakeMouseMoveEventTimerFired()
+ 
+     auto modifiers = PlatformKeyboardEvent::currentStateOfModifierKeys();
+     PlatformMouseEvent fakeMouseMoveEvent(*m_lastKnownMousePosition, m_lastKnownMouseGlobalPosition, MouseButton::None, PlatformEvent::Type::MouseMoved, 0, modifiers, MonotonicTime::now(), 0, SyntheticClickType::NoTap, MouseEventInputSource::UserDriven);
++#if ENABLE(POINTER_RAW_UPDATE)
++    SetForScope dispatchingFakeMouseMove { m_dispatchingFakeMouseMove, true };
++#endif
+     mouseMoved(fakeMouseMoveEvent);
+ }
+ #endif // !ENABLE(IOS_TOUCH_EVENTS)
+@@ -5177,7 +5209,9 @@ bool EventHandler::defaultKeyboardScrollEventHandler(KeyboardEvent& event, Scrol
  
  void EventHandler::defaultPageUpDownEventHandler(KeyboardEvent& event)
  {
@@ -34360,7 +34543,7 @@ index 4555034d8312449920f8f16e8a9c252277d25003..65f28b06cdc20feebc1514c94cfed0c2
      ASSERT(event.type() == eventNames().keydownEvent);
  
      if (event.ctrlKey() || event.metaKey() || event.altKey() || event.shiftKey())
-@@ -5193,7 +5199,9 @@ void EventHandler::defaultPageUpDownEventHandler(KeyboardEvent& event)
+@@ -5193,7 +5227,9 @@ void EventHandler::defaultPageUpDownEventHandler(KeyboardEvent& event)
  
  void EventHandler::defaultHomeEndEventHandler(KeyboardEvent& event)
  {
@@ -34371,6 +34554,30 @@ index 4555034d8312449920f8f16e8a9c252277d25003..65f28b06cdc20feebc1514c94cfed0c2
      ASSERT(event.type() == eventNames().keydownEvent);
  
      if (event.ctrlKey() || event.metaKey() || event.altKey() || event.shiftKey())
+diff --git a/Source/WebCore/page/EventHandler.h b/Source/WebCore/page/EventHandler.h
+index bafc23400a98ca60ce8060ca826f0a0ac956724c..53c0773c272b7948da706eacabe399292cd5afd1 100644
+--- a/Source/WebCore/page/EventHandler.h
++++ b/Source/WebCore/page/EventHandler.h
+@@ -519,7 +519,8 @@ private:
+ #endif
+     
+     enum class FireMouseOverOut : bool { No, Yes };
+-    void updateMouseEventTargetNode(const AtomString& eventType, Node*, const PlatformMouseEvent&, FireMouseOverOut);
++    enum class DispatchPointerBoundaryEvents : bool { No, Yes };
++    void updateMouseEventTargetNode(const AtomString& eventType, Node*, const PlatformMouseEvent&, FireMouseOverOut, DispatchPointerBoundaryEvents = DispatchPointerBoundaryEvents::Yes);
+ 
+     void notifyScrollableAreasOfMouseEvents(const AtomString& eventType, Element* lastElementUnderMouse, Element* elementUnderMouse);
+ 
+@@ -745,6 +746,9 @@ private:
+     PlatformMouseEvent m_lastPlatformMouseEvent;
+ 
+ #if !ENABLE(IOS_TOUCH_EVENTS)
++#if ENABLE(POINTER_RAW_UPDATE)
++    bool m_dispatchingFakeMouseMove { false };
++#endif
+     Timer m_fakeMouseMoveEventTimer;
+ #endif
+ 
 diff --git a/Source/WebCore/page/LargestContentfulPaintData.cpp b/Source/WebCore/page/LargestContentfulPaintData.cpp
 index bbb54b89194cc6399eba94d1f9ea11ad625d5285..f9883c5c58f83ff0c429d302aab104b0566d91f8 100644
 --- a/Source/WebCore/page/LargestContentfulPaintData.cpp
@@ -35779,7 +35986,7 @@ index 794ed4090c5f4d97b1fb8c098965b1735e19b20c..c58ab61f841f3c0c6737c18abf9015ce
  };
  
 diff --git a/Source/WebCore/page/PointerCaptureController.cpp b/Source/WebCore/page/PointerCaptureController.cpp
-index 8f6e1c689e7c8d043c84b5704a113e358c1c71bc..e9a97a0b1409adb17857cf848ef82b41449bb6c5 100644
+index 8f6e1c689e7c8d043c84b5704a113e358c1c71bc..b6373c5a1231a35ce61547465b50273aaa9183c1 100644
 --- a/Source/WebCore/page/PointerCaptureController.cpp
 +++ b/Source/WebCore/page/PointerCaptureController.cpp
 @@ -32,6 +32,7 @@
@@ -35837,7 +36044,74 @@ index 8f6e1c689e7c8d043c84b5704a113e358c1c71bc..e9a97a0b1409adb17857cf848ef82b41
  }
  
  void PointerCaptureController::reset()
-@@ -747,28 +755,27 @@ void PointerCaptureController::processPendingPointerCapture(PointerID pointerId)
+@@ -517,6 +525,49 @@ void PointerCaptureController::clearUnmatchedMouseDown(PointerID pointerID)
+         capturingData->pointerIsPressed = false;
+ }
+ 
++static MouseButton resolvedPointerButton(const AtomString& mouseType, MouseButton button, MouseButton previousButton, bool pressed)
++{
++    if (!PointerEvent::typeRequiresResolvedButton(PointerEvent::typeFromMouseEventType(mouseType)) && (!pressed || button == previousButton))
++        return MouseButton::PointerHasNotChanged;
++    return button;
++}
++
++#if ENABLE(POINTER_RAW_UPDATE)
++RefPtr<PointerEvent> PointerCaptureController::rawUpdateForMouseEvent(Element& target, const PlatformMouseEvent& platformEvent, const AtomString& type)
++{
++    auto& names = eventNames();
++    auto& document = target.document();
++    if (!document.eventListenerCountsOfType(names.pointerrawupdateEvent).hasAny() || !document.isSecureContext())
++        return nullptr;
++
++    auto id = platformEvent.pointerId();
++    RefPtr data = m_activePointerIdsToCapturingData.get(id);
++    bool pressed = data && data->pointerIsPressed;
++    bool isChord = pressed && (type == names.mousedownEvent || (type == names.mouseupEvent && platformEvent.buttons()));
++    if (type != names.mousemoveEvent && !isChord)
++        return nullptr;
++
++    auto samples = WTF::map(platformEvent.coalescedEvents(), [&](auto&& sample) {
++        return MouseEvent::create(type, document.windowProxy(), sample, { }, { }, 0, nullptr);
++    });
++    auto mouse = MouseEvent::create(type, document.windowProxy(), platformEvent, samples, { }, 0, nullptr);
++    auto button = resolvedPointerButton(type, platformEvent.button(), data ? data->previousMouseButton : MouseButton::PointerHasNotChanged, pressed);
++    return PointerEvent::create(names.pointerrawupdateEvent, button, mouse, id, platformEvent.pointerType(), Event::CanBubble::Yes, Event::IsCancelable::No);
++}
++
++void PointerCaptureController::dispatchMousePointerBoundaryEvents(RefPtr<Element> previous, RefPtr<Element> current, const PlatformMouseEvent& platformEvent)
++{
++    if (previous == current)
++        return;
++    dispatchBoundaryEvents(previous.get(), current.get(), [&](const AtomString& type) {
++        bool entering = type == eventNames().pointeroverEvent || type == eventNames().pointerenterEvent;
++        auto& document = (entering ? current : previous)->document();
++        auto mouse = MouseEvent::create(type, document.windowProxy(), platformEvent, { }, { }, 0, entering ? previous.get() : current.get());
++        return PointerEvent::create(type, MouseButton::PointerHasNotChanged, mouse, platformEvent.pointerId(), platformEvent.pointerType());
++    });
++}
++#endif
++
+ RefPtr<PointerEvent> PointerCaptureController::pointerEventForMouseEvent(const MouseEvent& mouseEvent, PointerID pointerId, const String& pointerType)
+ {
+     // If we already have known touches then we cannot dispatch a mouse event,
+@@ -533,15 +584,7 @@ RefPtr<PointerEvent> PointerCaptureController::pointerEventForMouseEvent(const M
+     bool pointerIsPressed = capturingData ? capturingData->pointerIsPressed : false;
+ 
+     MouseButton newButton = mouseEvent.button();
+-    MouseButton previousMouseButton = capturingData ? capturingData->previousMouseButton : MouseButton::PointerHasNotChanged;
+-    MouseButton button = [&] {
+-        auto pointerEventType = PointerEvent::typeFromMouseEventType(type);
+-        if (!PointerEvent::typeRequiresResolvedButton(pointerEventType)) {
+-            if (newButton == previousMouseButton || !pointerIsPressed)
+-                return MouseButton::PointerHasNotChanged;
+-        }
+-        return newButton;
+-    }();
++    auto button = resolvedPointerButton(type, newButton, capturingData ? capturingData->previousMouseButton : MouseButton::PointerHasNotChanged, pointerIsPressed);
+ 
+     // https://w3c.github.io/pointerevents/#chorded-button-interactions
+     // Some pointer devices, such as mouse or pen, support multiple buttons. In the Mouse Event model, each button
+@@ -747,28 +790,27 @@ void PointerCaptureController::processPendingPointerCapture(PointerID pointerId)
      // 1. If the pointer capture target override for this pointer is set and is not equal to the pending pointer capture target override,
      // then fire a pointer event named lostpointercapture at the pointer capture target override node.
      if (auto targetOverride = capturingData->targetOverride; targetOverride && targetOverride != pendingTargetOverride) {
@@ -35874,6 +36148,51 @@ index 8f6e1c689e7c8d043c84b5704a113e358c1c71bc..e9a97a0b1409adb17857cf848ef82b41
      m_processingPendingPointerCapture = false;
  }
  
+diff --git a/Source/WebCore/page/PointerCaptureController.h b/Source/WebCore/page/PointerCaptureController.h
+index f3bb3e1363c3131f65ee64a790877c22dc32d8a8..800c8bbf56f187726cb720c99f2a3c017954c971 100644
+--- a/Source/WebCore/page/PointerCaptureController.h
++++ b/Source/WebCore/page/PointerCaptureController.h
+@@ -62,6 +62,10 @@ public:
+     void pointerLockWasApplied();
+     void elementWasRemoved(Element&);
+ 
++#if ENABLE(POINTER_RAW_UPDATE)
++    RefPtr<PointerEvent> rawUpdateForMouseEvent(Element&, const PlatformMouseEvent&, const AtomString& mouseEventType);
++    void dispatchMousePointerBoundaryEvents(RefPtr<Element> previousTarget, RefPtr<Element> currentTarget, const PlatformMouseEvent&);
++#endif
+     RefPtr<PointerEvent> pointerEventForMouseEvent(const MouseEvent&, PointerID, const String& pointerType);
+ 
+ #if ENABLE(TOUCH_EVENTS) && (PLATFORM(IOS_FAMILY) || PLATFORM(WPE) || PLATFORM(GTK))
+diff --git a/Source/WebCore/page/PointerLockController.cpp b/Source/WebCore/page/PointerLockController.cpp
+index acf810502ec078af9703763b3f045ed7874deac6..b4c77303b25bcdb78b21c6934a06a7a7d1afefe2 100644
+--- a/Source/WebCore/page/PointerLockController.cpp
++++ b/Source/WebCore/page/PointerLockController.cpp
+@@ -40,6 +40,7 @@
+ #include "Page.h"
+ #include "PlatformMouseEvent.h"
+ #include "PointerCaptureController.h"
++#include "PointerEvent.h"
+ #include "TaskSource.h"
+ #include "UserGestureIndicator.h"
+ #include "VoidCallback.h"
+@@ -277,7 +278,16 @@ void PointerLockController::dispatchLockedMouseEvent(const PlatformMouseEvent& e
+         return;
+ 
+     Ref protectedElement { *m_element };
+-    protectedElement->dispatchMouseEvent(m_options.unadjustedMovement ? UnadjustedMovementPlatformMouseEvent(event) : event, eventType, event.clickCount());
++    const auto& adjustedEvent = m_options.unadjustedMovement ? UnadjustedMovementPlatformMouseEvent(event) : event;
++#if ENABLE(POINTER_RAW_UPDATE)
++    auto& controller = m_page->pointerCaptureController();
++    if (RefPtr rawEvent = controller.rawUpdateForMouseEvent(protectedElement.get(), adjustedEvent, eventType)) {
++        controller.dispatchEvent(*rawEvent, protectedElement.ptr());
++        if (m_element != protectedElement.ptr() || !protectedElement->document().frame())
++            return;
++    }
++#endif
++    protectedElement->dispatchMouseEvent(adjustedEvent, eventType, event.clickCount());
+ 
+     // Create click events
+     if (eventType == eventNames().mouseupEvent)
 diff --git a/Source/WebCore/page/ProtocolHandlerUtilities.h b/Source/WebCore/page/ProtocolHandlerUtilities.h
 new file mode 100644
 index 0000000000000000000000000000000000000000..a98fad150b4dabf1b3429d078eef8f6227c918e6
@@ -239422,10 +239741,10 @@ index 359c3765d3a41ba1c6cfdb6b44fa292cc7811a0d..18a4d1524bbb7a68b2bec420d013fd89
  endif ()
 diff --git a/Source/cmake/OptionsHaiku.cmake b/Source/cmake/OptionsHaiku.cmake
 new file mode 100644
-index 0000000000000000000000000000000000000000..0bbf07f2b5b5ab9585833995ca973f01886b96cd
+index 0000000000000000000000000000000000000000..faa8ff2fdce87b975c2def3bd1e9118f2fd82769
 --- /dev/null
 +++ b/Source/cmake/OptionsHaiku.cmake
-@@ -0,0 +1,482 @@
+@@ -0,0 +1,483 @@
 +include(GNUInstallDirs)
 +include(VersioningUtils)
 +
@@ -239556,6 +239875,7 @@ index 0000000000000000000000000000000000000000..0bbf07f2b5b5ab9585833995ca973f01
 +# Element.requestPointerLock: the view hides and recentres the pointer and
 +# sends relative movement (UIProcess/haiku/WebView.cpp).
 +WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_POINTER_LOCK PRIVATE ON)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_POINTER_RAW_UPDATE PRIVATE ON)
 +WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_RESOURCE_USAGE PRIVATE ON)
 +WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_SAMPLING_PROFILER PUBLIC OFF)
 +# speechSynthesis through eSpeak NG or eSpeak, loaded at run time
@@ -239946,6 +240266,18 @@ index d0385b2c1e327f46bfe2ae93a7f280e5952b053c..8a3e142f8e9484cc55f8a48423906104
          set(CMAKE_POSITION_INDEPENDENT_CODE True)
      endif ()
  
+diff --git a/Source/cmake/WebKitFeatures.cmake b/Source/cmake/WebKitFeatures.cmake
+index ed9c23908b228d1ae919624a79b76335f1bc2fff..6da5f79644a5bc1d7e4ab6a685bda7b083bfc753 100644
+--- a/Source/cmake/WebKitFeatures.cmake
++++ b/Source/cmake/WebKitFeatures.cmake
+@@ -285,6 +285,7 @@ macro(WEBKIT_OPTION_BEGIN)
+     WEBKIT_OPTION_DEFINE(ENABLE_UIPROCESS_PERIODIC_MEMORY_MONITOR "Toggle UIProcess periodic memory monitor support" PRIVATE OFF)
+     WEBKIT_OPTION_DEFINE(ENABLE_PICTURE_IN_PICTURE_API "Toggle Picture-in-Picture API support" PRIVATE OFF)
+     WEBKIT_OPTION_DEFINE(ENABLE_POINTER_LOCK "Toggle pointer lock support" PRIVATE OFF)
++    WEBKIT_OPTION_DEFINE(ENABLE_POINTER_RAW_UPDATE "Enable raw pointer updates" PRIVATE OFF)
+     WEBKIT_OPTION_DEFINE(ENABLE_PREDEFINED_COLOR_SPACE_DISPLAY_P3 "Toggle display-p3 PredefinedColorSpace enum values" PRIVATE OFF)
+     WEBKIT_OPTION_DEFINE(ENABLE_REFTRACKER "Enable debugging tools for tracking RAII objects" PRIVATE OFF)
+     WEBKIT_OPTION_DEFINE(ENABLE_RELEASE_LOG "Toggle release log support" PRIVATE OFF)
 diff --git a/Source/cmake/WebKitMacros.cmake b/Source/cmake/WebKitMacros.cmake
 index 7a25024e7621ca3264e236d94ce9cf3f5cf3c807..484db4547fd9ac8f30a8466adb33397f5260a102 100644
 --- a/Source/cmake/WebKitMacros.cmake
