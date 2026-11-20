@@ -28741,7 +28741,7 @@ index 79f2bcbc106c7c43e8a971816c183dcc00610b83..a8882810627b9dcc8f3c7cca51ce809d
  }
  
 diff --git a/Source/WebCore/dom/Element.cpp b/Source/WebCore/dom/Element.cpp
-index 387e5c0ad9a258b7e70fb47b58f7492c3cb111b1..22a18c697e6c51ba5b6e5bbfccc1ffdb40d1afdb 100644
+index 387e5c0ad9a258b7e70fb47b58f7492c3cb111b1..3420f1e360e883f81ad31e992ae6e671903e4a57 100644
 --- a/Source/WebCore/dom/Element.cpp
 +++ b/Source/WebCore/dom/Element.cpp
 @@ -763,7 +763,8 @@ Ref<Element> Element::cloneElementWithChildren(Document& document, CustomElement
@@ -28764,7 +28764,58 @@ index 387e5c0ad9a258b7e70fb47b58f7492c3cb111b1..22a18c697e6c51ba5b6e5bbfccc1ffdb
          clone->setUsesNullCustomElementRegistry();
  
      return clone;
-@@ -4351,6 +4353,14 @@ void Element::focus(const FocusOptions& options)
+@@ -949,9 +951,24 @@ bool Element::hasFocusableStyle() const
+     return isFocusableStyle(style.get());
+ }
+ 
++#if PLATFORM(HAIKU)
++static bool hasFocusableScrollRegion(const Element& element)
++{
++    auto* htmlElement = dynamicDowncast<HTMLElement>(element);
++    if (!htmlElement || htmlElement->isActuallyDisabled())
++        return false;
++    CheckedPtr box = element.renderBox();
++    return box && !box->isDocumentElementRenderer() && box->hasScrollableOverflow();
++}
++#endif
++
+ bool Element::isFocusable() const
+ {
++#if PLATFORM(HAIKU)
++    if (!isConnected() || (!supportsFocus() && !hasFocusableScrollRegion(*this)))
++#else
+     if (!isConnected() || !supportsFocus())
++#endif
+         return false;
+ 
+     if (!renderer()) {
+@@ -4217,6 +4234,10 @@ static bool isProgramaticallyFocusable(Element& element)
+     if (element.document().haveStylesheetsLoaded()) {
+         if (!element.isFocusable())
+             return false;
++#if PLATFORM(HAIKU)
++        if (hasFocusableScrollRegion(element))
++            return true;
++#endif
+     }
+     return element.supportsFocus();
+ }
+@@ -4310,6 +4331,14 @@ void Element::focus(const FocusOptions& options)
+     if (renderer() && document->haveStylesheetsLoaded())
+         document->updateStyleIfNeeded();
+ 
++#if PLATFORM(HAIKU)
++    if (options.trigger == FocusTrigger::Bindings && !supportsFocus() && document->haveStylesheetsLoaded()) {
++        document->updateStyleIfNeeded();
++        if (CheckedPtr box = renderBox(); box && box->scrollsOverflow())
++            document->updateLayoutIfDimensionsOutOfDate(*this);
++    }
++#endif
++
+     if (&newTarget->document() != document.ptr())
+         return;
+ 
+@@ -4351,6 +4380,14 @@ void Element::focus(const FocusOptions& options)
      }
  
      newTarget->findTargetAndUpdateFocusAppearance(options.selectionRestorationMode, options.preventScroll ? SelectionRevealMode::DoNotReveal : SelectionRevealMode::Reveal);
