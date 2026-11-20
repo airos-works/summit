@@ -136414,10 +136414,18 @@ index 865206d7f0784ce1c1b0965ca788fa9371fe1a6e..f1c4ac24b9c50dba23d296c15552f0e5
  
      // The position within m_keyframes.
 diff --git a/Source/WebKit/UIProcess/Automation/WebAutomationSession.cpp b/Source/WebKit/UIProcess/Automation/WebAutomationSession.cpp
-index 599cc694a716da0c05e7104be0ec919146f99913..74230b08f62f4ef6589abf8041f36066b3bedefc 100644
+index 599cc694a716da0c05e7104be0ec919146f99913..8d16e0520e18e7b70b5b7908cd9ea6b43e0aca9e 100644
 --- a/Source/WebKit/UIProcess/Automation/WebAutomationSession.cpp
 +++ b/Source/WebKit/UIProcess/Automation/WebAutomationSession.cpp
-@@ -68,7 +68,7 @@
+@@ -54,6 +54,7 @@
+ #include <JavaScriptCore/InspectorFrontendRouter.h>
+ #include <WebCore/MIMETypeRegistry.h>
+ #include <WebCore/PointerEventTypeNames.h>
++#include <WebCore/RegistrableDomain.h>
+ #include <algorithm>
+ #include <wtf/Borrow.h>
+ #include <wtf/CallbackAggregator.h>
+@@ -68,7 +69,7 @@
  #include <wtf/text/TextBreakIterator.h>
  #endif
  
@@ -136426,7 +136434,24 @@ index 599cc694a716da0c05e7104be0ec919146f99913..74230b08f62f4ef6589abf8041f36066
  #include "VirtualAuthenticatorManager.h"
  #include <WebCore/AuthenticatorTransport.h>
  #endif
-@@ -584,6 +584,23 @@ void WebAutomationSession::createBrowsingContext(std::optional<Inspector::Protoc
+@@ -174,8 +175,16 @@ WebAutomationSession::WebAutomationSession(bool siteIsolationEnabled)
+ #endif
+ }
+ 
++#if PLATFORM(HAIKU)
++void setAutomationStorageAccessHaiku(const WebCore::RegistrableDomain& topSite, const WebCore::RegistrableDomain& embeddedSite, std::optional<bool> granted);
++void clearAutomationStorageAccessHaiku();
++#endif
++
+ WebAutomationSession::~WebAutomationSession()
+ {
++#if PLATFORM(HAIKU)
++    clearAutomationStorageAccessHaiku();
++#endif
+ #if ENABLE(REMOTE_INSPECTOR)
+     disconnectAllInspectorPassthroughChannels();
+ #endif
+@@ -584,6 +593,23 @@ void WebAutomationSession::createBrowsingContext(std::optional<Inspector::Protoc
      });
  }
  
@@ -136450,7 +136475,7 @@ index 599cc694a716da0c05e7104be0ec919146f99913..74230b08f62f4ef6589abf8041f36066
  void WebAutomationSession::closeBrowsingContext(const Inspector::Protocol::Automation::BrowsingContextHandle& handle, CommandCallback<void>&& callback)
  {
      auto page = webPageProxyForHandle(handle);
-@@ -591,9 +608,15 @@ void WebAutomationSession::closeBrowsingContext(const Inspector::Protocol::Autom
+@@ -591,9 +617,15 @@ void WebAutomationSession::closeBrowsingContext(const Inspector::Protocol::Autom
  
      page->closePage();
  
@@ -136466,7 +136491,7 @@ index 599cc694a716da0c05e7104be0ec919146f99913..74230b08f62f4ef6589abf8041f36066
  }
  
  CommandResult<void> WebAutomationSession::deleteSession()
-@@ -649,6 +672,10 @@ void WebAutomationSession::switchToBrowsingContext(const Inspector::Protocol::Au
+@@ -649,6 +681,10 @@ void WebAutomationSession::switchToBrowsingContext(const Inspector::Protocol::Au
      });
  }
  
@@ -136477,7 +136502,7 @@ index 599cc694a716da0c05e7104be0ec919146f99913..74230b08f62f4ef6589abf8041f36066
  void WebAutomationSession::setWindowFrameOfBrowsingContext(const Inspector::Protocol::Automation::BrowsingContextHandle& handle, RefPtr<JSON::Object>&& origin, RefPtr<JSON::Object>&& size, CommandCallback<void>&& callback)
  {
      std::optional<double> x;
-@@ -680,8 +707,14 @@ void WebAutomationSession::setWindowFrameOfBrowsingContext(const Inspector::Prot
+@@ -680,8 +716,14 @@ void WebAutomationSession::setWindowFrameOfBrowsingContext(const Inspector::Prot
              auto& webPage = *page;
              webPage.getWindowFrameWithCallback([callback = WTF::move(callback), page = protect(page), width, height, x, y](WebCore::FloatRect originalFrame) mutable {
                  WebCore::FloatRect newFrame = WebCore::FloatRect(WebCore::FloatPoint(x.value_or(originalFrame.location().x()), y.value_or(originalFrame.location().y())), WebCore::FloatSize(width.value_or(originalFrame.size().width()), height.value_or(originalFrame.size().height())));
@@ -136493,7 +136518,7 @@ index 599cc694a716da0c05e7104be0ec919146f99913..74230b08f62f4ef6589abf8041f36066
  
                  callback({ });
              });
-@@ -2204,7 +2237,7 @@ CommandResult<void> WebAutomationSession::setSessionPermissions(Ref<JSON::Array>
+@@ -2204,7 +2246,7 @@ CommandResult<void> WebAutomationSession::setSessionPermissions(Ref<JSON::Array>
      return { };
  }
  
@@ -136502,7 +136527,7 @@ index 599cc694a716da0c05e7104be0ec919146f99913..74230b08f62f4ef6589abf8041f36066
  static WebCore::AuthenticatorTransport NODELETE toAuthenticatorTransport(Inspector::Protocol::Automation::AuthenticatorTransport transport)
  {
      switch (transport) {
-@@ -2225,7 +2258,7 @@ static WebCore::AuthenticatorTransport NODELETE toAuthenticatorTransport(Inspect
+@@ -2225,7 +2267,7 @@ static WebCore::AuthenticatorTransport NODELETE toAuthenticatorTransport(Inspect
  
  CommandResult<String /* authenticatorId */> WebAutomationSession::addVirtualAuthenticator(const String& browsingContextHandle, Ref<JSON::Object>&& authenticator)
  {
@@ -136511,7 +136536,7 @@ index 599cc694a716da0c05e7104be0ec919146f99913..74230b08f62f4ef6589abf8041f36066
      auto protocol = authenticator->getString("protocol"_s);
      SYNC_FAIL_WITH_PREDEFINED_ERROR_AND_DETAILS_IF(!protocol, InvalidParameter, "The parameter 'protocol' is missing or invalid."_s);
  
-@@ -2264,7 +2297,7 @@ CommandResult<String /* authenticatorId */> WebAutomationSession::addVirtualAuth
+@@ -2264,7 +2306,7 @@ CommandResult<String /* authenticatorId */> WebAutomationSession::addVirtualAuth
  
  CommandResult<void> WebAutomationSession::removeVirtualAuthenticator(const String& browsingContextHandle, const String& authenticatorId)
  {
@@ -136520,7 +136545,22 @@ index 599cc694a716da0c05e7104be0ec919146f99913..74230b08f62f4ef6589abf8041f36066
      auto page = webPageProxyForHandle(browsingContextHandle);
      SYNC_FAIL_WITH_PREDEFINED_ERROR_IF(!page, WindowNotFound);
  
-@@ -3016,16 +3049,24 @@ void WebAutomationSession::performInteractionSequence(const Inspector::Protocol:
+@@ -2365,6 +2407,14 @@ void WebAutomationSession::setStorageAccessPermissionState(const Inspector::Prot
+ 
+     Ref store = page->websiteDataStore();
+     bool granted = state == Inspector::Protocol::Automation::PermissionState::Granted;
++#if PLATFORM(HAIKU)
++    // The host's prompt answers every request on Haiku; the automated pages'
++    // prompt answers from this (#257).
++    std::optional<bool> decision;
++    if (state != Inspector::Protocol::Automation::PermissionState::Prompt)
++        decision = granted;
++    setAutomationStorageAccessHaiku(WebCore::RegistrableDomain { URL { page->currentURL() } }, WebCore::RegistrableDomain { frame->url() }, decision);
++#endif
+     if (!granted)
+         store->clearResourceLoadStatisticsInWebProcesses([callbackAggregator] { });
+     store->setStorageAccessPermissionForTesting(granted, page->identifier(), page->currentURL(), frame->url().string(), [callbackAggregator] { });
+@@ -3016,16 +3066,24 @@ void WebAutomationSession::performInteractionSequence(const Inspector::Protocol:
              Ref inputSource = *m_inputSources.get(sourceId);
              SimulatedInputSourceState sourceState { };
  
@@ -136551,7 +136591,7 @@ index 599cc694a716da0c05e7104be0ec919146f99913..74230b08f62f4ef6589abf8041f36066
              }
  
              if (auto pressedVirtualKeysArray = stateObject->getArray("pressedVirtualKeys"_s)) {
-@@ -3117,20 +3158,24 @@ void WebAutomationSession::cancelInteractionSequence(const Inspector::Protocol::
+@@ -3117,20 +3175,24 @@ void WebAutomationSession::cancelInteractionSequence(const Inspector::Protocol::
      auto frameID = webFrameIDForHandle(frameHandle, frameNotFound);
      ASYNC_FAIL_WITH_PREDEFINED_ERROR_IF(frameNotFound, WindowNotFound);
  
@@ -136581,7 +136621,7 @@ index 599cc694a716da0c05e7104be0ec919146f99913..74230b08f62f4ef6589abf8041f36066
  void WebAutomationSession::takeScreenshot(const Inspector::Protocol::Automation::BrowsingContextHandle& handle, const Inspector::Protocol::Automation::FrameHandle& frameHandle, const Inspector::Protocol::Automation::NodeHandle& nodeHandle, std::optional<bool>&& optionalScrollIntoViewIfNeeded, std::optional<bool>&& optionalClipToViewport, CommandCallback<String>&& callback)
  {
      auto page = webPageProxyForHandle(handle);
-@@ -3156,6 +3201,20 @@ void WebAutomationSession::takeScreenshot(const Inspector::Protocol::Automation:
+@@ -3156,6 +3218,20 @@ void WebAutomationSession::takeScreenshot(const Inspector::Protocol::Automation:
          } };
      };
  #endif
@@ -180059,10 +180099,10 @@ index 0000000000000000000000000000000000000000..c9a119d02f85b7c5ad8fe9153bfc9604
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebView.cpp b/Source/WebKit/UIProcess/haiku/WebView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..1c6edd6085d19b9fd6050789c37298be6931ba0d
+index 0000000000000000000000000000000000000000..b21d3c33714a259f92bf8ada1d2b265d28eddbf0
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebView.cpp
-@@ -0,0 +1,3909 @@
+@@ -0,0 +1,3952 @@
 +/*
 + * Copyright (C) 2013 Intel Corporation. All rights reserved.
 + *
@@ -181043,8 +181083,11 @@ index 0000000000000000000000000000000000000000..1c6edd6085d19b9fd6050789c37298be
 +                popUps = *value > 0 ? WebsitePopUpPolicy::Allow : WebsitePopUpPolicy::Default;
 +        }
 +        // WebDriver sessions' pages open pop-ups without a click, as Safari's
-+        // do, so harnesses and tests that open windows do not stall (#187).
-+        if (page.isControlledByAutomation() && action->targetFrame() && action->targetFrame()->isMainFrame())
++        // do, so harnesses and tests that open windows do not stall (#187);
++        // their frames too (Safari's automation allows it page-wide): a test
++        // in a cross-site frame opens a window of its site to set a cookie
++        // (storage-access-api, #257).
++        if (page.isControlledByAutomation() && action->targetFrame())
 +            popUps = WebsitePopUpPolicy::Allow;
 +        RefPtr<API::WebsitePolicies> policies;
 +        if (autoplay || popUps) {
@@ -181438,6 +181481,15 @@ index 0000000000000000000000000000000000000000..1c6edd6085d19b9fd6050789c37298be
 +    view.SendMessage(&message, static_cast<BHandler*>(nullptr), 0);
 +}
 +
++// The storage-access permissions a WebDriver session set, by (top site,
++// embedded site): granted or denied (setAutomationStorageAccessHaiku). Main
++// thread only.
++static HashMap<std::pair<RegistrableDomain, RegistrableDomain>, bool>& automationStorageAccessHaiku()
++{
++    static NeverDestroyed<HashMap<std::pair<RegistrableDomain, RegistrableDomain>, bool>> permissions;
++    return permissions;
++}
++
 +class JavaScriptUIClientHaiku final : public API::UIClient {
 +    WTF_MAKE_TZONE_ALLOCATED_INLINE(JavaScriptUIClientHaiku);
 +public:
@@ -181768,9 +181820,17 @@ index 0000000000000000000000000000000000000000..1c6edd6085d19b9fd6050789c37298be
 +    // document.requestStorageAccess() from a cross-site frame that tracking
 +    // prevention keeps from its cookies (Summit #141): WebKit asks only after
 +    // a click in the frame, for a site the user has visited. The host asks
-+    // the user, or answers from its saved decision for the site pair.
-+    void requestStorageAccessConfirm(WebPageProxy&, WebFrameProxy*, const WebCore::RegistrableDomain& requestingDomain, const WebCore::RegistrableDomain& currentDomain, std::optional<WebCore::OrganizationStorageAccessPromptQuirk>&&, CompletionHandler<void(bool)>&& completion) override
++    // the user, or answers from its saved decision for the site pair. A
++    // WebDriver session's pages are answered from the permission the session
++    // set (#257): nobody is there to answer a prompt.
++    void requestStorageAccessConfirm(WebPageProxy& page, WebFrameProxy*, const WebCore::RegistrableDomain& requestingDomain, const WebCore::RegistrableDomain& currentDomain, std::optional<WebCore::OrganizationStorageAccessPromptQuirk>&&, CompletionHandler<void(bool)>&& completion) override
 +    {
++        if (page.isControlledByAutomation()) {
++            if (auto granted = automationStorageAccessHaiku().getOptional({ currentDomain, requestingDomain })) {
++                completion(*granted);
++                return;
++            }
++        }
 +        auto state = m_state.lock();
 +        if (!m_hostsNewPages || !state || state->closed || !state->context || !state->context->sitePermissions()) {
 +            completion(false);
@@ -182069,6 +182129,29 @@ index 0000000000000000000000000000000000000000..1c6edd6085d19b9fd6050789c37298be
 +        if (view->page() == &page)
 +            setWindowFrameOfViewHaiku(view->stateHaiku(), frame);
 +    }
++}
++
++// WebDriver's Set Permission for "storage-access" (#257), from
++// WebAutomationSession: granted or denied for a frame's site under its top
++// site, or back to prompt (nullopt). It answers the automated pages'
++// document.requestStorageAccess() in place of the host's prompt, which
++// nobody answers in a WebDriver session (requestStorageAccessConfirm). The
++// network process keeps its own record of the grant (no user gesture needed),
++// but on Haiku it leaves every request to the host. Main thread.
++void setAutomationStorageAccessHaiku(const RegistrableDomain& topSite, const RegistrableDomain& embeddedSite, std::optional<bool> granted)
++{
++    ASSERT(RunLoop::isMain());
++    if (granted)
++        automationStorageAccessHaiku().set({ topSite, embeddedSite }, *granted);
++    else
++        automationStorageAccessHaiku().remove({ topSite, embeddedSite });
++}
++
++// The WebDriver session ended: its permissions go with it.
++void clearAutomationStorageAccessHaiku()
++{
++    ASSERT(RunLoop::isMain());
++    automationStorageAccessHaiku().clear();
 +}
 +
 +std::shared_ptr<const BitmapPresenterHaiku::Frame> presentedFrameForPageHaiku(const WebPageProxy& page)
