@@ -73539,7 +73539,7 @@ index c2d6ac748ed19ad7daf8887b9678a32eef10e3f5..01498b16679a9f76eaf6d82a4c690053
  
  } // namespace WebCore
 diff --git a/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.cpp b/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.cpp
-index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..5919dc5b6e7e87c71deb951fe0b40e20779fbbef 100644
+index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..9208f8e3bcdb30ad816fc6c5c3c8eddad6f9bbc0 100644
 --- a/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.cpp
 +++ b/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.cpp
 @@ -33,6 +33,9 @@
@@ -73579,14 +73579,18 @@ index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..5919dc5b6e7e87c71deb951fe0b40e20
  #include <wtf/SystemTracing.h>
  #include <wtf/text/StringToIntegerConversion.h>
  
-@@ -67,16 +87,243 @@ WTF_MAKE_TZONE_ALLOCATED_IMPL(SkiaPaintingEngine);
+@@ -67,16 +87,247 @@ WTF_MAKE_TZONE_ALLOCATED_IMPL(SkiaPaintingEngine);
  
  static bool canPerformAcceleratedRendering()
  {
 +#if PLATFORM(HAIKU)
 +    if (!ProcessCapabilities::canUseAcceleratedBuffers())
 +        return false;
-+    auto* skiaGLContext = PlatformDisplay::sharedDisplay().skiaGLContext();
++    // No shared display when EGL could not be set up (the process paints on
++    // the CPU, initializePlatformDisplayIfNeededHaiku): sharedDisplay() would
++    // abort, as a spare web process's warm-up did.
++    auto* display = PlatformDisplay::sharedDisplayIfExists();
++    auto* skiaGLContext = display ? display->skiaGLContext() : nullptr;
 +    if (!skiaGLContext)
 +        return false;
 +    // Tiles are painted with Skia on the GPU where that has been measured to
@@ -73823,7 +73827,7 @@ index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..5919dc5b6e7e87c71deb951fe0b40e20
  
          return;
      }
-@@ -109,7 +356,18 @@ void SkiaPaintingEngine::paintIntoGraphicsContext(const GraphicsLayer& layer, Gr
+@@ -109,7 +360,18 @@ void SkiaPaintingEngine::paintIntoGraphicsContext(const GraphicsLayer& layer, Gr
  
      context.translate(-dirtyRect.x(), -dirtyRect.y());
      context.scale(contentsScale);
@@ -73842,7 +73846,7 @@ index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..5919dc5b6e7e87c71deb951fe0b40e20
  }
  
  Ref<CoordinatedTileBuffer> SkiaPaintingEngine::createBuffer(RenderingMode renderingMode, const IntSize& size, bool contentsOpaque) const
-@@ -247,11 +505,20 @@ Ref<SkiaRecordingResult> SkiaPaintingEngine::record(const GraphicsLayerCoordinat
+@@ -247,11 +509,20 @@ Ref<SkiaRecordingResult> SkiaPaintingEngine::record(const GraphicsLayerCoordinat
      return result;
  }
  
@@ -73863,7 +73867,7 @@ index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..5919dc5b6e7e87c71deb951fe0b40e20
  
      auto renderingMode = recording->renderingMode();
  #if USE(TEXTURE_MAPPER)
-@@ -259,10 +526,38 @@ Ref<CoordinatedTileBuffer> SkiaPaintingEngine::replay(const GraphicsLayerCoordin
+@@ -259,10 +530,38 @@ Ref<CoordinatedTileBuffer> SkiaPaintingEngine::replay(const GraphicsLayerCoordin
  #else
      auto bufferSize = renderingMode == RenderingMode::Accelerated ? tileRect.size() : dirtyRect.size();
  #endif
@@ -73903,7 +73907,7 @@ index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..5919dc5b6e7e87c71deb951fe0b40e20
          if (auto* canvas = buffer->canvas()) {
              auto replayPicture = [](const sk_sp<SkPicture>& picture, SkCanvas* canvas, const IntRect& recordRect, const IntRect& tileRect, const IntRect& dirtyRect, bool isDDLBuffer) {
                  canvas->save();
-@@ -297,9 +592,41 @@ Ref<CoordinatedTileBuffer> SkiaPaintingEngine::replay(const GraphicsLayerCoordin
+@@ -297,9 +596,41 @@ Ref<CoordinatedTileBuffer> SkiaPaintingEngine::replay(const GraphicsLayerCoordin
              WTFEndSignpost(canvas, PaintTile);
          }
  
@@ -73946,7 +73950,7 @@ index ffcff7e0b02bdf8599d7b8f245f3323f2f2743cd..5919dc5b6e7e87c71deb951fe0b40e20
  
      return buffer;
  }
-@@ -310,7 +637,20 @@ unsigned SkiaPaintingEngine::numberOfCPUPaintingThreads()
+@@ -310,7 +641,20 @@ unsigned SkiaPaintingEngine::numberOfCPUPaintingThreads()
      static unsigned numberOfThreads = 0;
  
      std::call_once(onceFlag, [] {
