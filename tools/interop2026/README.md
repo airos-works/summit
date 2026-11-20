@@ -135,6 +135,34 @@ passes every reftest, so check that failures and passes show real pages.
   `screenshot` (what the screen shows) instead of WebDriver, whose pictures
   leave out composited content (#186). Neither is perfect: compare both runs.
 
+## Parallel runs over several VMs
+
+The November 21 run of all 4,615 labelled 2025 and 2026 URLs took about
+30 minutes with `--processes=4` over four copy-on-write clones of one air/OS
+VM. One VM with one process takes about 5 hours. The image already shipped the
+Summit under test, so the runner's build folder was a link to `/boot/system`
+(`SUMMIT_REMOTE_BUILD=sys`). Results and open work:
+[#243](https://github.com/airos-works/summit/issues/243#issuecomment-7051838433).
+
+- Give each wptrunner process its own VM. Use a wrapper as the
+  `--webdriver-binary` that takes the first free VM with `flock` and runs
+  `summitdriver-shim` with that VM's `SUMMIT_SSH`. The wrapper has to keep the
+  lock itself and run the shim as a child process, because ssh closes
+  inherited descriptors. If a lock is handed down through `exec`, it is
+  released, two processes share a VM, and each kills the other's Summit.
+- Start the clones without `-vnc`. With VNC enabled, QEMU 10.2.1 on the build
+  host segfaulted at the same address in two guests at the same moment (other
+  sessions' VMs crashed in the same way). wptrunner then drops those processes'
+  queues ("Max restarts exceeded"). Rerun the URLs missing from the report and
+  merge them.
+- On this image, changes to the system volume do not survive a reboot. After
+  each boot, append the hosts block again and recreate the `/boot/home/interop`
+  link to the data volume.
+- Run a single test with `--no-pause-after-test`, or the run waits for the
+  browser to close.
+- To compare with wpt.fyi, use the current WPT and wpt-metadata (labels change,
+  and tests are renamed or updated) rather than the pinned review revisions.
+
 ## Traps
 
 - Automated top-level pages can open pop-ups (#187). The test profile also
