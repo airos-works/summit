@@ -15058,16 +15058,21 @@ index 4e9748f611d66139118edbcb4a518e6fca3a2157..d59d97d7bd0181a59a302372a429c4a7
  #if PLATFORM(WPE) || PLATFORM(GTK)
      String m_jsonFilePath;
 diff --git a/Source/WebCore/Modules/mediastream/RTCEncodedAudioFrame.cpp b/Source/WebCore/Modules/mediastream/RTCEncodedAudioFrame.cpp
-index 04d105e4800d0c299bd6577b277c4f578f690773..77c70f86e2382598f598e3ffd7548b85e0754aff 100644
+index 04d105e4800d0c299bd6577b277c4f578f690773..4bb42bd69770567b4730d3548f4b29cedec7c4c9 100644
 --- a/Source/WebCore/Modules/mediastream/RTCEncodedAudioFrame.cpp
 +++ b/Source/WebCore/Modules/mediastream/RTCEncodedAudioFrame.cpp
-@@ -32,26 +32,29 @@
+@@ -32,26 +32,34 @@
  
  namespace WebCore {
  
 -Ref<RTCEncodedAudioFrame> RTCEncodedAudioFrame::create(RTCEncodedAudioFrame& frame, const Options& options)
-+Ref<RTCEncodedAudioFrame> RTCEncodedAudioFrame::create(ScriptExecutionContext& context, RTCEncodedAudioFrame& frame, const Options& options)
++ExceptionOr<Ref<RTCEncodedAudioFrame>> RTCEncodedAudioFrame::create(ScriptExecutionContext& context, RTCEncodedAudioFrame& frame, const Options& options)
  {
++    // A copy is made as a structured clone is: a frame that was written or
++    // whose data was transferred has nothing left to copy.
++    if (frame.isDetached())
++        return Exception { ExceptionCode::DataCloneError, "The frame was consumed or its data is detached"_s };
++
      auto rtcFrame = frame.serialize();
 -    if (options.metadata)
 -        rtcFrame->setOptions(*options.metadata);
@@ -15099,15 +15104,23 @@ index 04d105e4800d0c299bd6577b277c4f578f690773..77c70f86e2382598f598e3ffd7548b85
  
  } // namespace WebCore
 diff --git a/Source/WebCore/Modules/mediastream/RTCEncodedAudioFrame.h b/Source/WebCore/Modules/mediastream/RTCEncodedAudioFrame.h
-index c7c9253410403334afde846c5254754640f5cfbc..34d7799e2c21c6d86b5da2e118fe9640a4cf3f57 100644
+index c7c9253410403334afde846c5254754640f5cfbc..bbdb5a187bf39933265003f1438f7181c3e5849b 100644
 --- a/Source/WebCore/Modules/mediastream/RTCEncodedAudioFrame.h
 +++ b/Source/WebCore/Modules/mediastream/RTCEncodedAudioFrame.h
-@@ -36,17 +36,17 @@ public:
+@@ -27,6 +27,7 @@
+ 
+ #if ENABLE(WEB_RTC)
+ 
++#include "ExceptionOr.h"
+ #include "RTCEncodedFrame.h"
+ 
+ namespace WebCore {
+@@ -36,17 +37,17 @@ public:
      struct Options {
          std::optional<RTCEncodedAudioFrameMetadata> metadata;
      };
 -    static Ref<RTCEncodedAudioFrame> create(RTCEncodedAudioFrame&, const Options&);
-+    static Ref<RTCEncodedAudioFrame> create(ScriptExecutionContext&, RTCEncodedAudioFrame&, const Options&);
++    static ExceptionOr<Ref<RTCEncodedAudioFrame>> create(ScriptExecutionContext&, RTCEncodedAudioFrame&, const Options&);
      static Ref<RTCEncodedAudioFrame> create(Ref<RTCRtpTransformableFrame>&& frame) { return adoptRef(*new RTCEncodedAudioFrame(WTF::move(frame))); }
      ~RTCEncodedAudioFrame();
  
@@ -15165,7 +15178,7 @@ index adafc1772318624a91eeae8a4efc8966b9b553b2..ddfd11597c8aa308c3b72a96767c7998
 +    [CallWith=RelevantScriptExecutionContext] RTCEncodedAudioFrameMetadata getMetadata();
  };
 diff --git a/Source/WebCore/Modules/mediastream/RTCEncodedFrame.cpp b/Source/WebCore/Modules/mediastream/RTCEncodedFrame.cpp
-index 4513b92766d329f148624529632b36cc538fe7c6..f1eed364032f39d7eee30d5c19fbee7e680ae226 100644
+index 4513b92766d329f148624529632b36cc538fe7c6..fdfbf3185c65badd0c978b613229e5d4eeb700ed 100644
 --- a/Source/WebCore/Modules/mediastream/RTCEncodedFrame.cpp
 +++ b/Source/WebCore/Modules/mediastream/RTCEncodedFrame.cpp
 @@ -28,6 +28,10 @@
@@ -15179,7 +15192,18 @@ index 4513b92766d329f148624529632b36cc538fe7c6..f1eed364032f39d7eee30d5c19fbee7e
  #include <JavaScriptCore/JSCInlines.h>
  #include <JavaScriptCore/StrongInlines.h>
  
-@@ -50,6 +54,52 @@ void RTCEncodedFrame::setData(JSC::ArrayBuffer& buffer)
+@@ -40,8 +44,9 @@ RTCEncodedFrame::RTCEncodedFrame(Ref<RTCRtpTransformableFrame>&& frame)
+ 
+ Ref<JSC::ArrayBuffer> RTCEncodedFrame::data() const
+ {
++    // A consumed frame always has its (detached) buffer: see rtcFrame().
+     if (!m_data)
+-        m_data = m_isNeutered ? JSC::ArrayBuffer::create(static_cast<size_t>(0U), 1) : JSC::ArrayBuffer::create(m_frame->data());
++        m_data = JSC::ArrayBuffer::create(m_frame->data());
+     return *m_data;
+ }
+ 
+@@ -50,6 +55,52 @@ void RTCEncodedFrame::setData(JSC::ArrayBuffer& buffer)
      m_data = buffer;
  }
  
@@ -15232,8 +15256,48 @@ index 4513b92766d329f148624529632b36cc538fe7c6..f1eed364032f39d7eee30d5c19fbee7e
  uint64_t RTCEncodedFrame::timestamp() const
  {
      if (!m_timestamp)
+@@ -60,20 +111,34 @@ uint64_t RTCEncodedFrame::timestamp() const
+ Ref<RTCRtpTransformableFrame> RTCEncodedFrame::rtcFrame(JSC::VM& vm, ShouldNeuter shouldNeuter)
+ {
+     if (shouldNeuter == ShouldNeuter::Yes && !m_isNeutered) {
++        // The platform frame leaves with the write, so keep the values that
++        // have to outlive it (the timestamp, the metadata).
++        timestamp();
++        willBeConsumed();
++
+         m_isNeutered = true;
+-        if (m_data) {
++        if (m_data)
+             protect(m_frame)->setData(protect(m_data)->span());
+-
+-            JSC::ArrayBufferContents emptyBuffer;
+-            bool result = protect(m_data)->transferTo(vm, emptyBuffer);
+-            ASSERT_UNUSED(result, result);
++        else {
++            // Script has not read the data yet. It gets a detached buffer
++            // from now on, as it does when it read the data before the write.
++            m_data = JSC::ArrayBuffer::create(static_cast<size_t>(0U), 1);
+         }
++
++        JSC::ArrayBufferContents emptyBuffer;
++        protect(m_data)->transferTo(vm, emptyBuffer);
+     }
+     return m_frame;
+ }
+ 
++bool RTCEncodedFrame::isDetached() const
++{
++    return m_isNeutered || (m_data && m_data->isDetached());
++}
++
+ Ref<RTCRtpTransformableFrame> RTCEncodedFrame::serialize()
+ {
++    ASSERT(!isDetached());
+     auto clone = m_frame->clone();
+     if (m_data)
+         clone->setData(protect(m_data)->span());
 diff --git a/Source/WebCore/Modules/mediastream/RTCEncodedFrame.h b/Source/WebCore/Modules/mediastream/RTCEncodedFrame.h
-index 732a7fff5491b7fd96b45850f03de552f38a12b0..574a34843d074c1a4bebb23ac74868df223e58cc 100644
+index 732a7fff5491b7fd96b45850f03de552f38a12b0..8e15350ef0c5271d09c974dd000b933d525f9b23 100644
 --- a/Source/WebCore/Modules/mediastream/RTCEncodedFrame.h
 +++ b/Source/WebCore/Modules/mediastream/RTCEncodedFrame.h
 @@ -39,6 +39,8 @@ class VM;
@@ -15245,7 +15309,14 @@ index 732a7fff5491b7fd96b45850f03de552f38a12b0..574a34843d074c1a4bebb23ac74868df
  class RTCEncodedFrame : public RefCounted<RTCEncodedFrame> {
  public:
      virtual ~RTCEncodedFrame() { }
-@@ -54,6 +56,8 @@ public:
+@@ -51,11 +53,21 @@ public:
+ 
+     uint64_t timestamp() const;
+ 
++    // True once the frame was written to a transform's writable, or its data
++    // buffer was detached: such a frame can no longer be copied.
++    bool isDetached() const;
++
      Ref<RTCRtpTransformableFrame> serialize();
  
  protected:
@@ -15253,18 +15324,29 @@ index 732a7fff5491b7fd96b45850f03de552f38a12b0..574a34843d074c1a4bebb23ac74868df
 +    static void setTimingOptions(ScriptExecutionContext&, RTCRtpTransformableFrame&, std::optional<DOMHighResTimeStamp> receiveTime, std::optional<DOMHighResTimeStamp> captureTime, std::optional<DOMHighResTimeStamp> senderCaptureTimeOffset);
      explicit RTCEncodedFrame(Ref<RTCRtpTransformableFrame>&&);
  
++    // The frame is about to lose its platform frame: read what script may
++    // still ask for afterwards.
++    virtual void willBeConsumed() { }
++
      const Ref<RTCRtpTransformableFrame> m_frame;
+     mutable RefPtr<JSC::ArrayBuffer> m_data;
+     bool m_isNeutered { false };
 diff --git a/Source/WebCore/Modules/mediastream/RTCEncodedVideoFrame.cpp b/Source/WebCore/Modules/mediastream/RTCEncodedVideoFrame.cpp
-index 2003ad57faefe999644c3608cadd3db0a17373f0..525c314e4a939076188c4eae32e28f3025d0be1a 100644
+index 2003ad57faefe999644c3608cadd3db0a17373f0..044b22731358311293369e9c63151f29017153be 100644
 --- a/Source/WebCore/Modules/mediastream/RTCEncodedVideoFrame.cpp
 +++ b/Source/WebCore/Modules/mediastream/RTCEncodedVideoFrame.cpp
-@@ -32,11 +32,14 @@
+@@ -32,11 +32,19 @@
  
  namespace WebCore {
  
 -Ref<RTCEncodedVideoFrame> RTCEncodedVideoFrame::create(RTCEncodedVideoFrame& frame, const Options& options)
-+Ref<RTCEncodedVideoFrame> RTCEncodedVideoFrame::create(ScriptExecutionContext& context, RTCEncodedVideoFrame& frame, const Options& options)
++ExceptionOr<Ref<RTCEncodedVideoFrame>> RTCEncodedVideoFrame::create(ScriptExecutionContext& context, RTCEncodedVideoFrame& frame, const Options& options)
  {
++    // A copy is made as a structured clone is: a frame that was written or
++    // whose data was transferred has nothing left to copy.
++    if (frame.isDetached())
++        return Exception { ExceptionCode::DataCloneError, "The frame was consumed or its data is detached"_s };
++
      auto rtcFrame = frame.serialize();
 -    if (options.metadata)
 -        rtcFrame->setOptions(*options.metadata);
@@ -15276,11 +15358,18 @@ index 2003ad57faefe999644c3608cadd3db0a17373f0..525c314e4a939076188c4eae32e28f30
      return create(WTF::move(rtcFrame));
  }
  
-@@ -48,10 +51,11 @@ RTCEncodedVideoFrame::RTCEncodedVideoFrame(Ref<RTCRtpTransformableFrame>&& frame
+@@ -48,10 +56,18 @@ RTCEncodedVideoFrame::RTCEncodedVideoFrame(Ref<RTCRtpTransformableFrame>&& frame
  
  RTCEncodedVideoFrame::~RTCEncodedVideoFrame() = default;
  
 -const RTCEncodedVideoFrame::Metadata& RTCEncodedVideoFrame::getMetadata()
++void RTCEncodedVideoFrame::willBeConsumed()
++{
++    // getMetadata() reads the platform frame on first use.
++    if (!m_metadata)
++        m_metadata = m_frame->videoMetadata();
++}
++
 +const RTCEncodedVideoFrame::Metadata& RTCEncodedVideoFrame::getMetadata(ScriptExecutionContext& context)
  {
      if (!m_metadata)
@@ -15290,19 +15379,27 @@ index 2003ad57faefe999644c3608cadd3db0a17373f0..525c314e4a939076188c4eae32e28f30
  }
  
 diff --git a/Source/WebCore/Modules/mediastream/RTCEncodedVideoFrame.h b/Source/WebCore/Modules/mediastream/RTCEncodedVideoFrame.h
-index 9b81ad4726e64f0a7b3bc498149df3f5bc0f8f1f..d9cf8a8e5111b68978ec589cc5586a1fdacb75ff 100644
+index 9b81ad4726e64f0a7b3bc498149df3f5bc0f8f1f..44db2a5caabb2c026dd9e2b7f20ea3844afe7ea6 100644
 --- a/Source/WebCore/Modules/mediastream/RTCEncodedVideoFrame.h
 +++ b/Source/WebCore/Modules/mediastream/RTCEncodedVideoFrame.h
-@@ -36,7 +36,7 @@ public:
+@@ -27,6 +27,7 @@
+ 
+ #if ENABLE(WEB_RTC)
+ 
++#include "ExceptionOr.h"
+ #include "RTCEncodedFrame.h"
+ 
+ namespace WebCore {
+@@ -36,7 +37,7 @@ public:
      struct Options {
          std::optional<RTCEncodedVideoFrameMetadata> metadata;
      };
 -    static Ref<RTCEncodedVideoFrame> create(RTCEncodedVideoFrame&, const Options&);
-+    static Ref<RTCEncodedVideoFrame> create(ScriptExecutionContext&, RTCEncodedVideoFrame&, const Options&);
++    static ExceptionOr<Ref<RTCEncodedVideoFrame>> create(ScriptExecutionContext&, RTCEncodedVideoFrame&, const Options&);
      static Ref<RTCEncodedVideoFrame> create(Ref<RTCRtpTransformableFrame>&& frame) { return adoptRef(*new RTCEncodedVideoFrame(WTF::move(frame))); }
      ~RTCEncodedVideoFrame();
  
-@@ -44,7 +44,7 @@ public:
+@@ -44,11 +45,13 @@ public:
      Type type() const { return m_type; }
  
      using Metadata = RTCEncodedVideoFrameMetadata;
@@ -15311,6 +15408,12 @@ index 9b81ad4726e64f0a7b3bc498149df3f5bc0f8f1f..d9cf8a8e5111b68978ec589cc5586a1f
  
  private:
      explicit RTCEncodedVideoFrame(Ref<RTCRtpTransformableFrame>&&);
+ 
++    void willBeConsumed() final;
++
+     Type m_type;
+     mutable std::optional<Metadata> m_metadata;
+ };
 diff --git a/Source/WebCore/Modules/mediastream/RTCEncodedVideoFrame.idl b/Source/WebCore/Modules/mediastream/RTCEncodedVideoFrame.idl
 index 7d4633cbea43f5816021e3f64c405d33e310d1bc..b3e74bb880ff8558d6b70656577cba34c52630e7 100644
 --- a/Source/WebCore/Modules/mediastream/RTCEncodedVideoFrame.idl
@@ -26040,6 +26143,103 @@ index c4227c5e6920c9454e24b185e60c6d1a403b34ee..34acd051890f7194b85c26a8a2750e68
  
          URL responseURL = loader.responseURL();
          if (!loader.retrievedFromServiceWorkerCache()) {
+diff --git a/Source/WebCore/bindings/js/SerializedScriptValue.cpp b/Source/WebCore/bindings/js/SerializedScriptValue.cpp
+index 9fd7993f8e74f3869dba244117d7f5ba1d3f2656..d9d3ca59e05764d28bbf9c735a21cb4fe825c78b 100644
+--- a/Source/WebCore/bindings/js/SerializedScriptValue.cpp
++++ b/Source/WebCore/bindings/js/SerializedScriptValue.cpp
+@@ -877,10 +877,17 @@ private:
+ 
+         code = SerializationReturnCode::DataCloneError;
+     }
+-    void dumpRTCEncodedAudioFrame(JSObject* obj)
++    void dumpRTCEncodedAudioFrame(JSObject* obj, SerializationReturnCode& code)
+     {
+         Ref frame = downcast<JSRTCEncodedAudioFrame>(obj)->wrapped();
+ 
++        // Encoded frames are not storable, and a frame that was written to its
++        // transform or whose data buffer is detached has no data to clone.
++        if (m_forStorage == SerializationForStorage::Yes || frame->isDetached()) {
++            code = SerializationReturnCode::DataCloneError;
++            return;
++        }
++
+         auto index = m_serializedRTCEncodedAudioFrames.find(frame.ptr());
+         if (index == notFound) {
+             index = m_serializedRTCEncodedAudioFrames.size();
+@@ -890,10 +897,17 @@ private:
+         write(RTCEncodedAudioFrameTag);
+         write(static_cast<uint32_t>(index));
+     }
+-    void dumpRTCEncodedVideoFrame(JSObject* obj)
++    void dumpRTCEncodedVideoFrame(JSObject* obj, SerializationReturnCode& code)
+     {
+         Ref frame = downcast<JSRTCEncodedVideoFrame>(obj)->wrapped();
+ 
++        // Encoded frames are not storable, and a frame that was written to its
++        // transform or whose data buffer is detached has no data to clone.
++        if (m_forStorage == SerializationForStorage::Yes || frame->isDetached()) {
++            code = SerializationReturnCode::DataCloneError;
++            return;
++        }
++
+         auto index = m_serializedRTCEncodedVideoFrames.find(frame.ptr());
+         if (index == notFound) {
+             index = m_serializedRTCEncodedVideoFrames.size();
+@@ -1233,11 +1247,11 @@ public:
+             return true;
+         }
+         if (obj->inherits<JSRTCEncodedAudioFrame>()) {
+-            dumpRTCEncodedAudioFrame(obj);
++            dumpRTCEncodedAudioFrame(obj, code);
+             return true;
+         }
+         if (obj->inherits<JSRTCEncodedVideoFrame>()) {
+-            dumpRTCEncodedVideoFrame(obj);
++            dumpRTCEncodedVideoFrame(obj, code);
+             return true;
+         }
+ #endif
+@@ -4289,6 +4303,27 @@ ExceptionOr<Ref<SerializedScriptValue>> SerializedScriptValue::create(JSGlobalOb
+         return Exception { ExceptionCode::DataCloneError };
+ #endif
+ 
++#if ENABLE(WEB_RTC)
++    // A getter that ran after a frame was serialized may have written the frame
++    // to its transform or detached its data. The frames are copied before the
++    // transfer list is applied, so that the copy of a frame whose own buffer is
++    // transferred still gets the data.
++    for (auto& frame : serializedRTCEncodedAudioFrames) {
++        if (frame->isDetached())
++            return Exception { ExceptionCode::DataCloneError };
++    }
++    for (auto& frame : serializedRTCEncodedVideoFrames) {
++        if (frame->isDetached())
++            return Exception { ExceptionCode::DataCloneError };
++    }
++    auto serializedRTCEncodedAudioFrameStorages = map(serializedRTCEncodedAudioFrames, [](auto& frame) -> Ref<RTCRtpTransformableFrame> {
++        return frame->serialize();
++    });
++    auto serializedRTCEncodedVideoFrameStorages = map(serializedRTCEncodedVideoFrames, [](auto& frame) -> Ref<RTCRtpTransformableFrame> {
++        return frame->serialize();
++    });
++#endif
++
+     auto arrayBufferContentsArray = transferArrayBuffers(vm, arrayBuffers);
+     if (arrayBufferContentsArray.hasException())
+         return arrayBufferContentsArray.releaseException();
+@@ -4306,12 +4341,6 @@ ExceptionOr<Ref<SerializedScriptValue>> SerializedScriptValue::create(JSGlobalOb
+     Vector<std::unique_ptr<DetachedRTCDataChannel>> detachedRTCDataChannels;
+     for (auto& channel : dataChannels)
+         detachedRTCDataChannels.append(channel->detach());
+-    auto serializedRTCEncodedAudioFrameStorages = map(serializedRTCEncodedAudioFrames, [](auto& frame) -> Ref<RTCRtpTransformableFrame> {
+-        return frame->serialize();
+-    });
+-    auto serializedRTCEncodedVideoFrameStorages = map(serializedRTCEncodedVideoFrames, [](auto& frame) -> Ref<RTCRtpTransformableFrame> {
+-        return frame->serialize();
+-    });
+ #endif
+     for (auto& readableStream : readableStreams) {
+         auto detachedOrException = readableStream->runTransferSteps(downcast<JSDOMGlobalObject>(lexicalGlobalObject));
 diff --git a/Source/WebCore/bindings/js/WebCoreBuiltinNames.h b/Source/WebCore/bindings/js/WebCoreBuiltinNames.h
 index 6d3962f03ae12aa4f41c8cba628877c5efa76bba..83ec7c44176c2a579fef2d181764c46ddd0fcef0 100644
 --- a/Source/WebCore/bindings/js/WebCoreBuiltinNames.h
