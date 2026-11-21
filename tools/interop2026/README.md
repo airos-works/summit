@@ -114,12 +114,6 @@ passes every reftest, so check that failures and passes show real pages.
   by 5 px, so Summit correctly keeps it. Using the full 200 px height makes
   the bottom fallback overflow at the tested offset and exercises the flip.
   [Summit #238](https://github.com/airos-works/summit/issues/238)
-- The local copy of `event-timing/buffered-and-duration-threshold.html` waits
-  until the first observer receives the click's `pointerdown`. It then checks
-  the second observer's replay queue with `takeRecords()` before generating
-  another click. The upstream test can advance on `mousedown` while
-  `pointerdown` is still pending and count a live delivery as historical.
-  [Summit #233](https://github.com/airos-works/summit/issues/233)
 - `wpt run` does not insist on wpt's names in the build host's `/etc/hosts`
   for the `webkit` product (no root here; the browser resolves them on the
   test machine). The server binds to `WPT_SERVER_HOST` (`env_options`).

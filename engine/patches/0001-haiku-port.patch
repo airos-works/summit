@@ -34765,7 +34765,7 @@ index bbb54b89194cc6399eba94d1f9ea11ad625d5285..f9883c5c58f83ff0c429d302aab104b0
      scheduleRenderingUpdateIfNecessary(*element);
  }
 diff --git a/Source/WebCore/page/LocalDOMWindow.cpp b/Source/WebCore/page/LocalDOMWindow.cpp
-index f3af2c99162d2f25d3aa42786ddc24d827230428..b8b641713a5f26005be2f435046cf3293e7d3170 100644
+index f3af2c99162d2f25d3aa42786ddc24d827230428..558e08009f33cde5ba60cc70c60709f96fe16fc0 100644
 --- a/Source/WebCore/page/LocalDOMWindow.cpp
 +++ b/Source/WebCore/page/LocalDOMWindow.cpp
 @@ -30,6 +30,7 @@
@@ -34792,7 +34792,13 @@ index f3af2c99162d2f25d3aa42786ddc24d827230428..b8b641713a5f26005be2f435046cf329
  #include <wtf/text/WTFString.h>
  
  #if ENABLE(USER_MESSAGE_HANDLERS)
-@@ -2804,10 +2807,36 @@ PerformanceEventTimingCandidate LocalDOMWindow::initializeEventTiming(Event& eve
+@@ -2799,15 +2802,42 @@ PerformanceEventTimingCandidate LocalDOMWindow::initializeEventTiming(Event& eve
+     return PerformanceEventTimingCandidate {
+         .type = type,
+         .cancelable = event.cancelable(),
++        .heldDurationUpdate = 0,
+         .startTime =  startTime,
+         .processingStart = processingStart,
          .processingEnd = { },
          .duration = { },
          .target = { },
@@ -34829,7 +34835,7 @@ index f3af2c99162d2f25d3aa42786ddc24d827230428..b8b641713a5f26005be2f435046cf329
  void LocalDOMWindow::markEndOfProcessingForEventTiming(PerformanceEventTimingCandidate& entry, const Event& event, EventType type)
  {
      // Maps to "Finalize event timing" in the spec.
-@@ -2817,9 +2846,11 @@ void LocalDOMWindow::markEndOfProcessingForEventTiming(PerformanceEventTimingCan
+@@ -2817,9 +2847,11 @@ void LocalDOMWindow::markEndOfProcessingForEventTiming(PerformanceEventTimingCan
      // Without this, when no event listeners are registered for a given event type,
      // the event target may be an un-retargeted node inside a user-agent shadow tree
      // (e.g., an internal node of <input>), leaking shadow DOM internals.
@@ -34844,6 +34850,41 @@ index f3af2c99162d2f25d3aa42786ddc24d827230428..b8b641713a5f26005be2f435046cf329
          entry.target = event.target();
  
      switch (type) {
+@@ -2889,15 +2921,27 @@ void LocalDOMWindow::finalizeAndQueueEventTimingEntries()
+ {
+     // Maps to "Dispatch pending Event Timing entries" in the spec.
+     auto renderingTime = protect(performance())->nowInReducedResolutionSeconds();
+-    if (m_pendingPointerDown && !m_pendingPointerDown->duration)
+-        m_pendingPointerDown->duration = std::max(renderingTime - m_pendingPointerDown->startTime, Seconds::fromMilliseconds(1));
++    // An entry that still waits for its interaction ID gets its duration here
++    // and reaches the observers after a later rendering update. Remember this
++    // one, so that an observer registered in between does not get the entry
++    // as a new one (Summit #261).
++    uint32_t heldDurationUpdate = 0;
++    auto setDurationWhileHeld = [&](PerformanceEventTimingCandidate& candidate) {
++        if (candidate.duration)
++            return;
++        if (!heldDurationUpdate)
++            heldDurationUpdate = protect(performance())->startHeldEventDurationUpdate();
++        candidate.duration = std::max(renderingTime - candidate.startTime, Seconds::fromMilliseconds(1));
++        candidate.heldDurationUpdate = heldDurationUpdate;
++    };
+ 
+-    for (auto& keydownEntry : m_pendingKeyDowns) {
+-        if (!keydownEntry.value.keyDown.duration)
+-            keydownEntry.value.keyDown.duration = std::max(renderingTime - keydownEntry.value.keyDown.startTime, Seconds::fromMilliseconds(1));
++    if (m_pendingPointerDown)
++        setDurationWhileHeld(*m_pendingPointerDown);
+ 
+-        if (keydownEntry.value.keyPress && !keydownEntry.value.keyPress->duration)
+-            keydownEntry.value.keyPress->duration = std::max(renderingTime - keydownEntry.value.keyPress->startTime, Seconds::fromMilliseconds(1));
++    for (auto& keydownEntry : m_pendingKeyDowns) {
++        setDurationWhileHeld(keydownEntry.value.keyDown);
++        if (keydownEntry.value.keyPress)
++            setDurationWhileHeld(*keydownEntry.value.keyPress);
+     }
+ 
+     if (m_performanceEventTimingCandidates.isEmpty())
 diff --git a/Source/WebCore/page/LocalFrameView.cpp b/Source/WebCore/page/LocalFrameView.cpp
 index 2132dee6a2c27be522007bb4df5bc1f5940c1c06..e3e6c3d02a4d946a1927c4babf7b1e51238889f1 100644
 --- a/Source/WebCore/page/LocalFrameView.cpp
@@ -35936,6 +35977,87 @@ index 12c38036f87636c92b0cdde24c1ee546f36ac008..1ceb344a0a0acd1aa047ed67bbcfc87f
      UNUSED_PARAM(context);
  
  #if USE(GRAPHICS_CONTEXT_FILTERS)
+diff --git a/Source/WebCore/page/Performance.cpp b/Source/WebCore/page/Performance.cpp
+index 0ece9c2b811cda279910dfd5b6c5cd2c09e2ebb7..303cc99c247e4edad1e3d1acb7eb88ade92f7d7d 100644
+--- a/Source/WebCore/page/Performance.cpp
++++ b/Source/WebCore/page/Performance.cpp
+@@ -369,10 +369,11 @@ void Performance::processEventEntry(const PerformanceEventTimingCandidate& candi
+         return;
+ 
+     auto entry = PerformanceEventTiming::create(candidate);
+-    if (candidate.duration > defaultDurationCutoffBeforeRounding)
++    bool isInEntryBuffer = candidate.duration > defaultDurationCutoffBeforeRounding;
++    if (isInEntryBuffer)
+         addToEntryBuffer(entry);
+ 
+-    queueEntry(entry);
++    queueEntry(entry, candidate.heldDurationUpdate, isInEntryBuffer);
+ }
+ 
+ void Performance::clearResourceTimings()
+@@ -600,7 +601,7 @@ void Performance::unregisterPerformanceObserver(PerformanceObserver& observer)
+     m_observers.remove(observer);
+ }
+ 
+-void Performance::queueEntry(PerformanceEntry& entry)
++void Performance::queueEntry(PerformanceEntry& entry, uint32_t heldDurationUpdate, bool isInEntryBuffer)
+ {
+     bool shouldScheduleTask = false;
+     for (auto& observer : m_observers) {
+@@ -608,6 +609,15 @@ void Performance::queueEntry(PerformanceEntry& entry)
+         if (entry.performanceEntryType() == PerformanceEntry::Type::Event && entry.duration() < observer->durationThreshold().milliseconds())
+             isObserverInterested = false;
+ 
++        // A pointerdown entry waits for the pointer's release (and a keydown
++        // entry for its keyup) to learn its interaction ID, which can be many
++        // frames after the rendering update that set its duration. Treat it
++        // as queued at that update: an observer registered later gets it only
++        // the way it gets any other earlier event, as a buffered entry
++        // (Summit #261, WPT event-timing/buffered-and-duration-threshold.html).
++        if (isObserverInterested && heldDurationUpdate && !observer->shouldReceiveHeldEventEntry(heldDurationUpdate, isInEntryBuffer))
++            isObserverInterested = false;
++
+         if (entry.performanceEntryType() == PerformanceEntry::Type::Navigation && observer->hasNavigationTiming())
+             isObserverInterested = false;
+ 
+diff --git a/Source/WebCore/page/Performance.h b/Source/WebCore/page/Performance.h
+index 74fc2a68cf2d73e46cb6829bc247f6b21ae41756..8126be7fb1ee5a02939c68b1a7e55a4d0b9d73a1 100644
+--- a/Source/WebCore/page/Performance.h
++++ b/Source/WebCore/page/Performance.h
+@@ -105,6 +105,12 @@ public:
+ 
+     void countEvent(EventType);
+     void processEventEntry(const PerformanceEventTimingCandidate&);
++    // Numbers the rendering updates that set the duration of event timing
++    // entries still waiting for their interaction ID. An observer remembers
++    // the number current when it starts to observe events, which tells
++    // whether it was there when such an entry would have been queued.
++    uint32_t startHeldEventDurationUpdate() { return ++m_heldEventDurationUpdate; }
++    uint32_t heldEventDurationUpdate() const { return m_heldEventDurationUpdate; }
+ 
+     void clearResourceTimings();
+     void NODELETE setResourceTimingBufferSize(unsigned);
+@@ -155,7 +161,11 @@ private:
+     bool NODELETE isResourceTimingBufferFull() const;
+     void resourceTimingBufferFullTimerFired();
+ 
+-    void queueEntry(PerformanceEntry&);
++    // The last two arguments are for an event timing entry that waited for
++    // its interaction ID: the update that set its duration (see
++    // startHeldEventDurationUpdate()), and whether it went into the entry
++    // buffer.
++    void queueEntry(PerformanceEntry&, uint32_t heldDurationUpdate = 0, bool isInEntryBuffer = false);
+ 
+     // https://w3c.github.io/performance-timeline/#performance-entry-buffer-map
+     struct PerformanceEntryBuffer {
+@@ -195,6 +205,7 @@ private:
+ 
+     std::array<PerformanceEntryBuffer, PerformanceEntry::performanceEntryTypeCount> m_entryBufferMap;
+     OrderedHashSet<Ref<PerformanceObserver>> m_observers;
++    uint32_t m_heldEventDurationUpdate { 0 };
+ };
+ 
+ } // namespace WebCore
 diff --git a/Source/WebCore/page/PerformanceEventTiming.cpp b/Source/WebCore/page/PerformanceEventTiming.cpp
 index c89a31f1a0aadb55542d3971658a2885e0a8b92d..cf8acd31125ed2bb63f41af6567219dd33e4dde6 100644
 --- a/Source/WebCore/page/PerformanceEventTiming.cpp
@@ -35981,7 +36103,7 @@ index 573e82705d072fd7ec54f378c8b814225b0ec5cc..d84e9e86370ebef3d4b7c176b4c37989
      [Default] object toJSON();
  };
 diff --git a/Source/WebCore/page/PerformanceEventTimingCandidate.h b/Source/WebCore/page/PerformanceEventTimingCandidate.h
-index 794ed4090c5f4d97b1fb8c098965b1735e19b20c..c58ab61f841f3c0c6737c18abf9015cee2bc32ea 100644
+index 794ed4090c5f4d97b1fb8c098965b1735e19b20c..11f4b7620164b955c7cc2a98dc41039f6da55219 100644
 --- a/Source/WebCore/page/PerformanceEventTimingCandidate.h
 +++ b/Source/WebCore/page/PerformanceEventTimingCandidate.h
 @@ -29,6 +29,7 @@
@@ -35992,7 +36114,20 @@ index 794ed4090c5f4d97b1fb8c098965b1735e19b20c..c58ab61f841f3c0c6737c18abf9015ce
  
  namespace WebCore {
  
-@@ -42,6 +43,7 @@ struct PerformanceEventTimingCandidate {
+@@ -37,11 +38,20 @@ enum class EventType : uint16_t;
+ struct PerformanceEventTimingCandidate {
+     EventType type { };
+     bool cancelable { false };
++    // Nonzero for an entry that waited for its interaction ID (a pointerdown
++    // until the pointer is released, a keydown until its keyup) while a
++    // rendering update gave it its duration: Performance's number for that
++    // update. The update would have queued the entry had it not been waiting,
++    // so observers registered after it can only get the entry as a buffered
++    // one (Summit #261). It sits here to keep the size of the struct, which
++    // is a hash map value in LocalDOMWindow.
++    uint32_t heldDurationUpdate { 0 };
+     ReducedResolutionSeconds startTime;
+     ReducedResolutionSeconds processingStart;
      ReducedResolutionSeconds processingEnd;
      Seconds duration;
      WeakPtr<EventTarget, EventTarget::WeakPtrImplType> target;
@@ -36000,6 +36135,86 @@ index 794ed4090c5f4d97b1fb8c098965b1735e19b20c..c58ab61f841f3c0c6737c18abf9015ce
      EventTimingInteractionID interactionID;
  };
  
+diff --git a/Source/WebCore/page/PerformanceObserver.cpp b/Source/WebCore/page/PerformanceObserver.cpp
+index b68300ce1925762363544a9ef83045d7f0529b5c..937fbff8ac53f61064fedcd86b796d68d3e7f4b9 100644
+--- a/Source/WebCore/page/PerformanceObserver.cpp
++++ b/Source/WebCore/page/PerformanceObserver.cpp
+@@ -74,6 +74,7 @@ ExceptionOr<void> PerformanceObserver::observe(Init&& init)
+         }
+         if (filter.isEmpty())
+             return { };
++        noteEventObservation(filter, false);
+         m_typeFilter = filter;
+     } else {
+         if (init.type.isNull())
+@@ -99,6 +100,7 @@ ExceptionOr<void> PerformanceObserver::observe(Init&& init)
+         if (init.durationThreshold)
+             m_durationThreshold = std::max(PerformanceEventTiming::minimumDurationThreshold, Seconds::fromMilliseconds(*init.durationThreshold));
+ 
++        noteEventObservation(filter, isBuffered);
+         m_typeFilter.add(filter);
+     }
+ 
+@@ -126,6 +128,32 @@ void PerformanceObserver::disconnect()
+     m_registered = false;
+     m_entriesToDeliver.clear();
+     m_typeFilter = { };
++    m_eventObservationUpdate = 0;
++    m_bufferedEventObservationUpdate = std::nullopt;
++}
++
++void PerformanceObserver::noteEventObservation(EnumSet<PerformanceEntry::Type> newTypes, bool isBuffered)
++{
++    if (!newTypes.contains(PerformanceEntry::Type::Event))
++        return;
++
++    auto currentUpdate = protect(m_performance)->heldEventDurationUpdate();
++    if (!m_registered || !m_typeFilter.contains(PerformanceEntry::Type::Event))
++        m_eventObservationUpdate = currentUpdate;
++    if (isBuffered)
++        m_bufferedEventObservationUpdate = currentUpdate;
++}
++
++bool PerformanceObserver::shouldReceiveHeldEventEntry(uint32_t heldDurationUpdate, bool isInEntryBuffer) const
++{
++    // The entry would have been queued in that update, had it not waited for
++    // its interaction ID.
++    if (m_eventObservationUpdate < heldDurationUpdate)
++        return true;
++
++    // This observer came later. A buffered observe() would have found the
++    // entry in the entry buffer, if it is slow enough to be there.
++    return isInEntryBuffer && m_bufferedEventObservationUpdate && *m_bufferedEventObservationUpdate >= heldDurationUpdate;
+ }
+ 
+ void PerformanceObserver::queueEntry(PerformanceEntry& entry)
+diff --git a/Source/WebCore/page/PerformanceObserver.h b/Source/WebCore/page/PerformanceObserver.h
+index 062e8dd84b76c0c8416b6595f0c6b47aadc42f59..9bc80718d7f97bad36ed1a7f5976eea8c81ad715 100644
+--- a/Source/WebCore/page/PerformanceObserver.h
++++ b/Source/WebCore/page/PerformanceObserver.h
+@@ -73,15 +73,22 @@ public:
+     bool isRegistered() const { return m_registered; }
+     PerformanceObserverCallback& callback() { return m_callback.get(); }
+     Seconds durationThreshold() const { return m_durationThreshold; }
++    bool shouldReceiveHeldEventEntry(uint32_t heldDurationUpdate, bool isInEntryBuffer) const;
+ 
+ private:
+     PerformanceObserver(ScriptExecutionContext&, Ref<PerformanceObserverCallback>&&);
++    void noteEventObservation(EnumSet<PerformanceEntry::Type> newTypes, bool isBuffered);
+ 
+     RefPtr<Performance> m_performance;
+     Vector<Ref<PerformanceEntry>> m_entriesToDeliver;
+     const Ref<PerformanceObserverCallback> m_callback;
+     EnumSet<PerformanceEntry::Type> m_typeFilter;
+     Seconds m_durationThreshold;
++    // Performance::heldEventDurationUpdate() when this observer started to
++    // observe event timing entries, and when it last asked for the buffered
++    // ones.
++    uint32_t m_eventObservationUpdate { 0 };
++    std::optional<uint32_t> m_bufferedEventObservationUpdate;
+     bool m_registered { false };
+     bool m_isTypeObserver { false };
+     bool m_hasNavigationTiming { false };
 diff --git a/Source/WebCore/page/PointerCaptureController.cpp b/Source/WebCore/page/PointerCaptureController.cpp
 index 8f6e1c689e7c8d043c84b5704a113e358c1c71bc..b6373c5a1231a35ce61547465b50273aaa9183c1 100644
 --- a/Source/WebCore/page/PointerCaptureController.cpp
