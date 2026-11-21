@@ -114004,7 +114004,7 @@ index be40151510176ea4e881fd41af8f79ab6ab6a306..b5fdd6e41375e8108fb406089992f8e5
      if (metaData.headerHash != computeSHA1(headerData, salt)) {
          LOG(NetworkCacheStorage, "(NetworkProcess) header checksum mismatch");
 diff --git a/Source/WebKit/NetworkProcess/curl/NetworkDataTaskCurl.cpp b/Source/WebKit/NetworkProcess/curl/NetworkDataTaskCurl.cpp
-index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..741c887bc12919b8493a8da9484596c1885db5cf 100644
+index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..ff196bc638222b7dfa8e988a6d3ada7f1aec3d40 100644
 --- a/Source/WebKit/NetworkProcess/curl/NetworkDataTaskCurl.cpp
 +++ b/Source/WebKit/NetworkProcess/curl/NetworkDataTaskCurl.cpp
 @@ -36,11 +36,17 @@
@@ -114025,7 +114025,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..741c887bc12919b8493a8da9484596c1
  #include <WebCore/ResourceError.h>
  #include <WebCore/SameSiteInfo.h>
  #include <WebCore/SharedBuffer.h>
-@@ -48,11 +54,25 @@
+@@ -48,15 +54,30 @@
  #include <WebCore/TimingAllowOrigin.h>
  #include <pal/text/TextEncoding.h>
  #include <wtf/FileSystem.h>
@@ -114051,7 +114051,12 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..741c887bc12919b8493a8da9484596c1
  NetworkDataTaskCurl::NetworkDataTaskCurl(NetworkSession& session, NetworkDataTaskClient& client, const NetworkLoadParameters& parameters)
      : NetworkDataTask(session, client, parameters.request, parameters.storedCredentialsPolicy, parameters.shouldClearReferrerOnHTTPSToHTTPRedirect, parameters.isMainFrameNavigation, parameters.isInitiatedByDedicatedWorker)
      , m_frameID(parameters.webFrameID)
-@@ -79,11 +99,26 @@ NetworkDataTaskCurl::NetworkDataTaskCurl(NetworkSession& session, NetworkDataTas
+     , m_webPageProxyID(parameters.webPageProxyID)
++    , m_navigationLosesFrameSpecificStorageAccess(parameters.navigationLosesFrameSpecificStorageAccess)
+     , m_sourceOrigin(parameters.sourceOrigin)
+ {
+     auto request = parameters.request;
+@@ -79,11 +100,26 @@ NetworkDataTaskCurl::NetworkDataTaskCurl(NetworkSession& session, NetworkDataTas
          blockCookies();
      restrictRequestReferrerToOriginIfNeeded(request);
  
@@ -114078,7 +114083,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..741c887bc12919b8493a8da9484596c1
  }
  
  NetworkDataTaskCurl::~NetworkDataTaskCurl()
-@@ -101,6 +136,15 @@ void NetworkDataTaskCurl::resume()
+@@ -101,6 +137,15 @@ void NetworkDataTaskCurl::resume()
  
      if (m_curlRequest)
          m_curlRequest->resume();
@@ -114094,7 +114099,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..741c887bc12919b8493a8da9484596c1
  }
  
  void NetworkDataTaskCurl::cancel()
-@@ -113,8 +157,15 @@ void NetworkDataTaskCurl::cancel()
+@@ -113,8 +158,15 @@ void NetworkDataTaskCurl::cancel()
      if (m_curlRequest)
          m_curlRequest->cancel();
  
@@ -114111,7 +114116,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..741c887bc12919b8493a8da9484596c1
  }
  
  void NetworkDataTaskCurl::invalidateAndCancel()
-@@ -132,7 +183,18 @@ NetworkDataTask::State NetworkDataTaskCurl::state() const
+@@ -132,7 +184,18 @@ NetworkDataTask::State NetworkDataTaskCurl::state() const
  
  Ref<CurlRequest> NetworkDataTaskCurl::createCurlRequest(ResourceRequest&& request, RequestStatus status)
  {
@@ -114131,7 +114136,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..741c887bc12919b8493a8da9484596c1
          appendCookieHeader(request);
  
      // Creates a CurlRequest in suspended state.
-@@ -142,6 +204,10 @@ Ref<CurlRequest> NetworkDataTaskCurl::createCurlRequest(ResourceRequest&& reques
+@@ -142,6 +205,10 @@ Ref<CurlRequest> NetworkDataTaskCurl::createCurlRequest(ResourceRequest&& reques
  
      if (m_session->networkProcess().localhostAliasesForTesting().contains<StringViewHashTranslator>(curlRequest->resourceRequest().url().host()))
          curlRequest->enableLocalhostAlias();
@@ -114142,7 +114147,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..741c887bc12919b8493a8da9484596c1
  
      return curlRequest;
  }
-@@ -155,6 +221,16 @@ void NetworkDataTaskCurl::curlDidSendData(CurlRequest&, unsigned long long total
+@@ -155,6 +222,16 @@ void NetworkDataTaskCurl::curlDidSendData(CurlRequest&, unsigned long long total
      m_client->didSendData(totalBytesSent, totalBytesExpectedToSend);
  }
  
@@ -114159,7 +114164,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..741c887bc12919b8493a8da9484596c1
  void NetworkDataTaskCurl::curlDidReceiveResponse(CurlRequest& request, CurlResponse&& receivedResponse)
  {
      Ref protectedThis { *this };
-@@ -168,11 +244,20 @@ void NetworkDataTaskCurl::curlDidReceiveResponse(CurlRequest& request, CurlRespo
+@@ -168,11 +245,20 @@ void NetworkDataTaskCurl::curlDidReceiveResponse(CurlRequest& request, CurlRespo
  
      handleCookieHeaders(request.resourceRequest(), receivedResponse);
  
@@ -114181,7 +114186,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..741c887bc12919b8493a8da9484596c1
      if (m_response.isUnauthorized() && receivedResponse.availableHttpAuth) {
          tryHttpAuthentication(AuthenticationChallenge(receivedResponse, m_authFailureCount, m_response));
          m_authFailureCount++;
-@@ -184,6 +269,15 @@ void NetworkDataTaskCurl::curlDidReceiveResponse(CurlRequest& request, CurlRespo
+@@ -184,6 +270,15 @@ void NetworkDataTaskCurl::curlDidReceiveResponse(CurlRequest& request, CurlRespo
          return;
      }
  
@@ -114197,7 +114202,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..741c887bc12919b8493a8da9484596c1
      invokeDidReceiveResponse();
  }
  
-@@ -193,6 +287,15 @@ void NetworkDataTaskCurl::curlDidReceiveData(CurlRequest&, Ref<SharedBuffer>&& b
+@@ -193,6 +288,15 @@ void NetworkDataTaskCurl::curlDidReceiveData(CurlRequest&, Ref<SharedBuffer>&& b
      if (state() == State::Canceling || state() == State::Completed || (!m_client && !isDownload()))
          return;
  
@@ -114213,7 +114218,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..741c887bc12919b8493a8da9484596c1
      if (isDownload()) {
          auto* download = m_session->networkProcess().downloadManager().download(*m_pendingDownloadID);
          RELEASE_ASSERT(download);
-@@ -218,6 +321,15 @@ void NetworkDataTaskCurl::curlDidComplete(CurlRequest&, NetworkLoadMetrics&& net
+@@ -218,6 +322,15 @@ void NetworkDataTaskCurl::curlDidComplete(CurlRequest&, NetworkLoadMetrics&& net
      if (state() == State::Canceling || state() == State::Completed || (!m_client && !isDownload()))
          return;
  
@@ -114229,7 +114234,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..741c887bc12919b8493a8da9484596c1
      if (isDownload()) {
          auto* download = m_session->networkProcess().downloadManager().download(*m_pendingDownloadID);
          RELEASE_ASSERT(download);
-@@ -236,13 +348,32 @@ void NetworkDataTaskCurl::curlDidFailWithError(CurlRequest& request, ResourceErr
+@@ -236,13 +349,32 @@ void NetworkDataTaskCurl::curlDidFailWithError(CurlRequest& request, ResourceErr
      if (state() == State::Canceling || state() == State::Completed || (!m_client && !isDownload()))
          return;
  
@@ -114263,7 +114268,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..741c887bc12919b8493a8da9484596c1
          if (m_client)
              m_client->didCompleteWithError(resourceError);
          else {
-@@ -256,22 +387,6 @@ void NetworkDataTaskCurl::curlDidFailWithError(CurlRequest& request, ResourceErr
+@@ -256,22 +388,6 @@ void NetworkDataTaskCurl::curlDidFailWithError(CurlRequest& request, ResourceErr
      m_client->didCompleteWithError(resourceError);
  }
  
@@ -114286,7 +114291,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..741c887bc12919b8493a8da9484596c1
  bool NetworkDataTaskCurl::shouldRedirectAsGET(const ResourceRequest& request, bool crossOrigin)
  {
      if (request.httpMethod() == "GET"_s || request.httpMethod() == "HEAD"_s)
-@@ -300,6 +415,12 @@ void NetworkDataTaskCurl::invokeDidReceiveResponse()
+@@ -300,6 +416,12 @@ void NetworkDataTaskCurl::invokeDidReceiveResponse()
  
          switch (policyAction) {
          case PolicyAction::Use:
@@ -114299,7 +114304,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..741c887bc12919b8493a8da9484596c1
              if (m_curlRequest)
                  m_curlRequest->completeDidReceiveResponse();
              break;
-@@ -307,6 +428,30 @@ void NetworkDataTaskCurl::invokeDidReceiveResponse()
+@@ -307,6 +429,30 @@ void NetworkDataTaskCurl::invokeDidReceiveResponse()
              invalidateAndCancel();
              break;
          case PolicyAction::Download: {
@@ -114330,7 +114335,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..741c887bc12919b8493a8da9484596c1
              m_downloadDestinationFile = FileSystem::openFile(m_pendingDownloadLocation, FileSystem::FileOpenMode::Truncate, FileSystem::FileAccessPermission::All, { }, !m_allowOverwriteDownload);
              if (!m_downloadDestinationFile) {
                  if (m_client)
-@@ -319,6 +464,23 @@ void NetworkDataTaskCurl::invokeDidReceiveResponse()
+@@ -319,6 +465,23 @@ void NetworkDataTaskCurl::invokeDidReceiveResponse()
              Ref download = Download::create(downloadManager, *m_pendingDownloadID, *this, *m_session, suggestedFilename());
              downloadManager.dataTaskBecameDownloadTask(*m_pendingDownloadID, download.copyRef());
              download->didCreateDestination(m_pendingDownloadLocation);
@@ -114354,7 +114359,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..741c887bc12919b8493a8da9484596c1
              if (m_curlRequest)
                  m_curlRequest->completeDidReceiveResponse();
              break;
-@@ -330,6 +492,118 @@ void NetworkDataTaskCurl::invokeDidReceiveResponse()
+@@ -330,6 +493,118 @@ void NetworkDataTaskCurl::invokeDidReceiveResponse()
      });
  }
  
@@ -114473,7 +114478,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..741c887bc12919b8493a8da9484596c1
  void NetworkDataTaskCurl::willPerformHTTPRedirection()
  {
      static const int maxRedirects = 20;
-@@ -409,6 +683,7 @@ void NetworkDataTaskCurl::willPerformHTTPRedirection()
+@@ -409,6 +684,7 @@ void NetworkDataTaskCurl::willPerformHTTPRedirection()
              m_curlRequest->setUserPass(m_initialCredential.user(), m_initialCredential.password());
              m_curlRequest->setAuthenticationScheme(ProtectionSpace::AuthenticationScheme::HTTPBasic);
          }
@@ -114481,7 +114486,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..741c887bc12919b8493a8da9484596c1
  
          if (m_state != State::Suspended) {
              m_state = State::Suspended;
-@@ -531,6 +806,7 @@ void NetworkDataTaskCurl::restartWithCredential(const ProtectionSpace& protectio
+@@ -531,6 +807,7 @@ void NetworkDataTaskCurl::restartWithCredential(const ProtectionSpace& protectio
      m_curlRequest->setUserPass(credential.user(), credential.password());
      if (shouldDisableServerTrustEvaluation)
          m_curlRequest->disableServerTrustEvaluation();
@@ -114489,7 +114494,7 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..741c887bc12919b8493a8da9484596c1
  
      if (m_state != State::Suspended) {
          m_state = State::Suspended;
-@@ -538,11 +814,37 @@ void NetworkDataTaskCurl::restartWithCredential(const ProtectionSpace& protectio
+@@ -538,11 +815,37 @@ void NetworkDataTaskCurl::restartWithCredential(const ProtectionSpace& protectio
      }
  }
  
@@ -114521,14 +114526,14 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..741c887bc12919b8493a8da9484596c1
 +        // Blocked (shouldBlockCookies): the storage session sends only the
 +        // partitioned cookies, deciding with this frame's storage access.
 +        auto applyTrackingPrevention = m_blockingCookies ? ApplyTrackingPrevention::Yes : ApplyTrackingPrevention::No;
-+        auto cookieHeaderField = storageSession->cookieRequestHeaderFieldValue(request.firstPartyForCookies(), sameSiteInfoForCookies(request), request.url(), m_frameID, m_webPageProxyID, includeSecureCookies, applyTrackingPrevention, m_session->networkProcess().shouldRelaxThirdPartyCookieBlockingForPage(m_webPageProxyID), WebCore::IsKnownCrossSiteTracker::No).first;
++        auto cookieHeaderField = storageSession->cookieRequestHeaderFieldValue(request.firstPartyForCookies(), sameSiteInfoForCookies(request), request.url(), frameIDForStorageAccess(), m_webPageProxyID, includeSecureCookies, applyTrackingPrevention, m_session->networkProcess().shouldRelaxThirdPartyCookieBlockingForPage(m_webPageProxyID), WebCore::IsKnownCrossSiteTracker::No).first;
 +#else
 +        auto cookieHeaderField = storageSession->cookieRequestHeaderFieldValue(request.firstPartyForCookies(), sameSiteInfoForCookies(request), request.url(), std::nullopt, std::nullopt, includeSecureCookies, ApplyTrackingPrevention::Yes, WebCore::ShouldRelaxThirdPartyCookieBlocking::No, WebCore::IsKnownCrossSiteTracker::No).first;
 +#endif
          if (!cookieHeaderField.isEmpty())
              request.addHTTPHeaderField(HTTPHeaderName::Cookie, cookieHeaderField);
      }
-@@ -552,10 +854,33 @@ void NetworkDataTaskCurl::handleCookieHeaders(const WebCore::ResourceRequest& re
+@@ -552,10 +855,33 @@ void NetworkDataTaskCurl::handleCookieHeaders(const WebCore::ResourceRequest& re
  {
      static constexpr auto setCookieHeader = "set-cookie: "_s;
  
@@ -114562,8 +114567,32 @@ index 8cb1be45a09b8bc4566940e0fabca10cb03bbd7f..741c887bc12919b8493a8da9484596c1
                  storageSession->setCookiesFromHTTPResponse(request.firstPartyForCookies(), response.url, setCookieString);
              }
          }
+@@ -572,12 +898,22 @@ void NetworkDataTaskCurl::unblockCookies()
+     m_blockingCookies = false;
+ }
+ 
++// A frame navigation that drops the frame's storage access (another site
++// navigates the frame, or the frame goes to another origin) must already
++// load without it: the grant is only removed when the new document commits.
++std::optional<WebCore::FrameIdentifier> NetworkDataTaskCurl::frameIDForStorageAccess() const
++{
++    if (m_navigationLosesFrameSpecificStorageAccess)
++        return std::nullopt;
++    return m_frameID;
++}
++
+ bool NetworkDataTaskCurl::shouldBlockCookies(const WebCore::ResourceRequest& request)
+ {
+     bool shouldBlockCookies = m_storedCredentialsPolicy == WebCore::StoredCredentialsPolicy::EphemeralStateless;
+ 
+     if (!shouldBlockCookies && m_session->networkStorageSession())
+-        shouldBlockCookies = protect(m_session->networkStorageSession())->shouldBlockCookies(request, m_frameID, m_webPageProxyID, m_session->networkProcess().shouldRelaxThirdPartyCookieBlockingForPage(m_webPageProxyID), WebCore::IsKnownCrossSiteTracker::No);
++        shouldBlockCookies = protect(m_session->networkStorageSession())->shouldBlockCookies(request, frameIDForStorageAccess(), m_webPageProxyID, m_session->networkProcess().shouldRelaxThirdPartyCookieBlockingForPage(m_webPageProxyID), WebCore::IsKnownCrossSiteTracker::No);
+ 
+     if (shouldBlockCookies)
+         return true;
 diff --git a/Source/WebKit/NetworkProcess/curl/NetworkDataTaskCurl.h b/Source/WebKit/NetworkProcess/curl/NetworkDataTaskCurl.h
-index 34a4d1cd69624e0f86025f8ee86667dffd0646dc..4640159e6b03ceced0927c482811a98f59398eb7 100644
+index 34a4d1cd69624e0f86025f8ee86667dffd0646dc..7329b41f2b5e9028adb5a5db0d3ac4f93658562d 100644
 --- a/Source/WebKit/NetworkProcess/curl/NetworkDataTaskCurl.h
 +++ b/Source/WebKit/NetworkProcess/curl/NetworkDataTaskCurl.h
 @@ -32,6 +32,10 @@
@@ -114594,7 +114623,23 @@ index 34a4d1cd69624e0f86025f8ee86667dffd0646dc..4640159e6b03ceced0927c482811a98f
      bool shouldRedirectAsGET(const WebCore::ResourceRequest&, bool crossOrigin);
      void willPerformHTTPRedirection();
  
-@@ -115,6 +121,22 @@ private:
+@@ -91,6 +97,7 @@ private:
+ 
+     bool isThirdPartyRequest(const WebCore::ResourceRequest&);
+     bool shouldBlockCookies(const WebCore::ResourceRequest&);
++    std::optional<WebCore::FrameIdentifier> frameIDForStorageAccess() const;
+     void blockCookies();
+     void unblockCookies();
+ 
+@@ -102,6 +109,7 @@ private:
+ 
+     Markable<WebCore::FrameIdentifier> m_frameID;
+     Markable<WebPageProxyIdentifier> m_webPageProxyID;
++    bool m_navigationLosesFrameSpecificStorageAccess { false };
+     const RefPtr<WebCore::SecurityOrigin> m_sourceOrigin;
+ 
+     State m_state { State::Suspended };
+@@ -115,6 +123,22 @@ private:
      FileSystem::FileHandle m_downloadDestinationFile;
  
      bool m_blockingCookies { false };
@@ -114682,6 +114727,22 @@ index 7c9075474552a6beaffbeffe6838dd4e5b24b0d0..74fe55e1e669a9abf183be97b68e71ef
  }
  
  } // namespace WebKit
+diff --git a/Source/WebKit/NetworkProcess/curl/NetworkSessionCurl.cpp b/Source/WebKit/NetworkProcess/curl/NetworkSessionCurl.cpp
+index 29da4ef89afd80a5fbb07004dffcb657635a19c8..11e2525303d7261c099b876225f934c6bac80ee0 100644
+--- a/Source/WebKit/NetworkProcess/curl/NetworkSessionCurl.cpp
++++ b/Source/WebKit/NetworkProcess/curl/NetworkSessionCurl.cpp
+@@ -63,9 +63,9 @@ void NetworkSessionCurl::clearAlternativeServices(WallTime)
+         storageSession->clearAlternativeServices();
+ }
+ 
+-RefPtr<WebSocketTask> NetworkSessionCurl::createWebSocketTask(WebPageProxyIdentifier webPageProxyID, std::optional<FrameIdentifier>, std::optional<PageIdentifier>, NetworkSocketChannel& channel, const WebCore::ResourceRequest& request, const String& protocol, const WebCore::ClientOrigin& clientOrigin, bool, bool, OptionSet<WebCore::AdvancedPrivacyProtections>, StoredCredentialsPolicy, IsInitiatedByDedicatedWorker)
++RefPtr<WebSocketTask> NetworkSessionCurl::createWebSocketTask(WebPageProxyIdentifier webPageProxyID, std::optional<FrameIdentifier> frameID, std::optional<PageIdentifier>, NetworkSocketChannel& channel, const WebCore::ResourceRequest& request, const String& protocol, const WebCore::ClientOrigin& clientOrigin, bool, bool, OptionSet<WebCore::AdvancedPrivacyProtections>, StoredCredentialsPolicy, IsInitiatedByDedicatedWorker isInitiatedByDedicatedWorker)
+ {
+-    return WebSocketTask::create(channel, webPageProxyID, request, protocol, clientOrigin);
++    return WebSocketTask::create(channel, webPageProxyID, frameID, request, protocol, clientOrigin, isInitiatedByDedicatedWorker);
+ }
+ 
+ void NetworkSessionCurl::didReceiveChallenge(WebSocketTask& webSocketTask, WebCore::AuthenticationChallenge&& challenge, CompletionHandler<void(WebKit::AuthenticationChallengeDisposition, const WebCore::Credential&)>&& challengeCompletionHandler)
 diff --git a/Source/WebKit/NetworkProcess/curl/NetworkStorageSessionCurl.cpp b/Source/WebKit/NetworkProcess/curl/NetworkStorageSessionCurl.cpp
 index 20aff066ab01aa0fa12c7bf47741b0109d927eea..943960aca630435dc8fedce75166baa4a8b3f09e 100644
 --- a/Source/WebKit/NetworkProcess/curl/NetworkStorageSessionCurl.cpp
@@ -115122,6 +115183,101 @@ index 20aff066ab01aa0fa12c7bf47741b0109d927eea..943960aca630435dc8fedce75166baa4
  }
  
  void NetworkStorageSession::setProxySettings(const CurlProxySettings& proxySettings)
+diff --git a/Source/WebKit/NetworkProcess/curl/WebSocketTaskCurl.cpp b/Source/WebKit/NetworkProcess/curl/WebSocketTaskCurl.cpp
+index 20a5dbbbc5e47f51367e7f4dda87897b5d2d775a..ff9c0c0d412dbf97f37a34f9c46ccbb55f019282 100644
+--- a/Source/WebKit/NetworkProcess/curl/WebSocketTaskCurl.cpp
++++ b/Source/WebKit/NetworkProcess/curl/WebSocketTaskCurl.cpp
+@@ -32,6 +32,7 @@
+ #include "NetworkSocketChannel.h"
+ #include <WebCore/AuthenticationChallenge.h>
+ #include <WebCore/ClientOrigin.h>
++#include <WebCore/CookieUtil.h>
+ #include <WebCore/CurlStreamScheduler.h>
+ #include <WebCore/WebSocketHandshake.h>
+ #include <wtf/TZoneMallocInlines.h>
+@@ -40,14 +41,16 @@
+ namespace WebKit {
+ WTF_MAKE_TZONE_ALLOCATED_IMPL(WebSocketTask);
+ 
+-Ref<WebSocketTask> WebSocketTask::create(NetworkSocketChannel& channel, WebPageProxyIdentifier webProxyPageID, const WebCore::ResourceRequest& request, const String& protocol, const WebCore::ClientOrigin& clientOrigin)
++Ref<WebSocketTask> WebSocketTask::create(NetworkSocketChannel& channel, WebPageProxyIdentifier webProxyPageID, std::optional<WebCore::FrameIdentifier> frameID, const WebCore::ResourceRequest& request, const String& protocol, const WebCore::ClientOrigin& clientOrigin, WebCore::IsInitiatedByDedicatedWorker isInitiatedByDedicatedWorker)
+ {
+-    return adoptRef(*new WebSocketTask(channel, webProxyPageID, request, protocol, clientOrigin));
++    return adoptRef(*new WebSocketTask(channel, webProxyPageID, frameID, request, protocol, clientOrigin, isInitiatedByDedicatedWorker));
+ }
+ 
+-WebSocketTask::WebSocketTask(NetworkSocketChannel& channel, WebPageProxyIdentifier webProxyPageID, const WebCore::ResourceRequest& request, const String& protocol, const WebCore::ClientOrigin& clientOrigin)
++WebSocketTask::WebSocketTask(NetworkSocketChannel& channel, WebPageProxyIdentifier webProxyPageID, std::optional<WebCore::FrameIdentifier> frameID, const WebCore::ResourceRequest& request, const String& protocol, const WebCore::ClientOrigin& clientOrigin, WebCore::IsInitiatedByDedicatedWorker isInitiatedByDedicatedWorker)
+     : m_channel(channel)
+     , m_webProxyPageID(webProxyPageID)
++    , m_frameID(frameID)
++    , m_isInitiatedByDedicatedWorker(isInitiatedByDedicatedWorker == WebCore::IsInitiatedByDedicatedWorker::Yes)
+     , m_request(request.isolatedCopy())
+     , m_protocol(protocol)
+     , m_scheduler(WebCore::CurlContext::singleton().streamScheduler())
+@@ -131,7 +134,15 @@ void WebSocketTask::didOpen(WebCore::CurlStreamID)
+     if (m_request.allowCookies()) {
+         if (CheckedPtr storageSession = networkSession() ? networkSession()->networkStorageSession() : nullptr) {
+             auto includeSecureCookies = m_request.url().protocolIs("wss"_s) ? WebCore::IncludeSecureCookies::Yes : WebCore::IncludeSecureCookies::No;
+-            cookieHeaderField = storageSession->cookieRequestHeaderFieldValue(m_request.firstPartyForCookies(), WebCore::SameSiteInfo::create(m_request), m_request.url(), std::nullopt, std::nullopt, includeSecureCookies, WebCore::ApplyTrackingPrevention::Yes, WebCore::ShouldRelaxThirdPartyCookieBlocking::No, WebCore::IsKnownCrossSiteTracker::No).first;
++// Tracking prevention: a blocked cross-site socket sends and stores
++            // only its partitioned cookies. The storage access of the frame
++            // that opens the socket lifts the block, as it does for the
++            // frame's other requests; a dedicated worker does not inherit it.
++            auto shouldRelaxThirdPartyCookieBlocking = networkSession()->networkProcess().shouldRelaxThirdPartyCookieBlockingForPage(m_webProxyPageID);
++            auto decision = storageSession->thirdPartyCookieBlockingDecisionForRequest(m_request, m_frameID, m_webProxyPageID, shouldRelaxThirdPartyCookieBlocking, WebCore::IsKnownCrossSiteTracker::No, m_isInitiatedByDedicatedWorker);
++            m_blockingCookies = NetworkStorageSession::shouldBlockCookies(decision);
++            auto applyTrackingPrevention = m_blockingCookies ? WebCore::ApplyTrackingPrevention::Yes : WebCore::ApplyTrackingPrevention::No;
++            cookieHeaderField = storageSession->cookieRequestHeaderFieldValue(m_request.firstPartyForCookies(), WebCore::SameSiteInfo::create(m_request), m_request.url(), std::nullopt, std::nullopt, includeSecureCookies, applyTrackingPrevention, WebCore::ShouldRelaxThirdPartyCookieBlocking::No, WebCore::IsKnownCrossSiteTracker::No).first;
+         }
+     }
+ 
+@@ -326,6 +337,13 @@ std::expected<bool, String> WebSocketTask::validateOpeningHandshake()
+     }
+ 
+     auto serverSetCookie = m_handshake->serverSetCookie();
++#if PLATFORM(HAIKU)
++    if (m_blockingCookies && !serverSetCookie.isEmpty()) {
++        bool partitioned = false;
++        if (!WebCore::CookieUtil::parseCookieHeader(serverSetCookie, &partitioned) || !partitioned)
++            serverSetCookie = { };
++    }
++#endif
+     if (!serverSetCookie.isEmpty()) {
+         if (CheckedPtr storageSession = networkSession() ? networkSession()->networkStorageSession() : nullptr)
+             storageSession->setCookiesFromHTTPResponse(m_request.firstPartyForCookies(), m_request.url(), serverSetCookie);
+diff --git a/Source/WebKit/NetworkProcess/curl/WebSocketTaskCurl.h b/Source/WebKit/NetworkProcess/curl/WebSocketTaskCurl.h
+index ed515ef168044269fe14d343e628f57246ebec6e..310f480149d6401eaebd88aac0173976bc7adcd0 100644
+--- a/Source/WebKit/NetworkProcess/curl/WebSocketTaskCurl.h
++++ b/Source/WebKit/NetworkProcess/curl/WebSocketTaskCurl.h
+@@ -55,7 +55,7 @@ struct SessionSet;
+ class WebSocketTask : public ThreadSafeRefCountedAndCanMakeThreadSafeWeakPtr<WebSocketTask>, public WebCore::CurlStream::Client {
+     WTF_MAKE_TZONE_ALLOCATED(WebSocketTask);
+ public:
+-    static Ref<WebSocketTask> create(NetworkSocketChannel&, WebPageProxyIdentifier, const WebCore::ResourceRequest&, const String& protocol, const WebCore::ClientOrigin&);
++    static Ref<WebSocketTask> create(NetworkSocketChannel&, WebPageProxyIdentifier, std::optional<WebCore::FrameIdentifier>, const WebCore::ResourceRequest&, const String& protocol, const WebCore::ClientOrigin&, WebCore::IsInitiatedByDedicatedWorker);
+     virtual ~WebSocketTask();
+ 
+     void sendString(std::span<const uint8_t>, CompletionHandler<void()>&&);
+@@ -73,7 +73,7 @@ public:
+     const WebCore::SecurityOriginData& topOrigin() const LIFETIME_BOUND { return m_topOrigin; }
+ 
+ private:
+-    WebSocketTask(NetworkSocketChannel&, WebPageProxyIdentifier, const WebCore::ResourceRequest&, const String& protocol, const WebCore::ClientOrigin&);
++    WebSocketTask(NetworkSocketChannel&, WebPageProxyIdentifier, std::optional<WebCore::FrameIdentifier>, const WebCore::ResourceRequest&, const String& protocol, const WebCore::ClientOrigin&, WebCore::IsInitiatedByDedicatedWorker);
+ 
+     enum class State : uint8_t {
+         Connecting,
+@@ -108,6 +108,9 @@ private:
+ 
+     WeakPtr<NetworkSocketChannel> m_channel;
+     WebPageProxyIdentifier m_webProxyPageID;
++    Markable<WebCore::FrameIdentifier> m_frameID;
++    bool m_isInitiatedByDedicatedWorker { false };
++    bool m_blockingCookies { false };
+     WebCore::ResourceRequest m_request;
+     String m_protocol;
+     WebCore::SecurityOriginData m_topOrigin;
 diff --git a/Source/WebKit/NetworkProcess/haiku/NetworkProcessHaiku.cpp b/Source/WebKit/NetworkProcess/haiku/NetworkProcessHaiku.cpp
 new file mode 100644
 index 0000000000000000000000000000000000000000..4c21c1bdf92f8107cf0f7452833e81b170b26c85
