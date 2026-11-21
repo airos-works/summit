@@ -72049,10 +72049,19 @@ index 6cc3e9febb8c00ec5829ca476fc21b1b693c81a3..fc5107b6ced726a345ccd053cbc48fca
  } // namespace WebCore
  
 diff --git a/Source/WebCore/platform/graphics/skia/ComplexTextControllerSkia.cpp b/Source/WebCore/platform/graphics/skia/ComplexTextControllerSkia.cpp
-index 34d8abe7e20ce6253a0b968d52c127c65871f37d..83e014793498e84a2b4dc891371e77eaeeee94a3 100644
+index 34d8abe7e20ce6253a0b968d52c127c65871f37d..ab12b6be320ef97ea835875a8d1f99483d7f5bf7 100644
 --- a/Source/WebCore/platform/graphics/skia/ComplexTextControllerSkia.cpp
 +++ b/Source/WebCore/platform/graphics/skia/ComplexTextControllerSkia.cpp
-@@ -35,6 +35,8 @@
+@@ -29,12 +29,17 @@
+ #include "FontFeatureValues.h"
+ #include "FontTaggedSettings.h"
+ #include "HbUniquePtr.h"
++#if PLATFORM(HAIKU)
++#include "SkiaHarfBuzzFont.h"
++#endif
+ #include "SurrogatePairAwareTextIterator.h"
+ #include "TextFlags.h"
+ #include "TextRun.h"
  #include <hb-icu.h>
  #include <hb-ot.h>
  #include <hb.h>
@@ -72061,7 +72070,20 @@ index 34d8abe7e20ce6253a0b968d52c127c65871f37d..83e014793498e84a2b4dc891371e77ea
  
  namespace WebCore {
  
-@@ -252,7 +254,21 @@ void ComplexTextController::collectComplexTextRunsForCharacters(std::span<const
+@@ -82,6 +87,12 @@ ComplexTextController::ComplexTextRun::ComplexTextRun(hb_buffer_t* buffer, const
+         float offsetY = harfBuzzPositionToFloat(glyphPositions[i].y_offset);
+         float advanceX = harfBuzzPositionToFloat(glyphPositions[i].x_advance);
+         float advanceY = harfBuzzPositionToFloat(glyphPositions[i].y_advance);
++#if PLATFORM(HAIKU)
++        // Kerning and shaping are in these advances; keep them on the
++        // LayoutUnit grid like the simple path's widths (#260).
++        advanceX = SkiaHarfBuzzFont::layoutUnitAdvanceHaiku(advanceX);
++        advanceY = SkiaHarfBuzzFont::layoutUnitAdvanceHaiku(advanceY);
++#endif
+ 
+         m_glyphs[i] = glyph;
+         m_baseAdvances[i] = { advanceX, advanceY };
+@@ -252,7 +263,21 @@ void ComplexTextController::collectComplexTextRunsForCharacters(std::span<const
      // The computed "locale" equals the "lang" attribute. The latter must be a valid BCP 47 language tag,
      // according to <https://html.spec.whatwg.org/multipage/dom.html#attr-lang>.
      // This is exactly what hb_language_from_string() expects, so we can pass directly.
@@ -72382,21 +72404,24 @@ index 74cfeb60ac3daa537785693be3917358aa26a2b5..1f2cec305c01df570bc8b2646cd0e7bc
  
  void FontCache::platformPurgeInactiveFontData()
 diff --git a/Source/WebCore/platform/graphics/skia/FontSkia.cpp b/Source/WebCore/platform/graphics/skia/FontSkia.cpp
-index a322e5f3f28177dbb62613a726a819d673e0927f..df2fd5174a38b8f30e40a6f6ad9a9cdb18179f44 100644
+index a322e5f3f28177dbb62613a726a819d673e0927f..81a0797f3563a7523abbcd304bc8725dcec61e60 100644
 --- a/Source/WebCore/platform/graphics/skia/FontSkia.cpp
 +++ b/Source/WebCore/platform/graphics/skia/FontSkia.cpp
-@@ -92,6 +92,10 @@ float Font::platformWidthForGlyph(Glyph glyph) const
+@@ -92,6 +92,13 @@ float Font::platformWidthForGlyph(Glyph glyph) const
  
      if (!font.isSubpixel())
          width = SkScalarRoundToInt(width);
 +#if PLATFORM(HAIKU)
-+    else if (auto* harfBuzzFont = m_platformData.skiaHarfBuzzFont())
-+        width = harfBuzzFont->exactWidthHaiku(font, glyph, width);
++    else {
++        if (auto* harfBuzzFont = m_platformData.skiaHarfBuzzFont())
++            width = harfBuzzFont->exactWidthHaiku(font, glyph, width);
++        width = SkiaHarfBuzzFont::layoutUnitAdvanceHaiku(width);
++    }
 +#endif
  
      return SkScalarToFloat(width);
  }
-@@ -232,31 +236,48 @@ sk_sp<SkTextBlob> FontBase::buildTextBlob(std::span<const GlyphBufferGlyph> glyp
+@@ -232,31 +239,48 @@ sk_sp<SkTextBlob> FontBase::buildTextBlob(std::span<const GlyphBufferGlyph> glyp
      auto edging = allowsAntialiasing() ? edgingForFontSmoothingMode(font, smoothingMode) : SkFont::Edging::kAlias;
      bool isVertical = m_platformData.orientation() == FontOrientation::Vertical;
  
@@ -73418,18 +73443,24 @@ index 776466ea87d3d721d32ac4e52db702bb2b544e46..6684517a6c57ba91fbb37fb77648b4d7
      m_skiaGLContexts.add(*s_skiaGLContext);
  }
 diff --git a/Source/WebCore/platform/graphics/skia/SkiaHarfBuzzFont.cpp b/Source/WebCore/platform/graphics/skia/SkiaHarfBuzzFont.cpp
-index daeed3e5dc0bf77c433fb0df23a09ecf4a677d10..f71ce7709d3207fe0d621d436e93f84c6ef00ae5 100644
+index daeed3e5dc0bf77c433fb0df23a09ecf4a677d10..45e7b443efd7b98d7cc3933aa561310a726f41d1 100644
 --- a/Source/WebCore/platform/graphics/skia/SkiaHarfBuzzFont.cpp
 +++ b/Source/WebCore/platform/graphics/skia/SkiaHarfBuzzFont.cpp
-@@ -33,6 +33,7 @@
+@@ -30,9 +30,13 @@
+ #include "FontCache.h"
+ #include "FontCascadeInlines.h"
+ #include "FontPlatformData.h"
++#include "LayoutUnit.h"
  #include "NotImplemented.h"
  #include "SkiaHarfBuzzFontCache.h"
  #include <wtf/unicode/CharacterNames.h>
 +#include <cmath>
++#include <cstdlib>
++#include <cstring>
  
  WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
  #include <skia/core/SkStream.h>
-@@ -128,6 +129,12 @@ SkiaHarfBuzzFont::SkiaHarfBuzzFont(SkTypeface& typeface)
+@@ -128,6 +132,12 @@ SkiaHarfBuzzFont::SkiaHarfBuzzFont(SkTypeface& typeface)
      : m_uniqueID(typeface.uniqueID())
      , m_isColorBitmapFont(FontPlatformData::skiaTypefaceHasAnySupportedColorTable(typeface))
  {
@@ -73442,7 +73473,7 @@ index daeed3e5dc0bf77c433fb0df23a09ecf4a677d10..f71ce7709d3207fe0d621d436e93f84c
      auto hbFace = createHarfBuzzFace(typeface);
      HbUniquePtr<hb_font_t> hbFont(hb_font_create(hbFace.get()));
  
-@@ -194,11 +201,55 @@ std::optional<hb_codepoint_t> SkiaHarfBuzzFont::glyph(hb_codepoint_t unicode, st
+@@ -194,11 +204,76 @@ std::optional<hb_codepoint_t> SkiaHarfBuzzFont::glyph(hb_codepoint_t unicode, st
      return std::nullopt;
  }
  
@@ -73472,6 +73503,27 @@ index daeed3e5dc0bf77c433fb0df23a09ecf4a677d10..f71ce7709d3207fe0d621d436e93f84c
 +    return static_cast<SkScalar>(exact);
 +}
 +
++// Boxes sit on the LayoutUnit grid: a flex item, grid item or inline-block
++// holding text is as wide as its text rounded up to 1/64 px, so the text after
++// it starts up to a LayoutUnit later than the same text does in one run. With
++// subpixel positioning, Skia picks each glyph's image by its quarter-pixel
++// position, and that small shift moves some glyphs into the next quarter:
++// summary-display-flex paints 120 pixels differently from its one-run
++// reference (#260). Advances that are whole LayoutUnits make every box edge
++// exact, so split and unsplit text put each glyph at the same position. The
++// rounding is at most 1/128 px per glyph. SUMMIT_LAYOUT_UNIT_ADVANCES=0 keeps
++// the exact advances.
++float SkiaHarfBuzzFont::layoutUnitAdvanceHaiku(float advance)
++{
++    static const bool enabled = [] {
++        const char* value = std::getenv("SUMMIT_LAYOUT_UNIT_ADVANCES");
++        return !value || std::strcmp(value, "0");
++    }();
++    if (!enabled)
++        return advance;
++    return std::round(advance * kFixedPointDenominator) / kFixedPointDenominator;
++}
++
 +std::optional<SkScalar> SkiaHarfBuzzFont::verticalOriginYHaiku(const SkFont& font, hb_codepoint_t glyph) const
 +{
 +    if (!m_hasVerticalGlyphOrigins)
@@ -73498,7 +73550,7 @@ index daeed3e5dc0bf77c433fb0df23a09ecf4a677d10..f71ce7709d3207fe0d621d436e93f84c
      return skScalarToHarfBuzzPosition(width);
  }
  
-@@ -218,6 +269,12 @@ void SkiaHarfBuzzFont::glyphWidths(unsigned count, const hb_codepoint_t* glyphs,
+@@ -218,6 +293,12 @@ void SkiaHarfBuzzFont::glyphWidths(unsigned count, const hb_codepoint_t* glyphs,
          for (unsigned i = 0; i < count; ++i)
              widths[i] = SkScalarRoundToInt(widths[i]);
      }
@@ -73512,10 +73564,10 @@ index daeed3e5dc0bf77c433fb0df23a09ecf4a677d10..f71ce7709d3207fe0d621d436e93f84c
      for (unsigned i = 0; i < count; ++i) {
          *advances = skScalarToHarfBuzzPosition(widths[i]);
 diff --git a/Source/WebCore/platform/graphics/skia/SkiaHarfBuzzFont.h b/Source/WebCore/platform/graphics/skia/SkiaHarfBuzzFont.h
-index c2d6ac748ed19ad7daf8887b9678a32eef10e3f5..01498b16679a9f76eaf6d82a4c6900537874abb2 100644
+index c2d6ac748ed19ad7daf8887b9678a32eef10e3f5..127d9479793323589be0d8738e65492b65c597a3 100644
 --- a/Source/WebCore/platform/graphics/skia/SkiaHarfBuzzFont.h
 +++ b/Source/WebCore/platform/graphics/skia/SkiaHarfBuzzFont.h
-@@ -49,6 +49,12 @@ public:
+@@ -49,6 +49,15 @@ public:
      hb_position_t glyphWidth(hb_codepoint_t);
      void glyphWidths(unsigned count, const hb_codepoint_t* glyphs, unsigned glyphStride, hb_position_t* advances, unsigned advanceStride);
      void glyphExtents(hb_codepoint_t, hb_glyph_extents_t*);
@@ -73524,11 +73576,14 @@ index c2d6ac748ed19ad7daf8887b9678a32eef10e3f5..01498b16679a9f76eaf6d82a4c690053
 +    // rounding.
 +    SkScalar exactWidthHaiku(const SkFont&, hb_codepoint_t, SkScalar width) const;
 +    std::optional<SkScalar> verticalOriginYHaiku(const SkFont&, hb_codepoint_t) const;
++    // A glyph advance on the LayoutUnit grid (1/64 px), so that text split
++    // across boxes lands where the same text in one run does (#260).
++    static float layoutUnitAdvanceHaiku(float advance);
 +#endif
  
      bool isColorBitmapFont() const { return m_isColorBitmapFont; }
  
-@@ -63,6 +69,9 @@ private:
+@@ -63,6 +72,9 @@ private:
      HbUniquePtr<hb_font_t> m_font;
      SkFont m_scaledFont;
      bool m_isColorBitmapFont { false };
