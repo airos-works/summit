@@ -107657,7 +107657,7 @@ index 1e30286a668e800d272ca12deeadb625631465ec..0d6a6e3058c34cecaeb18e90134d79da
      bool hitTest(const HitTestRequest&, const HitTestLocation&, HitTestResult&);
  
 diff --git a/Source/WebCore/rendering/RenderLayerBacking.cpp b/Source/WebCore/rendering/RenderLayerBacking.cpp
-index 95122a10cacc10b498c40d3447599bd2cd4d2795..449893f70fc0ba7af4e85a6655a25e5b0efb4a28 100644
+index 95122a10cacc10b498c40d3447599bd2cd4d2795..d27e6721138b005020bdf4ed4d3b6fdc9dd0b24f 100644
 --- a/Source/WebCore/rendering/RenderLayerBacking.cpp
 +++ b/Source/WebCore/rendering/RenderLayerBacking.cpp
 @@ -137,6 +137,15 @@
@@ -107676,11 +107676,24 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..449893f70fc0ba7af4e85a6655a25e5b
  #if USE(SYSTEM_PREVIEW) && ENABLE(MODEL_PROCESS) && ENABLE(INTERACTION_REGIONS_IN_EVENT_REGION)
  #include "ARKitBadgeSystemImage.h"
  #endif
-@@ -151,6 +160,15 @@
+@@ -151,6 +160,28 @@
  
  namespace WebCore {
  
 +#if PLATFORM(HAIKU)
++// A scroller's clip (its scroll container layer) is placed on the device pixels
++// its padding box is painted on. SUMMIT_SNAP_SCROLL_CONTAINER=0 puts it at the
++// layer-relative position again, which is a pixel off for a box at a fractional
++// position (summit#264).
++static bool snapScrollContainerLayerHaiku()
++{
++    static const bool snap = [] {
++        const char* value = getenv("SUMMIT_SNAP_SCROLL_CONTAINER");
++        return !value || strcmp(value, "0");
++    }();
++    return snap;
++}
++
 +// Asked on every repaint: getenv() searches the whole environment.
 +static bool fullRepaintTraceRenderLayerBackingHaiku()
 +{
@@ -107692,7 +107705,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..449893f70fc0ba7af4e85a6655a25e5b
  WTF_MAKE_TZONE_ALLOCATED_IMPL(RenderLayerBacking);
  
  using namespace HTMLNames;
-@@ -910,13 +928,93 @@ void RenderLayerBacking::updateChildrenTransformAndAnchorPoint(const LayoutRect&
+@@ -910,13 +941,93 @@ void RenderLayerBacking::updateChildrenTransformAndAnchorPoint(const LayoutRect&
      removeChildrenTransformFromLayers(layerForPerspective);
  }
  
@@ -107786,7 +107799,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..449893f70fc0ba7af4e85a6655a25e5b
      m_canCompositeBackdropFilters = !style.backdropFilter().hasReferenceFilter() && m_graphicsLayer->setBackdropFilters(Style::toPlatform(style.backdropFilter(), style));
  }
  
-@@ -1109,7 +1207,19 @@ static bool NODELETE hasNonZeroTransformOrigin(const RenderLayerModelObject& ren
+@@ -1109,7 +1220,19 @@ static bool NODELETE hasNonZeroTransformOrigin(const RenderLayerModelObject& ren
  
  bool RenderLayerBacking::updateCompositedBounds()
  {
@@ -107807,7 +107820,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..449893f70fc0ba7af4e85a6655a25e5b
      // Clip to the size of the document or enclosing overflow-scroll layer.
      // If this or an ancestor is transformed, we can't currently compute the correct rect to intersect with.
      // We'd need RenderObject::convertContainerToLocalQuad(), which doesn't yet exist.
-@@ -1129,6 +1239,12 @@ bool RenderLayerBacking::updateCompositedBounds()
+@@ -1129,6 +1252,12 @@ bool RenderLayerBacking::updateCompositedBounds()
          LayoutPoint delta = m_owningLayer.convertToLayerCoords(rootLayer, LayoutPoint(), RenderLayer::AdjustForColumns);
          clippingBounds.move(-delta.x(), -delta.y());
  
@@ -107820,7 +107833,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..449893f70fc0ba7af4e85a6655a25e5b
          layerBounds.intersect(clippingBounds);
      }
  
-@@ -1218,6 +1334,10 @@ void RenderLayerBacking::updateAfterLayout(bool needsClippingUpdate, bool needsF
+@@ -1218,6 +1347,10 @@ void RenderLayerBacking::updateAfterLayout(bool needsClippingUpdate, bool needsF
          m_owningLayer.setNeedsCompositingGeometryUpdate();
      }
      
@@ -107831,7 +107844,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..449893f70fc0ba7af4e85a6655a25e5b
      if (needsFullRepaint && canIssueSetNeedsDisplay())
          setContentsNeedDisplay();
  }
-@@ -1581,6 +1701,44 @@ private:
+@@ -1581,6 +1714,44 @@ private:
  LayoutRect RenderLayerBacking::computePrimaryGraphicsLayerRect(const RenderLayer* compositedAncestor, const LayoutRect& parentGraphicsLayerRect) const
  {
      ComputedOffsets compositedBoundsOffset(m_owningLayer, compositedAncestor, compositedBounds(), parentGraphicsLayerRect, { });
@@ -107876,7 +107889,23 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..449893f70fc0ba7af4e85a6655a25e5b
      return LayoutRect(encloseRectToDevicePixels(LayoutRect(toLayoutPoint(compositedBoundsOffset.fromParentGraphicsLayer()), compositedBounds().size()),
          pixelSnappingScaleFactor()));
  }
-@@ -1678,6 +1836,22 @@ void RenderLayerBacking::updateGeometry(const RenderLayer* compositedAncestor)
+@@ -1618,6 +1789,15 @@ LayoutRect RenderLayerBacking::computeParentGraphicsLayerRect(const RenderLayer*
+         LayoutRect ancestorCompositedBounds = ancestorBacking->compositedBounds();
+         LayoutRect scrollContainerBox = scrollContainerLayerBox(*ancestorRenderBox);
+         ScrollOffset scrollOffset = scrollableArea->scrollOffset();
++#if PLATFORM(HAIKU)
++        // The ancestor's scroll container layer is on the device pixel grid
++        // (see updateGeometry()): its children are placed from where it really is.
++        if (snapScrollContainerLayerHaiku()) {
++            LayoutSize scrollContainerBoxOffset = computeOffsetFromAncestorGraphicsLayer(compositedAncestor, scrollContainerBox.location(), pixelSnappingScaleFactor());
++            LayoutRect snappedScrollContainerRect = snappedGraphicsLayer(scrollContainerBoxOffset, scrollContainerBox.size(), *ancestorRenderBox).m_snappedRect;
++            parentGraphicsLayerRect = LayoutRect(snappedScrollContainerRect.location() - toLayoutSize(scrollOffset), snappedScrollContainerRect.size());
++        } else
++#endif
+         parentGraphicsLayerRect = LayoutRect((scrollContainerBox.location() - toLayoutSize(ancestorCompositedBounds.location()) - toLayoutSize(scrollOffset)), scrollContainerBox.size());
+     }
+ 
+@@ -1678,6 +1858,22 @@ void RenderLayerBacking::updateGeometry(const RenderLayer* compositedAncestor)
      updateBackdropRoot();
      updateBlendMode(style);
      updateContentsScalingFilters(style);
@@ -107899,7 +107928,62 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..449893f70fc0ba7af4e85a6655a25e5b
  
  #if ENABLE(VIDEO)
      updateVideoGravity(style);
-@@ -1935,8 +2109,18 @@ void RenderLayerBacking::updateGeometry(const RenderLayer* compositedAncestor)
+@@ -1823,9 +2019,36 @@ void RenderLayerBacking::updateGeometry(const RenderLayer* compositedAncestor)
+         LayoutRect scrollContainerBox = scrollContainerLayerBox(downcast<RenderBox>(renderer()));
+         LayoutRect parentLayerBounds = clippingLayer() ? scrollContainerBox : compositedBounds();
+ 
++        LayoutSize scrollContainerOffsetFromRenderer = toLayoutSize(scrollContainerBox.location());
++#if PLATFORM(HAIKU)
++        // The primary layer starts on the device pixel at or before the box, and
++        // the box is painted into it at the remaining fraction, where painting
++        // snaps it to whole pixels. The scroll container layer was placed as if
++        // there were no fraction. For a box at y = 306.8125 the padding box was
++        // painted from row 307, but its contents were clipped to rows 306-340 of
++        // a 35 pixel high box: the last row was cut off, and what overflowed
++        // above the box showed in row 306 (summit#264, the classic scroll bar
++        // grid reftests). Place the layer where the padding box is painted, and
++        // tell the scrolled contents how far that is from the renderer, so that
++        // they are painted where they were.
++        if (snapScrollContainerLayerHaiku()) {
++            LayoutSize boxOffsetFromGraphicsLayer = toLayoutSize(scrollContainerBox.location()) + rendererOffset.fromPrimaryGraphicsLayer();
++            LayoutRect snappedScrollContainerRect = snappedGraphicsLayer(boxOffsetFromGraphicsLayer, scrollContainerBox.size(), renderer()).m_snappedRect;
++            // With a clipping layer (rounded corners) the layer is inside it.
++            FloatPoint parentLayerPosition;
++            if (RefPtr clipLayer = clippingLayer())
++                parentLayerPosition = clipLayer->position();
++            m_scrollContainerLayer->setPosition(FloatPoint(snappedScrollContainerRect.location()) - toFloatSize(parentLayerPosition));
++            m_scrollContainerLayer->setSize(FloatSize(snappedScrollContainerRect.size()));
++            scrollContainerOffsetFromRenderer = primaryGraphicsLayerOffsetFromRenderer.m_devicePixelOffset + toLayoutSize(snappedScrollContainerRect.location());
++        } else {
++#endif
+         // FIXME: need to do some pixel snapping here.
+         m_scrollContainerLayer->setPosition(FloatPoint(scrollContainerBox.location() - parentLayerBounds.location()));
+         m_scrollContainerLayer->setSize(roundedIntSize(LayoutSize(scrollContainerBox.width(), scrollContainerBox.height())));
++#if PLATFORM(HAIKU)
++        }
++#endif
+ 
+         auto* scrollableArea = m_owningLayer.scrollableArea();
+         ASSERT(scrollableArea);
+@@ -1834,7 +2057,7 @@ void RenderLayerBacking::updateGeometry(const RenderLayer* compositedAncestor)
+         updateScrollOffset(scrollOffset);
+ 
+         FloatSize oldScrollingLayerOffset = m_scrollContainerLayer->offsetFromRenderer();
+-        m_scrollContainerLayer->setOffsetFromRenderer(toFloatSize(scrollContainerBox.location()));
++        m_scrollContainerLayer->setOffsetFromRenderer(FloatSize(scrollContainerOffsetFromRenderer));
+ 
+         bool paddingBoxOffsetChanged = oldScrollingLayerOffset != m_scrollContainerLayer->offsetFromRenderer();
+ 
+@@ -1846,7 +2069,7 @@ void RenderLayerBacking::updateGeometry(const RenderLayer* compositedAncestor)
+ 
+         m_scrolledContentsLayer->setSize(scrollSize);
+         m_scrolledContentsLayer->setScrollOffset(scrollOffset, GraphicsLayer::ShouldSetNeedsDisplay::DoNotSet);
+-        m_scrolledContentsLayer->setOffsetFromRenderer(toLayoutSize(scrollContainerBox.location()), GraphicsLayer::ShouldSetNeedsDisplay::DoNotSet);
++        m_scrolledContentsLayer->setOffsetFromRenderer(scrollContainerOffsetFromRenderer, GraphicsLayer::ShouldSetNeedsDisplay::DoNotSet);
+         
+         adjustTiledBackingCoverage();
+     }
+@@ -1935,8 +2158,18 @@ void RenderLayerBacking::updateGeometry(const RenderLayer* compositedAncestor)
  
      positionOverflowControlsLayers();
  
@@ -107919,7 +108003,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..449893f70fc0ba7af4e85a6655a25e5b
  
  #if ENABLE(MODEL_ELEMENT)
      if (is<RenderModel>(renderer()))
-@@ -3543,6 +3727,56 @@ void RenderLayerBacking::updateDirectlyCompositedBackgroundColor(PaintedContents
+@@ -3543,6 +3776,56 @@ void RenderLayerBacking::updateDirectlyCompositedBackgroundColor(PaintedContents
      didUpdateContentsRect = true;
  }
  
@@ -107976,7 +108060,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..449893f70fc0ba7af4e85a6655a25e5b
  // Only bitmap images are directly composited, so the layer shows the image's current frame at its natural size.
  static RefPtr<NativeImage> nativeImageForDirectlyCompositedImage(Image& image)
  {
-@@ -3585,7 +3819,14 @@ void RenderLayerBacking::updateDirectlyCompositedBackgroundImage(PaintedContents
+@@ -3585,7 +3868,14 @@ void RenderLayerBacking::updateDirectlyCompositedBackgroundImage(PaintedContents
      m_graphicsLayer->setContentsTilePhase(geometry.phase);
      m_graphicsLayer->setContentsRect(geometry.destinationRect);
      m_graphicsLayer->setContentsClippingRect(FloatRoundedRect(geometry.destinationRect));
@@ -107992,7 +108076,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..449893f70fc0ba7af4e85a6655a25e5b
          m_graphicsLayer->setContentsToNativeImage(nativeImage.get());
  
      didUpdateContentsRect = true;
-@@ -3656,6 +3897,11 @@ void RenderLayerBacking::updatePaintingPhases()
+@@ -3656,6 +3946,11 @@ void RenderLayerBacking::updatePaintingPhases()
  
  static bool supportsDirectlyCompositedBoxDecorations(const RenderLayerModelObject& renderer)
  {
@@ -108004,7 +108088,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..449893f70fc0ba7af4e85a6655a25e5b
      const Style::ComputedStyle& style = renderer.style();
      if (renderer.hasClip())
          return false;
-@@ -3955,6 +4201,29 @@ bool RenderLayerBacking::isDirectlyCompositedImage() const
+@@ -3955,6 +4250,29 @@ bool RenderLayerBacking::isDirectlyCompositedImage() const
          if (image->currentFrameOrientation() != ImageOrientation::Orientation::None)
              return false;
  
@@ -108034,7 +108118,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..449893f70fc0ba7af4e85a6655a25e5b
          return m_graphicsLayer->canDirectlyCompositeNativeImage();
      }
  
-@@ -4093,6 +4362,11 @@ void RenderLayerBacking::updateImageContents(PaintedContentsInfo& contentsInfo)
+@@ -4093,6 +4411,11 @@ void RenderLayerBacking::updateImageContents(PaintedContentsInfo& contentsInfo)
          if (!cachedImage->isLoaded())
              return;
  
@@ -108046,7 +108130,7 @@ index 95122a10cacc10b498c40d3447599bd2cd4d2795..449893f70fc0ba7af4e85a6655a25e5b
          if (RefPtr nativeImage = nativeImageForDirectlyCompositedImage(*image))
              m_graphicsLayer->setContentsToNativeImage(nativeImage.get());
  
-@@ -4133,7 +4407,11 @@ LayoutRect RenderLayerBacking::contentsBox() const
+@@ -4133,7 +4456,11 @@ LayoutRect RenderLayerBacking::contentsBox() const
  #endif
  
      if (CheckedPtr renderViewTransitionCapture = dynamicDowncast<RenderViewTransitionCapture>(*renderBox))
