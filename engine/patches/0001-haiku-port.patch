@@ -16355,6 +16355,67 @@ index a6edf51e1d68e899cc0b602bad3d079629988792..75ccdbad001cd662e9b0da1e8afe8ddd
  private:
      WeakPtr<RTCRtpScriptTransformer> m_transformer;
  };
+diff --git a/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCDataChannelHandler.cpp b/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCDataChannelHandler.cpp
+index 34c235d702e9455793f109e84f0dcb3c6de5b43e..66608b29bbba225219452e5f380b721efcf11687 100644
+--- a/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCDataChannelHandler.cpp
++++ b/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCDataChannelHandler.cpp
+@@ -64,8 +64,14 @@ webrtc::DataChannelInit LibWebRTCDataChannelHandler::fromRTCDataChannelInit(cons
+ LibWebRTCDataChannelHandler::LibWebRTCDataChannelHandler(webrtc::scoped_refptr<webrtc::DataChannelInterface>&& channel)
+     : m_channel(toRef(WTF::move(channel)))
+ {
+-    checkState();
++    // The channel changes state on the network thread, and the observer is only told about the changes
++    // that happen once it is registered. Register first and read the state afterwards, so that a channel
++    // opening at this moment is either in the state read here or reported to the observer: reading the
++    // state first lost the opening, and the channel then stayed in the connecting state for good.
++    // The lock keeps whatever the observer is told meanwhile behind this first state.
++    Locker locker { m_clientLock };
+     m_channel->RegisterObserver(this);
++    m_bufferedMessages.append(currentState());
+ }
+ 
+ LibWebRTCDataChannelHandler::~LibWebRTCDataChannelHandler()
+@@ -149,7 +155,7 @@ void LibWebRTCDataChannelHandler::OnStateChange()
+     checkState();
+ }
+ 
+-void LibWebRTCDataChannelHandler::checkState()
++auto LibWebRTCDataChannelHandler::currentState() const -> StateChange
+ {
+     std::optional<webrtc::RTCError> error;
+     RTCDataChannelState state;
+@@ -168,6 +174,12 @@ void LibWebRTCDataChannelHandler::checkState()
+         state = RTCDataChannelState::Closed;
+         break;
+     }
++    return { state, WTF::move(error) };
++}
++
++void LibWebRTCDataChannelHandler::checkState()
++{
++    auto [state, error] = currentState();
+ 
+     Locker locker { m_clientLock };
+     if (!m_hasClient) {
+diff --git a/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCDataChannelHandler.h b/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCDataChannelHandler.h
+index 818759fab6a4a6a7d9ebd953cd5e8aa6bf983f82..de191c5ca1a9775375960621450231df2a7dae4b 100644
+--- a/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCDataChannelHandler.h
++++ b/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCDataChannelHandler.h
+@@ -73,12 +73,12 @@ private:
+     void OnMessage(const webrtc::DataBuffer&);
+     void OnBufferedAmountChange(uint64_t);
+ 
+-    void checkState();
+-
+     struct StateChange {
+         RTCDataChannelState state;
+         std::optional<webrtc::RTCError> error;
+     };
++    StateChange currentState() const;
++    void checkState();
+     using Message = Variant<StateChange, String, Ref<FragmentedSharedBuffer>>;
+     using PendingMessages = Vector<Message>;
+     void storeMessage(PendingMessages&, const webrtc::DataBuffer&);
 diff --git a/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCIceTransportBackend.cpp b/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCIceTransportBackend.cpp
 index cd57e0202fb108aefddc2db4bafc7a565fde7588..f964ba095ee556aabd37acb6560bad56bc2e7d02 100644
 --- a/Source/WebCore/Modules/mediastream/libwebrtc/LibWebRTCIceTransportBackend.cpp
