@@ -28159,6 +28159,47 @@ index 9fe7b721226601cc22a62b5aa05ef8b573ba3d3b..b8aede654f8f6427c2b187ca5a08f1c9
  // center
  space-between
  space-around
+diff --git a/Source/WebCore/css/ShorthandSerializer.cpp b/Source/WebCore/css/ShorthandSerializer.cpp
+index 1de68d2a4332cc30beb32ce7371bd74aa9de7946..12be9085e141a3259da50ece0ad1a573849d460c 100644
+--- a/Source/WebCore/css/ShorthandSerializer.cpp
++++ b/Source/WebCore/css/ShorthandSerializer.cpp
+@@ -220,14 +220,35 @@ bool ShorthandSerializer::subsequentLonghandsHaveInitialValues(unsigned startInd
+     return true;
+ }
+ 
++static bool NODELETE gridTemplateListIsNone(const CSSValue&);
++
++static RefPtr<CSSValue> gridTemplateShorthandLonghandValue(const Style::Extractor& properties, CSSPropertyID longhand)
++{
++    // The resolved value of grid-template-rows and grid-template-columns is the used track list
++    // of a grid container, but that special case belongs to the longhands only
++    // (https://drafts.csswg.org/css-grid-2/#resolved-track-list-standalone). The grid-template
++    // shorthand serializes the computed track list, so `[a] auto [b] auto [c]` stays as it was
++    // specified instead of becoming `[a] 50px [b] 50px [c] 50px`, and implicit tracks don't add
++    // rows to the area strings. An axis without explicit tracks (`none`) shows the sizes of its
++    // implicit tracks, as the longhand does. This matches Blink's ValuesForGridTemplateShorthand.
++    using PropertyValueType = Style::ExtractorState::PropertyValueType;
++    if (longhand == CSSPropertyGridTemplateAreas)
++        return properties.propertyValue(longhand);
++    auto computedValue = properties.propertyValue(longhand, Style::Extractor::UpdateLayout::Yes, PropertyValueType::Computed);
++    if (!computedValue || !gridTemplateListIsNone(*computedValue))
++        return computedValue;
++    return properties.propertyValue(longhand);
++}
++
+ bool ShorthandSerializer::commonSerializationChecks(const Style::Extractor& properties)
+ {
+     ASSERT(length() && length() <= maxShorthandLength);
+ 
+     ASSERT(m_shorthand.id() != CSSPropertyAll);
+ 
++    bool isGridTemplate = m_shorthand.id() == CSSPropertyGridTemplate;
+     for (unsigned i = 0; i < length(); ++i) {
+-        auto longhandValue = properties.propertyValue(longhandProperty(i));
++        auto longhandValue = isGridTemplate ? gridTemplateShorthandLonghandValue(properties, longhandProperty(i)) : properties.propertyValue(longhandProperty(i));
+         if (!longhandValue) {
+             m_result = emptyString();
+             return true;
 diff --git a/Source/WebCore/css/parser/CSSPropertyParserConsumer+Align.cpp b/Source/WebCore/css/parser/CSSPropertyParserConsumer+Align.cpp
 index 770ef5bcabccf77f8419e695f7f2000386b56cfe..6a7722709b5f48931f0c6ac672fdb4823127ea59 100644
 --- a/Source/WebCore/css/parser/CSSPropertyParserConsumer+Align.cpp
