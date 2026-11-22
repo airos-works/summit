@@ -22,6 +22,8 @@
 #include <string>
 #include <vector>
 
+class BButton;
+class BMenuBar;
 class BCardLayout;
 class BSplitView;
 class BStringView;
@@ -1126,6 +1128,14 @@ private:
     bool fBookmarksBarVisible = true;
     std::string fInterfaceStyle;
     BGroupLayout* fLayout = nullptr;
+    void SetMobileView(bool mobile);
+    bool fMobile = false;
+    BRect fDesktopFrame;
+    BGroupView* fMobileBar = nullptr;
+    BMessenger fMobileSheet;
+    BMenuBar* fDesktopMenu = nullptr;
+    BView* fStatusLine = nullptr;
+    int32 fAddressIndex = 0;
     BGroupView* fToolbar = nullptr;
     BStatusBar* fStatusProgress = nullptr;
     // Set when the window starts closing; its open pop-up menus then close.

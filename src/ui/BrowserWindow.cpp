@@ -1,4 +1,10 @@
 #include "BrowserWindow.h"
+#if __has_include(<MobileKit.h>)
+#include <MobileKit.h>
+#else
+#include "compat/MobileKit.h"
+#endif
+
 #if SUMMIT_MODERN_WEBKIT
 #include "ExtensionShortcuts.h"
 #include "core/Protocol.h"
@@ -803,6 +809,7 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
     // A private window shows icons it already knows but writes none.
     fFavicons = std::make_unique<FaviconCache>(fShared->Path().parent_path() / "Favicons", !fPrivate);
     auto* menu = new BMenuBar("menu");
+    fDesktopMenu = menu;
     auto* file = new BMenu("File");
     AddItem(file, "New Window", kNewWindow, 'N');
     AddItem(file, "New Private Window", kNewPrivateWindow, 'N', B_SHIFT_KEY);
@@ -1087,6 +1094,14 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
 #endif
         .Add(fFindBar).Add(statusLine);
     fLayout = static_cast<BGroupLayout*>(GetLayout());
+    fStatusLine = statusLine;
+    auto* mobileBar = new BMobileKit::Bar("mobile-browser");
+    mobileBar->AddAction("mobile-back", "Back", new BMessage(kBack));
+    mobileBar->AddAction("mobile-tabs", "Tabs", new BMessage('mTab'));
+    mobileBar->AddAction("mobile-more", "More", new BMessage('mMor'));
+    fMobileBar = mobileBar;
+    fMobileBar->Hide();
+    fLayout->AddView(fMobileBar);
 #if SUMMIT_MODERN_WEBKIT
     fNoticeBar->Hide();
     fDock->Hide();
@@ -1267,6 +1282,7 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
     BMessage save(kSaveSession);
     fSaveTimer = std::make_unique<BMessageRunner>(BMessenger(this), &save, 5000000);
     SaveSession();
+    BMobileKit::PrepareWindow(this, [this](bool mobile) { SetMobileView(mobile); });
 }
 BrowserWindow::~BrowserWindow()
 {
@@ -3652,7 +3668,7 @@ void BrowserWindow::ProfileChanged(const BMessage& message)
         });
         if (bar != fBookmarksBarVisible) {
             fBookmarksBarVisible = bar;
-            if (bar && fBookmarksBar->IsHidden(fBookmarksBar) && fWebApp.empty() && !fPopup) fBookmarksBar->Show();
+            if (!fMobile && bar && fBookmarksBar->IsHidden(fBookmarksBar) && fWebApp.empty() && !fPopup) fBookmarksBar->Show();
             else if (!bar && !fBookmarksBar->IsHidden(fBookmarksBar)) fBookmarksBar->Hide();
             fBookmarksBarItem->SetLabel(bar ? "Hide Bookmarks Bar" : "Show Bookmarks Bar");
         }
@@ -4012,8 +4028,48 @@ bool BrowserWindow::SaveSharedFiles(const BMessage& share)
 }
 #endif
 
+void BrowserWindow::SetMobileView(bool mobile)
+{
+    if (mobile == fMobile) return;
+    if (fMobileSheet.IsValid()) fMobileSheet.SendMessage(B_QUIT_REQUESTED);
+#if SUMMIT_MODERN_WEBKIT
+    ExitPageFullScreen();
+#endif
+    fMobile = mobile;
+    fSuggestions->Hide();
+    // Move the omnibox itself so its URL, selection and submit target survive.
+    if (mobile) {
+        fDesktopFrame = Frame();
+        fAddressIndex = fToolbar->GroupLayout()->IndexOfView(fAddress);
+        fToolbar->GroupLayout()->RemoveView(fAddress);
+        fMobileBar->GroupLayout()->AddView(1, fAddress, 3);
+        fAddress->SetExplicitMinSize(BSize(100, BMobileKit::TargetSize()));
+        fAddress->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
+        // These hides have matching shows, including for desktop chrome
+        // already hidden by a popup or the user's bookmarks preference.
+        for (BView* view : std::initializer_list<BView*>{fDesktopMenu, fToolbar, fBookmarksBar, fTabStrip, fStatusLine})
+            view->Hide();
+        fMobileBar->Show();
+        SetSizeLimits(280, 10000, 150, 10000);
+    } else {
+        fMobileBar->Hide();
+        fMobileBar->GroupLayout()->RemoveView(fAddress);
+        fToolbar->GroupLayout()->AddView(fAddressIndex, fAddress, 3);
+        fAddress->SetExplicitMinSize(BSize(fPopup ? 120 : 240, 30));
+        for (BView* view : std::initializer_list<BView*>{fDesktopMenu, fToolbar, fBookmarksBar, fTabStrip, fStatusLine})
+            view->Show();
+        bool showBookmarks = fBookmarksBarVisible && fWebApp.empty() && !fPopup;
+        if (showBookmarks && fBookmarksBar->IsHidden(fBookmarksBar)) fBookmarksBar->Show();
+        if (!showBookmarks && !fBookmarksBar->IsHidden(fBookmarksBar)) fBookmarksBar->Hide();
+        ApplyInterfaceStyle();
+        SetSizeLimits(fPopup ? 200 : fWebApp.empty() ? 760 : 320, 10000,
+            fPopup ? 150 : fWebApp.empty() ? 450 : 240, 10000);
+    }
+}
+
 void BrowserWindow::ApplyInterfaceStyle()
 {
+    if (fMobile) return;
 #if SUMMIT_MODERN_WEBKIT
     ExitPageFullScreen();
 #endif
@@ -4899,9 +4955,9 @@ void BrowserWindow::SaveSession()
     if (session.groups.empty()) session.tabGroups.clear();
 #endif
 #if SUMMIT_MODERN_WEBKIT
-    const BRect frame = fFullScreenTab ? fBeforeFullScreen : Frame();
+    const BRect frame = fMobile ? fDesktopFrame : fFullScreenTab ? fBeforeFullScreen : Frame();
 #else
-    const BRect frame = Frame();
+    const BRect frame = fMobile ? fDesktopFrame : Frame();
 #endif
     session.frame[0] = frame.left; session.frame[1] = frame.top;
     session.frame[2] = frame.right; session.frame[3] = frame.bottom;
@@ -4999,6 +5055,33 @@ void BrowserWindow::MessageReceived(BMessage* message)
 #endif
     auto* tab = ActiveTab();
     switch (message->what) {
+        case BMobileKit::B_MOBILE_VIEW_CHANGED:
+            SetMobileView(message->GetBool("mobile", false));
+            break;
+        case 'mTab': case 'mMor': {
+            bool tabs = message->what == 'mTab';
+            auto* sheet = new BMobileKit::ActionSheet(this, tabs ? "Tabs" : "Browser actions");
+            sheet->AddAction("New tab", BMessage(kNewTab));
+            if (tabs) {
+                for (const Tab& item : fTabs) {
+                    BMessage select(kSelectTab);
+                    select.AddInt64("id", item.id);
+                    std::string label = item.ShownTitle();
+                    if (label.empty()) label = item.url.empty() ? "New tab" : item.url;
+                    if (item.id == fSelected) label = "✓  " + label;
+                    sheet->AddAction(label.c_str(), select);
+                }
+            } else {
+                sheet->AddAction("Close tab", BMessage(kCloseTab));
+                sheet->AddAction("Forward", BMessage(kForward));
+                sheet->AddAction("Reload", BMessage(kReload));
+                sheet->AddAction("Downloads", BMessage(kShowDownloads));
+                sheet->AddAction("Preferences…", BMessage(kShowPreferences));
+            }
+            fMobileSheet = BMessenger(sheet);
+            sheet->Open();
+            break;
+        }
         case B_GET_PROPERTY: {
             int32 index;
             BMessage specifier;
