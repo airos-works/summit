@@ -180954,10 +180954,10 @@ index 0000000000000000000000000000000000000000..c9a119d02f85b7c5ad8fe9153bfc9604
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebView.cpp b/Source/WebKit/UIProcess/haiku/WebView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..b21d3c33714a259f92bf8ada1d2b265d28eddbf0
+index 0000000000000000000000000000000000000000..0a03fb1850c1e0ee4c02cd1a8de0fdcb918cad19
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebView.cpp
-@@ -0,0 +1,3952 @@
+@@ -0,0 +1,3966 @@
 +/*
 + * Copyright (C) 2013 Intel Corporation. All rights reserved.
 + *
@@ -181264,13 +181264,27 @@ index 0000000000000000000000000000000000000000..b21d3c33714a259f92bf8ada1d2b265d
 +    return systemAppearanceIsDarkHaiku();
 +}
 +
-+static void navigationChangedHaiku(const std::shared_ptr<WebViewStateHaiku>& state)
++enum class NavigationKindHaiku : bool { NewDocument, SameDocument };
++
++static void navigationChangedHaiku(const std::shared_ptr<WebViewStateHaiku>& state, NavigationKindHaiku kind = NavigationKindHaiku::NewDocument)
 +{
 +    ASSERT(RunLoop::isMain());
 +    if (state->closed)
 +        return;
 +    ++state->navigationGeneration;
 +    ++state->nativeDropRequest;
++    if (kind == NavigationKindHaiku::SameDocument) {
++        // A page's own pushState/replaceState/fragment change keeps the document
++        // whose unload handlers decided the close, so the decision still holds.
++        // Vue Router's beforeunload handler calls history.replaceState, which
++        // arrives here just before the TryClose answer it belongs to: treating
++        // it as a navigation refused every close of such a page. Same-document
++        // navigations the user starts (address, back/forward) invalidate the
++        // close when they are issued, before reaching here.
++        if (state->closeRequestApproved || state->closeRequestPending)
++            state->closeNavigationGeneration = state->navigationGeneration;
++        return;
++    }
 +    if (state->closeRequestApproved || state->closeRequestPending) {
 +        state->closeApprovalInvalidated = true;
 +        state->closeRequestApproved = false;
@@ -182152,7 +182166,7 @@ index 0000000000000000000000000000000000000000..b21d3c33714a259f92bf8ada1d2b265d
 +    void didSameDocumentNavigation(WebPageProxy& page, API::Navigation* navigation, SameDocumentNavigationType, API::Object*) override
 +    {
 +        if (auto state = m_state.lock()) {
-+            navigationChangedHaiku(state);
++            navigationChangedHaiku(state, NavigationKindHaiku::SameDocument);
 +            // Anchor callbacks carry the existing DocumentLoader's navigation
 +            // ID, rather than the new UI API request's ID. Match only an
 +            // explicitly requested fragment within that unchanged document.
