@@ -20,9 +20,11 @@
 #include "SharedProfile.h"
 #include "core/Bookmarks.h"
 #include "core/ReadingList.h"
+#include "core/Address.h"
 #include "core/UserAgent.h"
 
 #include <Alert.h>
+#include <Application.h>
 #include <Bitmap.h>
 #include <CardLayout.h>
 #include <CardView.h>
@@ -78,8 +80,12 @@ constexpr uint32 kMobileDesktopSite = 'mDsk';
 constexpr uint32 kMobileCopyLink = 'mCpy';
 constexpr uint32 kMobileClearHistory = 'mClH';
 constexpr uint32 kMobileNewPrivateTab = 'mNPv';
+constexpr uint32 kMobileSettings = 'mSet';      // the settings panel
+constexpr uint32 kMobileSetting = 'mStg';       // a settings row ("key", "value")
+constexpr uint32 kMobileSettingsBack = 'mSBk';
+constexpr uint32 kMobileClearDataReply = 'mCDr';
 
-enum Panel : int32 { kPagePanel, kTabsPanel, kListPanel, kEditorPanel };
+enum Panel : int32 { kPagePanel, kTabsPanel, kListPanel, kEditorPanel, kSettingsPanel };
 enum Section : int32 { kBookmarksSection, kReadingListSection, kHistorySection };
 enum RowKind : int32 { kFolderRow, kBookmarkRow, kReadingRow, kHistoryRow };
 
@@ -280,10 +286,22 @@ void BrowserWindow::BuildMobileChrome()
     BLayoutBuilder::Group<>(static_cast<BGroupView*>(ui.editPanel))
         .Add(editTop).Add(form).Add(Scroll("mobile-editor-scroll", ui.editFolders), 1);
 
+    // Settings: Back (from a choice), the title and Done over a table.
+    auto* settingsTop = new MetalBar("mobile-settings-top", B_MOBILE_TOP_BAR);
+    ui.settingsBack = new MetalButton("mobile-settings-back", "Settings", Message(kMobileSettingsBack), B_BACK_BUTTON);
+    ui.settingsTitle = new TitleView("mobile-settings-title", "Settings");
+    ui.settingsDone = new MetalButton("mobile-settings-done", "Done", Message(kMobileDone));
+    BLayoutBuilder::Group<>(settingsTop->GroupLayout()).Add(ui.settingsBack).Add(ui.settingsTitle, 1).Add(ui.settingsDone);
+    ui.settings = new TableView("mobile-settings");
+    ui.settingsPanel = new BGroupView("mobile-settings-panel", B_VERTICAL, 0);
+    BLayoutBuilder::Group<>(static_cast<BGroupView*>(ui.settingsPanel))
+        .Add(settingsTop).Add(Scroll("mobile-settings-scroll", ui.settings), 1);
+
     ui.panels = new BCardView("mobile-panels");
     ui.panels->CardLayout()->AddView(ui.tabsPanel);
     ui.panels->CardLayout()->AddView(ui.listPanel);
     ui.panels->CardLayout()->AddView(ui.editPanel);
+    ui.panels->CardLayout()->AddView(ui.settingsPanel);
 
 #if SUMMIT_MODERN_WEBKIT
     BView* content = fContentSplit;
@@ -423,7 +441,8 @@ void BrowserWindow::ShowMobilePanel(int32 panel)
     const bool page = panel == kPagePanel || !fMobile;
     if (!page) {
         HideSuggestions();
-        BView* card = panel == kTabsPanel ? ui.tabsPanel : panel == kListPanel ? ui.listPanel : ui.editPanel;
+        BView* card = panel == kTabsPanel ? ui.tabsPanel : panel == kListPanel ? ui.listPanel
+            : panel == kSettingsPanel ? ui.settingsPanel : ui.editPanel;
         ui.panels->CardLayout()->SetVisibleItem(ui.panels->CardLayout()->IndexOfView(card));
     }
     ShowView(ui.panels, !page);
@@ -447,6 +466,10 @@ void BrowserWindow::ShowMobilePanel(int32 panel)
             break;
         case kEditorPanel:
             ui.editName->MakeFocus();
+            break;
+        case kSettingsPanel:
+            RefreshMobileSettings();
+            ui.settings->MakeFocus();
             break;
         default:
             if (auto* tab = ActiveTab(); tab && fMobile) tab->view->MakeFocus();
@@ -699,6 +722,85 @@ void BrowserWindow::RefreshMobileList()
         ? table->ItemFrame(table->CountItems() - 1).bottom - table->Bounds().Height() : 0.0f)));
 }
 
+// The preferences a phone needs, as Safari's Settings: the search engine,
+// the home page, privacy switches and clearing; the rest in All Settings.
+void BrowserWindow::RefreshMobileSettings()
+{
+    auto& ui = fMobileUI;
+    TableView* table = ui.settings;
+    table->RemoveRows();
+    struct Values {
+        std::string engine, home, autoplay;
+        bool restore, tracking, httpsFirst, passwords, spelling, reduceMotion;
+    };
+    const Values values = fShared->Read([](const Profile& profile) {
+        return Values { profile.searchEngine, profile.homeURL, profile.autoplay, profile.restoreSession,
+            profile.preventCrossSiteTracking, profile.httpsFirst, profile.savePasswords, profile.spellChecking,
+            profile.reduceMotion };
+    });
+    auto header = [&](const char* title) {
+        auto* item = new TableRow(title);
+        item->SetHeader(true);
+        table->AddItem(item);
+    };
+    auto row = [&](const char* key, const std::string& title, const std::string& detail = { }) {
+        auto* message = new BMessage(kMobileSetting);
+        message->AddString("key", key);
+        auto* item = new TableRow(title.c_str(), detail.empty() ? nullptr : detail.c_str(), message);
+        table->AddItem(item);
+        return item;
+    };
+    auto toggle = [&](const char* key, const char* title, bool on) {
+        auto* item = row(key, title);
+        item->SetAccessory(B_ROW_SWITCH);
+        item->SetSwitch(on);
+        item->Message()->AddBool("value", !on);
+    };
+    auto choice = [&](const char* key, const char* id, const char* title, bool chosen) {
+        auto* item = row(key, title);
+        item->Message()->AddString("value", id);
+        item->SetAccessory(chosen ? B_ROW_CHECK : B_ROW_NO_ACCESSORY);
+    };
+    static const std::pair<const char*, const char*> kAutoplay[] = {
+        {"allow", "Allow All"}, {"block-audio", "Stop Media with Sound"}, {"block", "Never Autoplay"} };
+    ShowView(ui.settingsBack, ui.settingsPage != 0);
+    if (ui.settingsPage == 1) {
+        ui.settingsTitle->SetTitle("Search Engine");
+        for (const auto& engine : SearchEngines()) choice("search_engine", engine.id, engine.name, values.engine == engine.id);
+        return;
+    }
+    if (ui.settingsPage == 2) {
+        ui.settingsTitle->SetTitle("Autoplay");
+        for (const auto& [id, name] : kAutoplay) choice("autoplay", id, name, values.autoplay == id);
+        return;
+    }
+    ui.settingsTitle->SetTitle("Settings");
+    std::string engineName = values.engine;
+    for (const auto& engine : SearchEngines()) if (values.engine == engine.id) engineName = engine.name;
+    header("General");
+    row("search_engine_page", "Search Engine", engineName)->SetAccessory(B_ROW_CHEVRON);
+    row("home_url", "Home Page", values.home.empty() ? "Summit start page" : values.home);
+    if (auto* tab = ActiveTab(); tab && (tab->url.starts_with("https://") || tab->url.starts_with("http://")))
+        row("home_current", "Use This Page as Home Page", HostOf(tab->url));
+    toggle("restore_session", "Reopen Tabs at Start", values.restore);
+    header("Privacy & Security");
+    toggle("prevent_cross_site_tracking", "Prevent Cross-Site Tracking", values.tracking);
+    toggle("https_first", "Try Secure Connections First", values.httpsFirst);
+    toggle("save_passwords", "Offer to Save Passwords", values.passwords);
+    std::string autoplayName = values.autoplay;
+    for (const auto& [id, name] : kAutoplay) if (values.autoplay == id) autoplayName = name;
+    row("autoplay_page", "Autoplay", autoplayName)->SetAccessory(B_ROW_CHEVRON);
+    header("Reading");
+    toggle("spell_checking", "Check Spelling", values.spelling);
+    toggle("reduce_motion", "Reduce Motion", values.reduceMotion);
+    header("Clear");
+    if (!fPrivate) row("clear_history", "Clear History")->SetDestructive(true);
+    row("clear_data", "Clear Cookies and Data")->SetDestructive(true);
+    header("More");
+    row("all_settings", "All Settings…", "Extensions, passwords, site permissions, developer tools")
+        ->SetAccessory(B_ROW_CHEVRON);
+}
+
 void BrowserWindow::ShowMobileActions()
 {
     auto* tab = ActiveTab();
@@ -724,7 +826,7 @@ void BrowserWindow::ShowMobileActions()
     sheet->AddActivity("Downloads", B_GLYPH_DOWNLOAD, BMessage(kToggleDownloadsPanel));
     sheet->AddAction("New Tab", BMessage(kNewTab));
     sheet->AddAction("New Private Tab", BMessage(kMobileNewPrivateTab));
-    sheet->AddAction("Settings", BMessage(kShowPreferences));
+    sheet->AddAction("Settings", BMessage(kMobileSettings));
     sheet->AddAction("Close Tab", BMessage(kCloseTab), B_ACTION_DESTRUCTIVE);
     fMobileSheet = BMessenger(sheet);
     sheet->Open();
@@ -945,11 +1047,10 @@ bool BrowserWindow::MobileMessage(BMessage& message)
             return true;
         case kMobileClearHistory:
             if (message.GetInt32("which", 0) == 1) {
-                fShared->ClearHistory(BMessenger(this));
-#if SUMMIT_MODERN_WEBKIT
-                fWebKitContext->NotifyHistoryChanged("removed", nlohmann::json({{"allHistory", true}, {"urls", nlohmann::json::array()}}).dump().c_str());
-#endif
-                RefreshMobileList();
+                // As History › Clear History does (form history goes too).
+                BMessage reply(kClearHistoryReply);
+                reply.AddInt32("which", 1);
+                PostMessage(&reply);
                 MobileToast("History cleared");
             }
             return true;
@@ -1000,6 +1101,60 @@ bool BrowserWindow::MobileMessage(BMessage& message)
             RefreshMobileList();
             return true;
         }
+        case kMobileSettings:
+            ui.settingsPage = 0;
+            ShowMobilePanel(kSettingsPanel);
+            return true;
+        case kMobileSettingsBack:
+            ui.settingsPage = 0;
+            RefreshMobileSettings();
+            return true;
+        case kMobileSetting: {
+            const std::string key = message.GetString("key", "");
+            BMessage changed(kPreferencesChanged);
+            if (key == "search_engine_page") ui.settingsPage = 1;
+            else if (key == "autoplay_page") ui.settingsPage = 2;
+            else if (key == "search_engine" || key == "autoplay") {
+                changed.AddString(key.c_str(), message.GetString("value", ""));
+                ui.settingsPage = 0;
+            } else if (key == "home_current") {
+                if (auto* tab = ActiveTab()) changed.AddString("home_url", tab->url.c_str());
+                MobileToast("Home page set");
+            } else if (key == "home_url") {
+                // Typing an address on a phone belongs in All Settings.
+                be_app->PostMessage(kShowPreferences);
+            } else if (key == "clear_history") {
+                auto* alert = new BAlert("Clear History", "Remove every page from your history, and what you typed in forms?\n\n"
+                    "Bookmarks and open tabs are kept.", "Cancel", "Clear History", nullptr, B_WIDTH_AS_USUAL, B_WARNING_ALERT);
+                alert->SetShortcut(0, B_ESCAPE);
+                alert->Go(new BInvoker(new BMessage(kMobileClearHistory), this));
+            } else if (key == "clear_data") {
+                auto* alert = new BAlert("Clear Cookies and Data", "Remove cookies, caches and the data websites keep?\n\n"
+                    "Sites you are signed in to will sign you out.", "Cancel", "Clear", nullptr, B_WIDTH_AS_USUAL, B_WARNING_ALERT);
+                alert->SetShortcut(0, B_ESCAPE);
+                alert->Go(new BInvoker(new BMessage(kMobileClearDataReply), this));
+            } else if (key == "all_settings") be_app->PostMessage(kShowPreferences);
+            else if (message.HasBool("value")) changed.AddBool(key.c_str(), message.GetBool("value", false));
+            if (!changed.IsEmpty()) be_app->PostMessage(&changed);
+            // The profile changes on the application's thread: show the
+            // switches as they will be at once.
+            if (message.HasBool("value")) {
+                const int32 index = message.GetInt32("index", -1);
+                if (auto* item = ui.settings->RowAt(index)) {
+                    item->SetSwitch(message.GetBool("value", false));
+                    item->Message()->ReplaceBool("value", !message.GetBool("value", false));
+                    ui.settings->InvalidateItem(index);
+                }
+            } else RefreshMobileSettings();
+            return true;
+        }
+        case kMobileClearDataReply:
+            if (message.GetInt32("which", 0) == 1) {
+                be_app->PostMessage(kClearCacheRequest);
+                be_app->PostMessage(kClearSiteDataRequest);
+                MobileToast("Cookies and data cleared");
+            }
+            return true;
         case kMobileBookmarkPage:
             OpenMobileEditor(BookmarkEditor::kNewBookmarkMode, 0, kPagePanel);
             return true;

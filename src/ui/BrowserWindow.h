@@ -1177,7 +1177,14 @@ private:
         BTextControl *editName = nullptr, *editURL = nullptr;
         BView* editURLLabel = nullptr;
         BMobileKit::TableView* editFolders = nullptr;
-        // 0 the page, 1 the tab switcher, 2 the lists, 3 the editor.
+        // Settings: the common preferences as a touch table.
+        BView* settingsPanel = nullptr;
+        BMobileKit::MetalButton *settingsBack = nullptr, *settingsDone = nullptr;
+        BMobileKit::TitleView* settingsTitle = nullptr;
+        BMobileKit::TableView* settings = nullptr;
+        // 0 the settings, 1 the search engines, 2 autoplay.
+        int32 settingsPage = 0;
+        // 0 the page, 1 the tab switcher, 2 the lists, 3 the editor, 4 settings.
         int32 panel = 0;
         // The panel the editor returns to.
         int32 editReturn = 0;
@@ -1201,6 +1208,7 @@ private:
     void RefreshMobileEditing();
     void RefreshMobileTabs();
     void RefreshMobileList();
+    void RefreshMobileSettings();
     void ShowMobilePanel(int32 panel);
     void ShowMobileActions();
     void OpenMobileEditor(int32 mode, int64 id, int32 returnTo);

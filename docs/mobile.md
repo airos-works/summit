@@ -71,6 +71,17 @@ existing bookmark): name, address and the folder, chosen from a list with a
 check mark. Saved bookmarks and other actions are confirmed with a short
 message in the middle of the window.
 
+## Settings
+
+**Settings** in the share sheet opens a table like the iPhone's: Search
+Engine and Autoplay (each a list with a check mark), Home Page and **Use
+This Page as Home Page**, ON/OFF switches for reopening tabs at start,
+cross-site tracking prevention, secure connections first, saving passwords,
+spelling and reduced motion, then red **Clear History** and **Clear Cookies
+and Data** rows (each asks first). **All Settings…** opens the full
+Preferences window (extensions, passwords, site permissions, developer
+tools).
+
 ## Share sheet
 
 The share button opens a sheet rising from the bottom: a grid of actions
@@ -99,7 +110,8 @@ made from.
 
 ## Not done yet
 
-- Preferences is still the desktop window (about 900 pixels wide).
+- All Settings… (and typing a home page) is still the desktop Preferences
+  window, about 900 pixels wide.
 - Swiping a card away needs touch scrolling from `mobile_touch`; it was not
   tried on a touch screen yet.
 - Tabs cannot be reordered in the grid or the tablet's row.
