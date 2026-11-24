@@ -12,6 +12,11 @@ suite (1714 tests) takes about 30 minutes.
 The November 19 follow-up lists results for every previously unresolved URL across
 the 2025 and 2026 focus areas. [Follow-up report and per-URL results](../../docs/interop-2025-2026-followup-2026-11-19.md)
 
+The November 24 run of [Interop 2024](https://wpt.fyi/interop-2024) (2,897
+URLs, about 8 minutes on 4 VMs) scored **98.71** after two engine fixes
+(CI build 1123.0038: 98.01). Safari TP 257 scores 98.35 on the same tests.
+Results and open issues: [#279](https://github.com/airos-works/summit/issues/279).
+
 ## Pieces
 
 | File | What it does |
@@ -22,6 +27,7 @@ the 2025 and 2026 focus areas. [Follow-up report and per-URL results](../../docs
 | `make-profile.py` | The test profile: trusts wpt's certificate for all wpt hosts, allows pop-ups for wpt origins, HTTPS-First/session restore/update checks off, MCP on |
 | `run.sh LIST NAME [wpt args]` | `wpt run webkit --webkit-port=summit ...`; results in `$INTEROP_ROOT/results/NAME.{json,log}` |
 | `score.py RUN.json ...` | Per-area scores next to Safari TP and Safari stable (wpt.fyi summaries), and `results/tests.json` for triage |
+| `score-year.py OUT RUN ...` | One year's score from a `labels.py --year YEAR` folder (`INTEROP_YEAR_DIR`) next to the current wpt.fyi Safari TP, WebKitGTK, Chrome and Firefox runs, whose `*-summary.json` files (the runs' `results_url`) are saved in that folder |
 | `gaps.py [RUN ...]` | Best result per test over several runs, and the points each failure group is worth |
 | `mcp.py` | Small MCP client (Summit's MCP server, for on-screen screenshots) |
 | `x399/size.sh` | Fallback for releases that need Haiku window scripting to set the viewport |
@@ -159,6 +165,11 @@ Summit under test, so the runner's build folder was a link to `/boot/system`
 
 ## Traps
 
+- Tests that upload a file with `test_driver.send_keys(input, "{{fs_path(...)}}")`
+  (IndexedDB `file_support`) send the file's path on the wpt server host.
+  When the browser runs in a VM, create the same path there (on air/OS a link
+  from `/data1` to a folder on the data volume; the root file system takes
+  folders but not files), or the test fails with `send_keys ... invalid argument`.
 - Automated top-level pages can open pop-ups (#187). The test profile also
   allows pop-ups for each WPT origin on ports 8000, 8001, 8443, 8444 and 9000.
   In an embedded frame, check whether `window.open()` returned `null` before
