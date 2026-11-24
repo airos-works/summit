@@ -11,7 +11,7 @@ mkdir -p "$SUMMIT_STAGE/apps" "$SUMMIT_STAGE/data/Summit" \
 cp build-modern-haiku/Summit "$SUMMIT_STAGE/apps/Summit"
 strip --strip-debug "$SUMMIT_STAGE/apps/Summit"
 xres -o "$SUMMIT_STAGE/apps/Summit" build-modern-haiku/Summit.rsrc
-cp resources/start.html "$SUMMIT_STAGE/data/Summit/start.html"
+cp resources/start.html resources/i915-egl.json "$SUMMIT_STAGE/data/Summit/"
 cp resources/Summit.PackageInfo "$SUMMIT_STAGE/.PackageInfo"
 cp README.md LICENSE "$SUMMIT_STAGE/documentation/packages/summit/"
 cp -R docs "$SUMMIT_STAGE/documentation/packages/summit/"

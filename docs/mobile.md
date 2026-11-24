@@ -90,6 +90,23 @@ Site, History, Downloads), then New Tab, New Private Tab, Settings and a red
 Close Tab, and Cancel. The downloads panel opens under the top bar at the
 window's width.
 
+## Scrolling on Intel tablets
+
+On air/OS x86_64 with an active i915 display, Summit prefers the system's Iris
+driver for rendering pages. The packaged Zink driver translates OpenGL to
+Vulkan. Reading scrolling frames back through that path on the Yoga's UHD
+Graphics 605 often took longer than the display's 16.7 ms frame interval.
+The graphics driver is selected when Summit starts, so folding or unfolding
+the tablet can keep the same web processes. An explicit EGL vendor setting
+takes precedence.
+
+On the Yoga at 1366 × 768 and 60 Hz, four five-second scrolls through the
+400-card feed in `tools/bench/pages/scroll.html?manual=1` went from
+35.2–38.6 to 56.4–58.4 visible updates per second. The test sent the mobile
+touch filter's phased wheel messages at 60 Hz, moving 20 pixels per step.
+It counted changes to a narrow gradient on the page by sampling the screen
+during the gesture. The median across runs went from 37.1 to 57.9 fps.
+
 ## Testing without a tablet
 
 `MobileShell` takes the whole desktop over. To test a phone-sized layout on

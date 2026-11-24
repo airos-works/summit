@@ -34,13 +34,13 @@ CORE_OBJ = $(CORE:%.cpp=$(BUILD)/%.o) $(CLD2:%.cc=$(BUILD)/%.o)
 UI_OBJ = $(UI:%.cpp=$(BUILD)/%.o)
 LIBS = -L$(WEBKIT_LIBRARY_DIR) -l$(WEBKIT_LINK_LIBRARY) -lbe -lgame -lnetwork -lbnetapi -ltranslation -ltracker -lcrypto -lcurl $(DEVTOOLS_LIBS)
 .PHONY: all check clean package browser-smoke
-all: $(BUILD)/Summit $(BUILD)/resources/start.html
+all: $(BUILD)/Summit $(BUILD)/resources/start.html $(BUILD)/resources/i915-egl.json
 $(BUILD)/Summit: $(CORE_OBJ) $(UI_OBJ) resources/Summit.rdef resources/Summit.hvif $(wildcard resources/toolbar/*.hvif resources/toolbar/*.png resources/reader/*.js resources/fonts/* resources/translation/* resources/translation/bergamot/*)
 	$(CXX) $(LDFLAGS) -o $@.new $(CORE_OBJ) $(UI_OBJ) $(LIBS)
 	rc -I resources -o $(BUILD)/Summit.rsrc resources/Summit.rdef
 	xres -o $@.new $(BUILD)/Summit.rsrc
 	mv $@.new $@
-$(BUILD)/resources/start.html: resources/start.html
+$(BUILD)/resources/%: resources/%
 	mkdir -p $(dir $@)
 	cp $< $@
 $(BUILD)/%.o: %.cpp

@@ -37,9 +37,11 @@
 #include <nlohmann/json.hpp>
 #endif
 #include "core/Address.h"
+#include "core/BuildTarget.h"
 #include "core/UserAgent.h"
 #include "core/ProfileLock.h"
 #include "core/Spelling.h"
+#include <Accelerant.h>
 #include <Alert.h>
 #include <Application.h>
 #include <Entry.h>
@@ -93,6 +95,29 @@ static constexpr uint32 kExtensionNotificationChoice = 'senc';
 static constexpr uint32 kReleaseDownloadContexts = 'srdc';
 // A download that lost its connection is continued (DownloadRetry).
 static constexpr uint32 kRetryDownload = 'srdr';
+
+#if SUMMIT_MODERN_WEBKIT && SUMMIT_AIROS && defined(__x86_64__)
+static void SelectIntelGraphics(const std::filesystem::path& resources)
+{
+    // The packaged engine normally renders through Zink. On i915 the system
+    // Mesa can use Iris directly, avoiding the Vulkan readback cost per frame.
+    if (getenv("__EGL_VENDOR_LIBRARY_FILENAMES") || getenv("__EGL_VENDOR_LIBRARY_DIRS"))
+        return;
+    accelerant_device_info device {};
+    if (BScreen().GetDeviceInfo(&device) != B_OK || strcmp(device.chipset, "i915"))
+        return;
+
+    constexpr const char* driver = "/boot/system/data/airos/non-packaged/amdgpu/lib/libEGL_mesa.so.0";
+    constexpr const char* bundled = "/boot/system/lib/summit-webkit/mesa/egl_vendor.d/50_mesa.json";
+    const auto native = resources / "i915-egl.json";
+    if (access(driver, R_OK) || access(native.c_str(), R_OK) || access(bundled, R_OK))
+        return;
+    // The system manifest names Mesa by soname, which resolves back to the
+    // bundled copy via libEGL's rpath. Our manifest names the system library
+    // by absolute path. GLVND can still try the bundled vendor if it fails.
+    setenv("__EGL_VENDOR_LIBRARY_FILENAMES", (native.string() + ":" + bundled).c_str(), 0);
+}
+#endif
 
 class SummitApp : public BApplication {
 public:
@@ -297,6 +322,14 @@ public:
             summit::SetReopenProfile(false);
         }
 #endif
+        app_info info; GetAppInfo(&info); BPath executable(&info.ref);
+        auto resources = std::filesystem::path(executable.Path()).parent_path() / "resources";
+        if (!std::filesystem::exists(resources / "start.html", error))
+            resources = "/boot/system/data/Summit";
+        const auto home = resources / "start.html";
+#if SUMMIT_MODERN_WEBKIT && SUMMIT_AIROS && defined(__x86_64__)
+        SelectIntelGraphics(resources);
+#endif
         fShared = std::make_shared<summit::SharedProfile>(fProfile / "profile.json");
         fShared->AddListener(BMessenger(this));
 #if SUMMIT_MODERN_WEBKIT
@@ -370,9 +403,6 @@ public:
         BWebPage::SetCacheModel(B_WEBKIT_CACHE_MODEL_WEB_BROWSER);
         BWebSettings::SetPersistentStoragePath((fProfile / "WebKit").c_str());
 #endif
-        app_info info; GetAppInfo(&info); BPath executable(&info.ref);
-        auto home = std::filesystem::path(executable.Path()).parent_path() / "resources/start.html";
-        if (!std::filesystem::exists(home, error)) home = "/boot/system/data/Summit/start.html";
         if (!std::filesystem::exists(home, error)) {
             std::fprintf(stderr, "Summit: missing start page at %s\n", home.c_str());
         }

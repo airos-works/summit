@@ -255,8 +255,9 @@ def freeze(work, inputs, commands, before, configuration, build, executable_name
                 assets.append('licenses/Translation/' + name)
             shutil.copy2(ROOT / 'resources/translation/sources.json', bundle / 'licenses/Translation/sources.json')
             assets.append('licenses/Translation/sources.json')
-            shutil.copy2(ROOT / 'resources/start.html', bundle / 'resources/start.html')
-            assets.append('resources/start.html')
+            for asset in ('resources/start.html', 'resources/i915-egl.json'):
+                shutil.copy2(ROOT / asset, bundle / asset)
+                assets.append(asset)
         for license_file in (SOURCE / 'Source').rglob('*'):
             if license_file.is_file() and license_file.name.upper().startswith(('LICENSE', 'COPYING')):
                 destination = bundle / 'licenses/WebKit' / license_file.relative_to(SOURCE / 'Source')

@@ -169,9 +169,13 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Haiku")
     set_property(TARGET Summit APPEND PROPERTY LINK_DEPENDS ${SUMMIT_TRANSLATION_RESOURCES})
     file(GLOB SUMMIT_FONT_RESOURCES CONFIGURE_DEPENDS resources/fonts/*)
     set_property(TARGET Summit APPEND PROPERTY LINK_DEPENDS ${SUMMIT_FONT_RESOURCES})
+    set(SUMMIT_EXTERNAL_RESOURCES
+        ${CMAKE_SOURCE_DIR}/resources/start.html
+        ${CMAKE_SOURCE_DIR}/resources/i915-egl.json)
+    set_property(TARGET Summit APPEND PROPERTY LINK_DEPENDS ${SUMMIT_EXTERNAL_RESOURCES})
     add_custom_command(TARGET Summit POST_BUILD
         COMMAND ${HAIKU_RC} -I ${CMAKE_SOURCE_DIR}/resources -o $<TARGET_FILE_DIR:Summit>/Summit.rsrc ${CMAKE_SOURCE_DIR}/resources/Summit.rdef
         COMMAND ${HAIKU_XRES} -o $<TARGET_FILE:Summit> $<TARGET_FILE_DIR:Summit>/Summit.rsrc
         COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:Summit>/resources
-        COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_SOURCE_DIR}/resources/start.html $<TARGET_FILE_DIR:Summit>/resources/start.html)
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${SUMMIT_EXTERNAL_RESOURCES} $<TARGET_FILE_DIR:Summit>/resources)
 endif()
