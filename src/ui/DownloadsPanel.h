@@ -32,7 +32,10 @@ class DownloadsPanel final : public BWindow {
 public:
     // anchor: the downloads button's frame on the screen. menusCancelled
     // closes the panel's context menu; set it before asking the panel to quit.
-    DownloadsPanel(BWindow* owner, bool privateBrowsing, BRect anchor, std::shared_ptr<std::atomic<bool>> menusCancelled);
+    // A width (the mobile view's) makes the panel that wide, under the
+    // anchor's left edge.
+    DownloadsPanel(BWindow* owner, bool privateBrowsing, BRect anchor, std::shared_ptr<std::atomic<bool>> menusCancelled,
+        float width = 0);
     ~DownloadsPanel() override;
     void MessageReceived(BMessage*) override;
     void WindowActivated(bool active) override;
@@ -44,6 +47,7 @@ private:
     BMessenger fOwner;
     bool fPrivate;
     BRect fAnchor;
+    float fWidth = 0;
     std::shared_ptr<std::atomic<bool>> fMenusCancelled;
     DownloadsView* fList;
     BButton* fClear;

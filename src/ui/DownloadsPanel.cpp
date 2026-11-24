@@ -394,11 +394,11 @@ void DownloadsButton::Draw(BRect update)
 }
 
 DownloadsPanel::DownloadsPanel(BWindow* owner, bool privateBrowsing, BRect anchor,
-    std::shared_ptr<std::atomic<bool>> menusCancelled)
+    std::shared_ptr<std::atomic<bool>> menusCancelled, float width)
     : BWindow(BRect(0, 0, 100, 100), "Downloads", B_BORDERED_WINDOW_LOOK, B_FLOATING_SUBSET_WINDOW_FEEL,
         B_NOT_MOVABLE | B_NOT_CLOSABLE | B_NOT_ZOOMABLE | B_NOT_MINIMIZABLE | B_NOT_RESIZABLE
             | B_WILL_ACCEPT_FIRST_CLICK | B_ASYNCHRONOUS_CONTROLS | B_AUTO_UPDATE_SIZE_LIMITS | B_CLOSE_ON_ESCAPE)
-    , fOwner(owner), fPrivate(privateBrowsing), fAnchor(anchor), fMenusCancelled(std::move(menusCancelled))
+    , fOwner(owner), fPrivate(privateBrowsing), fAnchor(anchor), fWidth(width), fMenusCancelled(std::move(menusCancelled))
 {
     fList = new DownloadsView;
     fList->SetMenusCancelled(fMenusCancelled);
@@ -422,10 +422,11 @@ DownloadsPanel::~DownloadsPanel()
 
 void DownloadsPanel::Place()
 {
-    const BSize size = GetLayout()->PreferredSize();
+    BSize size = GetLayout()->PreferredSize();
+    if (fWidth > 0) size.width = fWidth;
     ResizeTo(size.width, size.height);
     const BRect screen = BScreen(this).Frame();
-    float left = std::round(fAnchor.right - size.width);
+    float left = std::round(fWidth > 0 ? fAnchor.left : fAnchor.right - size.width);
     left = std::clamp(left, screen.left + 4, std::max(screen.left + 4, screen.right - size.width - 4));
     float top = std::round(fAnchor.bottom + 3);
     if (top + size.height > screen.bottom - 4) top = std::max(screen.top + 4, std::round(fAnchor.top - size.height - 3));

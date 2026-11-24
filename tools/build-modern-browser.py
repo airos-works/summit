@@ -423,7 +423,7 @@ def main():
                    'src/ui/ExtensionShortcutsWindow.cpp', 'src/ui/ExtensionUpdater.cpp', 'src/core/PageLanguage.cpp',
                    'src/core/TranslationModels.cpp', 'src/ui/PageTranslation.cpp', 'src/ui/BrowserWindowTranslation.cpp',
                    'src/core/SafeBrowsing.cpp', 'src/ui/SafeBrowsingService.cpp', 'src/ui/BrowserWindowSafeBrowsing.cpp',
-                   'src/ui/ResponsiveDesign.cpp', 'src/ui/BrowserWindowResponsive.cpp',
+                   'src/ui/ResponsiveDesign.cpp', 'src/ui/BrowserWindowResponsive.cpp', 'src/ui/BrowserWindowMobile.cpp',
                    # Browser profiles (#157).
                    'src/core/BrowserProfiles.cpp', 'src/ui/Profiles.cpp', 'src/ui/BrowserWindowProfiles.cpp',
                    'src/core/ReadingList.cpp', 'src/ui/BrowserWindowReadingList.cpp',

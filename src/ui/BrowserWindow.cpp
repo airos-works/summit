@@ -1,9 +1,6 @@
 #include "BrowserWindow.h"
-#if __has_include(<MobileKit.h>)
-#include <MobileKit.h>
-#else
+// Summit carries its own Mobile Kit (version 3), ahead of the system's.
 #include "compat/MobileKit.h"
-#endif
 
 #if SUMMIT_MODERN_WEBKIT
 #include "ExtensionShortcuts.h"
@@ -416,14 +413,68 @@ public:
     {
         fCertificate->SetIcon(verified ? Icon::Lock : Icon::LockWarning);
         fCertificate->SetToolTip(verified ? "Encrypted connection — view certificate" : "Connection warning — view certificate");
-        SetButtonVisible(fCertificate, visible);
+        if (fMobile && (visible != fCertificateShown || verified != fCertificateVerified)) {
+            fCertificateShown = visible;
+            fCertificateVerified = verified;
+            InvalidateLayout();
+            Layout(true);
+            Invalidate();
+        }
+        fCertificateShown = visible;
+        fCertificateVerified = verified;
+        SetButtonVisible(fCertificate, visible && !fMobile);
     }
     void SetReader(bool visible, bool active, bool enabled)
     {
         fReader->SetIcon(active ? Icon::ReaderActive : Icon::Reader);
         fReader->SetToolTip(active ? "Exit Reader mode" : "Enter Reader mode");
         fReader->SetEnabled(enabled);
-        SetButtonVisible(fReader, visible);
+        if (fMobile && (visible != fReaderShown || active != fReaderActive || enabled != fReaderEnabled)) {
+            fReaderShown = visible;
+            fReaderActive = active;
+            fReaderEnabled = enabled;
+            InvalidateLayout();
+            Layout(true);
+            Invalidate();
+        }
+        fReaderShown = visible;
+        fReaderActive = active;
+        fReaderEnabled = enabled;
+        SetButtonVisible(fReader, visible && !fMobile);
+    }
+    // The mobile field's lock (left) and Reader pill (right), inside the plate.
+    BRect MobileLockRect() const
+    {
+        const BRect plate = MobilePlate();
+        const float size = floorf(plate.Height() * 0.5f);
+        const float left = plate.left + ceilf(plate.Height() * 0.25f);
+        const float top = floorf((plate.top + plate.bottom - size) / 2);
+        return BRect(left, top, left + size, top + size);
+    }
+    BRect MobileReaderRect() const
+    {
+        const BRect plate = MobilePlate();
+        BFont font(be_bold_font);
+        font.SetSize(ceilf(be_plain_font->Size() * 0.85f));
+        const float width = ceilf(font.StringWidth("Reader") + plate.Height() * 0.6f);
+        const float inset = ceilf(plate.Height() * 0.18f);
+        return BRect(plate.right - inset - width, plate.top + inset, plate.right - inset, plate.bottom - inset);
+    }
+    void MouseDown(BPoint where) override
+    {
+        if (fMobile && fCertificateShown && MobileLockRect().InsetByCopy(-8, -8).Contains(where)) {
+            Window()->PostMessage(kShowCertificate);
+            return;
+        }
+        if (fMobile && fReaderShown && fReaderEnabled && MobileReaderRect().InsetByCopy(-4, -6).Contains(where)) {
+            Window()->PostMessage(kToggleReader);
+            return;
+        }
+        if (fMobile) {
+            TextView()->MakeFocus(true);
+            return;
+        }
+        BTextControl::MouseDown(where);
     }
     void SetButtonVisible(ToolButton* button, bool visible)
     {
@@ -433,8 +484,84 @@ public:
         Layout(true);
         Invalidate();
     }
+    // In the mobile view the field is a white plate sunk into the metal bar.
+    void SetMobile(bool mobile)
+    {
+        if (fMobile == mobile) return;
+        fMobile = mobile;
+        SetButtonVisible(fCertificate, fCertificateShown && !mobile);
+        SetButtonVisible(fReader, fReaderShown && !mobile);
+        ApplyMobileColors();
+        InvalidateLayout();
+        Invalidate();
+    }
+    void ApplyMobileColors()
+    {
+        const auto& skin = BMobileKit::CurrentSkin();
+        const rgb_color background = fMobile ? skin.fieldBackground : ui_color(B_DOCUMENT_BACKGROUND_COLOR);
+        const rgb_color text = fMobile ? skin.fieldText : ui_color(B_DOCUMENT_TEXT_COLOR);
+        if (fMobile) {
+            TextView()->SetViewColor(background);
+            TextView()->SetLowColor(background);
+        } else {
+            TextView()->SetViewUIColor(B_DOCUMENT_BACKGROUND_COLOR);
+            TextView()->SetLowUIColor(B_DOCUMENT_BACKGROUND_COLOR);
+        }
+        BFont font;
+        TextView()->GetFontAndColor(0, &font);
+        TextView()->SetFontAndColor(0, TextView()->TextLength(), &font, B_FONT_ALL, &text);
+        TextView()->SetFontAndColor(&font, B_FONT_ALL, &text);
+        TextView()->Invalidate();
+    }
+    BRect MobilePlate() const { return BMobileKit::VisibleRect(Bounds()); }
+    void MessageReceived(BMessage* message) override
+    {
+        if (message->what == B_COLORS_UPDATED && fMobile) ApplyMobileColors();
+        BTextControl::MessageReceived(message);
+    }
     void Draw(BRect update) override
     {
+        if (fMobile) {
+            const auto& skin = BMobileKit::CurrentSkin();
+            if (TextView()->ViewColor() != skin.fieldBackground) ApplyMobileColors();
+            BMobileKit::FillBarBehind(this, update);
+            const BRect plate = MobilePlate();
+            const float radius = ceilf(plate.Height() / 5);
+            BMobileKit::DrawPlate(this, plate, radius, skin.fieldBackground, skin.fieldBackground);
+            // Sunk into the metal: a shadow along the inside of its top.
+            PushState();
+            SetDrawingMode(B_OP_ALPHA);
+            SetHighColor(0, 0, 0, 46);
+            StrokeLine(BPoint(plate.left + radius, plate.top + 1), BPoint(plate.right - radius, plate.top + 1));
+            if (TextView()->IsFocus() && Window() && Window()->IsActive()) {
+                rgb_color focus = skin.displayActive;
+                focus.alpha = 160;
+                SetHighColor(focus);
+                SetPenSize(2);
+                StrokeRoundRect(plate.InsetByCopy(1, 1), radius, radius);
+            }
+            PopState();
+            if (fCertificateShown)
+                BMobileKit::DrawGlyph(this, BMobileKit::B_GLYPH_LOCK, MobileLockRect(),
+                    fCertificateVerified ? skin.fieldPlaceholder : rgb_color{214, 128, 0, 255});
+            if (fReaderShown) {
+                // Safari's purple Reader pill.
+                const BRect pill = MobileReaderRect();
+                rgb_color top = fReaderActive ? rgb_color{96, 56, 170, 255} : rgb_color{170, 140, 226, 255};
+                rgb_color bottom = fReaderActive ? rgb_color{64, 30, 130, 255} : rgb_color{118, 80, 196, 255};
+                if (!fReaderEnabled) top.alpha = bottom.alpha = 110;
+                PushState();
+                SetDrawingMode(B_OP_ALPHA);
+                SetBlendingMode(B_CONSTANT_ALPHA, B_ALPHA_OVERLAY);
+                BMobileKit::FillGradient(this, pill, top, bottom, pill.Height() / 2);
+                BFont font(be_bold_font);
+                font.SetSize(ceilf(be_plain_font->Size() * 0.85f));
+                SetFont(&font);
+                BMobileKit::DrawCentered(this, "Reader", pill, rgb_color{255, 255, 255, 255}, rgb_color{0, 0, 0, 90});
+                PopState();
+            }
+            return;
+        }
         if (!HasButton(fCertificate) && !HasButton(fReader)) { BTextControl::Draw(update); return; }
         // BTextControl normally outlines only its text view. Keep the outline
         // around the text view and both embedded buttons.
@@ -448,7 +575,22 @@ public:
     void DoLayout() override
     {
         BTextControl::DoLayout();
-        fFullTextFrame = TextView()->Frame();
+        if (fMobile) {
+            // The text sits in the middle of the plate, the lock and the
+            // Reader button inside its ends.
+            const BRect plate = MobilePlate();
+            font_height height;
+            TextView()->GetFontHeight(&height);
+            const float line = ceilf(height.ascent + height.descent + height.leading) + 4;
+            BRect text(plate.left + ceilf(plate.Height() / 4), floorf((plate.top + plate.bottom - line) / 2),
+                plate.right - ceilf(plate.Height() / 4), floorf((plate.top + plate.bottom + line) / 2));
+            if (fCertificateShown) text.left = MobileLockRect().right + 6;
+            if (fReaderShown) text.right = MobileReaderRect().left - 6;
+            TextView()->MoveTo(text.LeftTop());
+            TextView()->ResizeTo(std::max(1.0f, text.Width()), text.Height());
+            TextView()->SetTextRect(TextView()->Bounds());
+            return;
+        } else fFullTextFrame = TextView()->Frame();
         constexpr float width = 28;
         BRect text = fFullTextFrame;
         if (HasButton(fCertificate)) {
@@ -482,6 +624,9 @@ private:
     ToolButton* fCertificate = nullptr;
     ToolButton* fReader = nullptr;
     BRect fFullTextFrame;
+    bool fMobile = false;
+    bool fCertificateShown = false, fCertificateVerified = false;
+    bool fReaderShown = false, fReaderActive = false, fReaderEnabled = false;
 #endif
 };
 
@@ -621,12 +766,20 @@ private:
     }
 };
 #endif
-struct WindowEntry { BMessenger window; uint64 key; std::string title; };
+struct WindowEntry { BMessenger window; uint64 key; std::string title; bool privateBrowsing = false; };
 std::mutex sWindowListLock;
 std::vector<WindowEntry> sWindowList;
 std::atomic<int32> sOpenWindows { 0 };
 }
 int32 BrowserWindow::CountOpenWindows() { return sOpenWindows.load(); }
+void BrowserWindow::SetAddressMobile(bool mobile) { static_cast<AddressControl*>(fAddress)->SetMobile(mobile); }
+BMessenger BrowserWindow::OtherWindow(bool privateBrowsing) const
+{
+    std::lock_guard lock(sWindowListLock);
+    for (auto entry = sWindowList.rbegin(); entry != sWindowList.rend(); ++entry)
+        if (entry->key != fKey && entry->privateBrowsing == privateBrowsing && entry->window.IsValid()) return entry->window;
+    return { };
+}
 
 #if SUMMIT_MODERN_WEBKIT
 // View › Caret Browsing, Reduce Motion and Increase Contrast, and the
@@ -765,7 +918,7 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
     ++sOpenWindows;
     {
         std::lock_guard lock(sWindowListLock);
-        sWindowList.push_back({BMessenger(this), fKey, "Summit"});
+        sWindowList.push_back({BMessenger(this), fKey, "Summit", fPrivate});
     }
 #if SUMMIT_MODERN_WEBKIT
     McpRegisterWindow({BMessenger(this), fKey, fPrivate});
@@ -1095,13 +1248,7 @@ BrowserWindow::BrowserWindow(std::shared_ptr<SharedProfile> profile, std::string
         .Add(fFindBar).Add(statusLine);
     fLayout = static_cast<BGroupLayout*>(GetLayout());
     fStatusLine = statusLine;
-    auto* mobileBar = new BMobileKit::Bar("mobile-browser");
-    mobileBar->AddAction("mobile-back", "Back", new BMessage(kBack));
-    mobileBar->AddAction("mobile-tabs", "Tabs", new BMessage('mTab'));
-    mobileBar->AddAction("mobile-more", "More", new BMessage('mMor'));
-    fMobileBar = mobileBar;
-    fMobileBar->Hide();
-    fLayout->AddView(fMobileBar);
+    BuildMobileChrome();
 #if SUMMIT_MODERN_WEBKIT
     fNoticeBar->Hide();
     fDock->Hide();
@@ -1740,9 +1887,7 @@ void BrowserWindow::AttachPageView(Tab& tab, BWebKitView* webView, bool extensio
     if (!extensionPage) webView->SetPasskeyRequests(true);
     // navigator.share() shows the share menu (#153).
     if (!extensionPage) webView->SetShareRequests(true);
-    webView->SetCustomUserAgent(fShared->Read([](const Profile& profile) {
-        return FindUserAgentPreset(profile.userAgent).agent;
-    }));
+    webView->SetCustomUserAgent(NormalUserAgent(tab));
 }
 
 std::shared_ptr<BWebKitContext> BrowserWindow::ContainerContext(uint32 container) const
@@ -2009,6 +2154,9 @@ void BrowserWindow::SelectTab(int64 id, bool forClose)
         if (!forClose) ++fSelectionGeneration;
 #endif
         if (fSelected != id) {
+            // The switcher shows the page as it was last seen.
+            if (fMobile)
+                if (auto* previous = FindTabByID(fSelected)) CaptureTabPicture(*previous);
             fBackgroundInsert = -1;
 #if SUMMIT_MODERN_WEBKIT
             fHoveredLink.clear();
@@ -2550,6 +2698,7 @@ void BrowserWindow::FrameResized(float width, float height)
 {
     BrowserWindowBase::FrameResized(width, height);
     HideSuggestions();
+    if (fMobile) LayoutMobileChrome();
 #if SUMMIT_MODERN_WEBKIT
     PlaceDockedDeveloperTools();
     CloseAutoFill();
@@ -3566,6 +3715,7 @@ void BrowserWindow::RefreshChrome()
         fBack->SetEnabled(tab->back || (tab->errorView && tab->errorBack) || tab->safetyView); fForward->SetEnabled(tab->forward);
         fReload->SetIcon(tab->loading ? Icon::Stop : Icon::Reload);
         fProgress->SetProgress(tab->loading ? std::max(0.03f, tab->progress) : 0);
+        if (fMobile) RefreshMobileChrome();
         // The Haiku look shows progress in the status bar, like WebPositive.
         const bool showProgress = fInterfaceStyle == "haiku" && tab->loading;
         if (showProgress) {
@@ -3658,10 +3808,9 @@ void BrowserWindow::ProfileChanged(const BMessage& message)
         }
 #endif
 #if SUMMIT_MODERN_WEBKIT
-        const char* agent = fShared->Read([](const Profile& profile) { return FindUserAgentPreset(profile.userAgent).agent; });
         // Tabs in Responsive Design Mode keep their device's agent.
         for (auto& tab : fTabs)
-            if (!ResponsiveUserAgent(tab.responsive)) tab.view->SetCustomUserAgent(agent);
+            if (!ResponsiveUserAgent(tab.responsive)) tab.view->SetCustomUserAgent(NormalUserAgent(tab));
 #endif
         const auto [bar, style] = fShared->Read([](const Profile& profile) {
             return std::make_pair(profile.showBookmarksBar, profile.interfaceStyle);
@@ -3678,6 +3827,10 @@ void BrowserWindow::ProfileChanged(const BMessage& message)
             RefreshChrome();
         }
     }
+    // The mobile lists show bookmarks, the Reading List and history as they are now.
+    if (fMobile && fMobileUI.panel == 2
+        && (changes & (SharedProfile::kBookmarksChanged | SharedProfile::kReadingListChanged | SharedProfile::kHistoryChanged)))
+        RefreshMobileList();
 }
 
 void BrowserWindow::RequestNewWindow(const std::vector<std::string>& urls, bool privateWindow)
@@ -4027,45 +4180,6 @@ bool BrowserWindow::SaveSharedFiles(const BMessage& share)
     return saved > 0;
 }
 #endif
-
-void BrowserWindow::SetMobileView(bool mobile)
-{
-    if (mobile == fMobile) return;
-    if (fMobileSheet.IsValid()) fMobileSheet.SendMessage(B_QUIT_REQUESTED);
-#if SUMMIT_MODERN_WEBKIT
-    ExitPageFullScreen();
-#endif
-    fMobile = mobile;
-    fSuggestions->Hide();
-    // Move the omnibox itself so its URL, selection and submit target survive.
-    if (mobile) {
-        fDesktopFrame = Frame();
-        fAddressIndex = fToolbar->GroupLayout()->IndexOfView(fAddress);
-        fToolbar->GroupLayout()->RemoveView(fAddress);
-        fMobileBar->GroupLayout()->AddView(1, fAddress, 3);
-        fAddress->SetExplicitMinSize(BSize(100, BMobileKit::TargetSize()));
-        fAddress->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
-        // These hides have matching shows, including for desktop chrome
-        // already hidden by a popup or the user's bookmarks preference.
-        for (BView* view : std::initializer_list<BView*>{fDesktopMenu, fToolbar, fBookmarksBar, fTabStrip, fStatusLine})
-            view->Hide();
-        fMobileBar->Show();
-        SetSizeLimits(280, 10000, 150, 10000);
-    } else {
-        fMobileBar->Hide();
-        fMobileBar->GroupLayout()->RemoveView(fAddress);
-        fToolbar->GroupLayout()->AddView(fAddressIndex, fAddress, 3);
-        fAddress->SetExplicitMinSize(BSize(fPopup ? 120 : 240, 30));
-        for (BView* view : std::initializer_list<BView*>{fDesktopMenu, fToolbar, fBookmarksBar, fTabStrip, fStatusLine})
-            view->Show();
-        bool showBookmarks = fBookmarksBarVisible && fWebApp.empty() && !fPopup;
-        if (showBookmarks && fBookmarksBar->IsHidden(fBookmarksBar)) fBookmarksBar->Show();
-        if (!showBookmarks && !fBookmarksBar->IsHidden(fBookmarksBar)) fBookmarksBar->Hide();
-        ApplyInterfaceStyle();
-        SetSizeLimits(fPopup ? 200 : fWebApp.empty() ? 760 : 320, 10000,
-            fPopup ? 150 : fWebApp.empty() ? 450 : 240, 10000);
-    }
-}
 
 void BrowserWindow::ApplyInterfaceStyle()
 {
@@ -5050,38 +5164,14 @@ void BrowserWindow::MessageReceived(BMessage* message)
     // Fraudulent and malicious website warnings (#150).
     if (SafeBrowsingMessage(*message)) return;
     if (ResponsiveMessage(*message)) return;
+#endif
+    if (MobileMessage(*message)) return;
+#if SUMMIT_MODERN_WEBKIT
     // Browser profiles (#157).
     if (ProfileMessage(*message)) return;
 #endif
     auto* tab = ActiveTab();
     switch (message->what) {
-        case BMobileKit::B_MOBILE_VIEW_CHANGED:
-            SetMobileView(message->GetBool("mobile", false));
-            break;
-        case 'mTab': case 'mMor': {
-            bool tabs = message->what == 'mTab';
-            auto* sheet = new BMobileKit::ActionSheet(this, tabs ? "Tabs" : "Browser actions");
-            sheet->AddAction("New tab", BMessage(kNewTab));
-            if (tabs) {
-                for (const Tab& item : fTabs) {
-                    BMessage select(kSelectTab);
-                    select.AddInt64("id", item.id);
-                    std::string label = item.ShownTitle();
-                    if (label.empty()) label = item.url.empty() ? "New tab" : item.url;
-                    if (item.id == fSelected) label = "✓  " + label;
-                    sheet->AddAction(label.c_str(), select);
-                }
-            } else {
-                sheet->AddAction("Close tab", BMessage(kCloseTab));
-                sheet->AddAction("Forward", BMessage(kForward));
-                sheet->AddAction("Reload", BMessage(kReload));
-                sheet->AddAction("Downloads", BMessage(kShowDownloads));
-                sheet->AddAction("Preferences…", BMessage(kShowPreferences));
-            }
-            fMobileSheet = BMessenger(sheet);
-            sheet->Open();
-            break;
-        }
         case B_GET_PROPERTY: {
             int32 index;
             BMessage specifier;
@@ -5195,6 +5285,7 @@ void BrowserWindow::MessageReceived(BMessage* message)
         }
         case kAddressFocusCheck:
             if (!fAddress->TextView()->IsFocus()) HideSuggestions();
+            if (fMobile) RefreshMobileEditing();
             break;
         case kSuggestionChosen: {
             const char* url = nullptr;
@@ -5218,8 +5309,13 @@ void BrowserWindow::MessageReceived(BMessage* message)
             // A new tab shows the home page; its address is selected, ready to type over.
             CreateTab(message->FindString("url", &url) == B_OK ? url : NewTabAddress(), true, nullptr, -1, 0, 0, 0,
                 message->GetUInt32("container", 0));
-            fAddress->MakeFocus();
-            fAddress->TextView()->SelectAll();
+            // On a phone a link opened from elsewhere is for reading, not
+            // for typing over: only a blank new tab brings the keyboard up.
+            if (!fMobile || !message->HasString("url")) {
+                fAddress->MakeFocus();
+                fAddress->TextView()->SelectAll();
+            } else if (auto* opened = ActiveTab()) opened->view->MakeFocus();
+            if (fMobile) RefreshMobileEditing();
             break;
         }
         case kNewWindow: RequestNewWindow({ }, false); break;
@@ -7290,8 +7386,16 @@ void BrowserWindow::ToggleDownloadsPanel(bool open)
     BRect anchor = fDownloadsButton->IsHidden(fDownloadsButton)
         ? BRect(Frame().right - 8, Frame().top + 8, Frame().right - 8, Frame().top + 8)
         : fDownloadsButton->ConvertToScreen(fDownloadsButton->Bounds());
+    float width = 0;
+    if (fMobile) {
+        // The width of the window, under its top bar.
+        const BRect frame = Frame();
+        const float top = fMobileUI.top->ConvertToScreen(fMobileUI.top->Bounds()).bottom;
+        anchor = BRect(frame.left, top, frame.right, top);
+        width = frame.Width();
+    }
     fDownloadsPanelMenus = std::make_shared<std::atomic<bool>>(false);
-    auto* panel = new DownloadsPanel(this, fPrivate, anchor, fDownloadsPanelMenus);
+    auto* panel = new DownloadsPanel(this, fPrivate, anchor, fDownloadsPanelMenus, width);
     fDownloadsPanel = BMessenger(panel);
     panel->Show();
 }

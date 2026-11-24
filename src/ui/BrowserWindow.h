@@ -36,6 +36,17 @@ class BMenuItem;
 class BMessageRunner;
 class BStringView;
 class BTextControl;
+class BCardView;
+class BBitmap;
+namespace BMobileKit {
+class MetalBar;
+class MetalButton;
+class SegmentedControl;
+class CardGrid;
+class TableView;
+class TitleView;
+class TabBar;
+}
 #if !SUMMIT_MODERN_WEBKIT
 class BWebDownload;
 #endif
@@ -300,6 +311,11 @@ private:
         } crashReport;
         // The page stopped answering input (#71).
         bool unresponsive = false, waitedForPage = false;
+        // Mobile view: a picture of the page for the tab switcher, taken when
+        // the tab was last on show, and whether the page asked for the
+        // desktop site (the desktop user agent) rather than the mobile one.
+        std::shared_ptr<BBitmap> picture;
+        bool desktopSite = false;
         // The page area says why the last page could not be loaded (#89):
         // the view, the address that failed and what the page and tab are
         // called, the load it is for, whether Back returns to the page
@@ -1131,8 +1147,69 @@ private:
     void SetMobileView(bool mobile);
     bool fMobile = false;
     BRect fDesktopFrame;
-    BGroupView* fMobileBar = nullptr;
     BMessenger fMobileSheet;
+    // The touch layout of air/OS Mobile (BrowserWindowMobile.cpp): metal bars
+    // above and below the page, the tab switcher, the bookmarks, reading list
+    // and history lists, and the bookmark editor.
+    struct MobileChrome {
+        BMobileKit::MetalBar* top = nullptr;
+        BMobileKit::MetalBar* bottom = nullptr;
+        BMobileKit::MetalButton *back = nullptr, *forward = nullptr, *action = nullptr, *bookmarks = nullptr,
+            *tabs = nullptr, *reload = nullptr, *cancel = nullptr, *newTab = nullptr;
+        // A tablet's row of tabs under the bar.
+        BMobileKit::TabBar* tabBar = nullptr;
+        BCardView* panels = nullptr;
+        // The tab switcher.
+        BView* tabsPanel = nullptr;
+        BMobileKit::SegmentedControl* tabMode = nullptr;
+        BMobileKit::CardGrid* grid = nullptr;
+        BMobileKit::MetalButton *closeAll = nullptr, *add = nullptr, *tabsDone = nullptr;
+        // Bookmarks, Reading List and History.
+        BView* listPanel = nullptr;
+        BMobileKit::MetalButton *listBack = nullptr, *listDone = nullptr, *edit = nullptr, *newFolder = nullptr;
+        BMobileKit::TitleView* listTitle = nullptr;
+        BMobileKit::TableView* table = nullptr;
+        BMobileKit::SegmentedControl* section = nullptr;
+        // Adding or editing a bookmark or folder.
+        BView* editPanel = nullptr;
+        BMobileKit::MetalButton *editCancel = nullptr, *editSave = nullptr;
+        BMobileKit::TitleView* editTitle = nullptr;
+        BTextControl *editName = nullptr, *editURL = nullptr;
+        BView* editURLLabel = nullptr;
+        BMobileKit::TableView* editFolders = nullptr;
+        // 0 the page, 1 the tab switcher, 2 the lists, 3 the editor.
+        int32 panel = 0;
+        // The panel the editor returns to.
+        int32 editReturn = 0;
+        // 0 bookmarks, 1 reading list, 2 history.
+        int32 listSection = 0;
+        // The bookmark folders opened, innermost last.
+        std::vector<int64> folders;
+        int32 editMode = 0;
+        int64 editID = 0, editFolder = 0;
+        bool compact = true, editingAddress = false;
+        // The tab switcher of a normal window shows the Private section (no
+        // private window is open yet).
+        bool privateShown = false;
+    } fMobileUI;
+    // The most recently opened other browser window that is (or is not) private.
+    BMessenger OtherWindow(bool privateBrowsing) const;
+    void SetAddressMobile(bool mobile);
+    void BuildMobileChrome();
+    void LayoutMobileChrome(bool forceCompact = false);
+    void RefreshMobileChrome();
+    void RefreshMobileEditing();
+    void RefreshMobileTabs();
+    void RefreshMobileList();
+    void ShowMobilePanel(int32 panel);
+    void ShowMobileActions();
+    void OpenMobileEditor(int32 mode, int64 id, int32 returnTo);
+    void SaveMobileEditor();
+    void CaptureTabPicture(Tab& tab);
+    void MobileToast(const char* text);
+    bool MobileMessage(BMessage& message);
+    // The user agent a tab's pages get, unless Responsive Design Mode gives it another.
+    const char* NormalUserAgent(const Tab& tab) const;
     BMenuBar* fDesktopMenu = nullptr;
     BView* fStatusLine = nullptr;
     int32 fAddressIndex = 0;

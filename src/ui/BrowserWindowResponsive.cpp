@@ -102,9 +102,7 @@ void BrowserWindow::ApplyResponsiveDesign(Tab& tab)
     const char* agent = ResponsiveUserAgent(tab.responsive);
     if (const std::string wanted = agent ? agent : ""; wanted != tab.responsiveAgent) {
         tab.responsiveAgent = wanted;
-        tab.view->SetCustomUserAgent(agent ? agent : fShared->Read([](const Profile& profile) {
-            return FindUserAgentPreset(profile.userAgent).agent;
-        }));
+        tab.view->SetCustomUserAgent(agent ? agent : NormalUserAgent(tab));
         // As Safari does: the page loads again as the device's browser would
         // be sent it (navigator.userAgent, and the server's own choice).
         if (tab.deferredURL.empty() && !tab.url.empty() && !tab.url.starts_with("summit:")
