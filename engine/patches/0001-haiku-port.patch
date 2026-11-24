@@ -24891,6 +24891,38 @@ index 43dc4f03966450fd070bab03a5ee20a2878330d2..a54912a31482f1658826bfc1475b5859
  #endif
      }
  }
+diff --git a/Source/WebCore/accessibility/AccessibilityNodeObject.cpp b/Source/WebCore/accessibility/AccessibilityNodeObject.cpp
+index 391c278d56c55ea9a48b2e8c6d9b5251fcbe63ec..648e4cf977ecbea051d1d8254f2039234e9f33df 100644
+--- a/Source/WebCore/accessibility/AccessibilityNodeObject.cpp
++++ b/Source/WebCore/accessibility/AccessibilityNodeObject.cpp
+@@ -3364,6 +3364,12 @@ String AccessibilityNodeObject::textForLabelElements(Vector<Ref<HTMLElement>>&&
+ #if PLATFORM(COCOA)
+         else if (RefPtr axLabel = dynamicDowncast<AccessibilityNodeObject>(*label); axLabel && axLabel->isNativeLabel())
+             appendNameToStringBuilder(result, axLabel->textAsLabelFor(*this));
++#elif PLATFORM(HAIKU)
++        // A native <label> that wraps its control names it from the label's own
++        // content, using the values of other embedded controls (accname 2E)
++        // rather than their names. Labels elsewhere keep the generic path.
++        else if (RefPtr axLabel = dynamicDowncast<AccessibilityNodeObject>(*label); axLabel && axLabel->isNativeLabel() && labelElement->contains(protect(node()).get()))
++            appendNameToStringBuilder(result, axLabel->textAsLabelFor(*this));
+ #endif
+         else
+             appendNameToStringBuilder(result, accessibleNameForNode(labelElement.get(), /* labelledByNode */ protect(node()), descendIntoContainers));
+@@ -3401,6 +3407,14 @@ void AccessibilityNodeObject::labelText(Vector<AccessibilityText>& textOrder) co
+         elementLabels.appendVector(WTF::compactMap(axLabels, [] (auto& axLabel) {
+             return RefPtr { dynamicDowncast<HTMLElement>(axLabel->element()) };
+         }));
++        // The labelled-by relation is a set with no order. Several native <label>s
++        // concatenate in DOM order (html-aam); aria-labelledby keeps its own order.
++        if (elementLabels.size() > 1 && !element->hasAttributeWithoutSynchronization(aria_labelledbyAttr)
++            && !element->hasAttributeWithoutSynchronization(aria_labeledbyAttr)) {
++            std::ranges::sort(elementLabels, [](auto& a, auto& b) {
++                return is_lt(treeOrder<ComposedTree>(a.get(), b.get()));
++            });
++        }
+     }
+     // Labels sourced from aria-labelledby are an accname relation traversal, so the text of the
+     // whole referenced subtree counts, containers included. Native <label> elements keep the
 diff --git a/Source/WebCore/accessibility/AccessibilityObject.cpp b/Source/WebCore/accessibility/AccessibilityObject.cpp
 index eaf3aee12b98b01a9d97a71cecdee1af09b66458..403ac738b6839c419959fe55310cc6f2b951eaf8 100644
 --- a/Source/WebCore/accessibility/AccessibilityObject.cpp
