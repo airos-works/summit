@@ -13839,3 +13839,28 @@ widths on both builds. 20 relayouts of 2,000 borderless inline-blocks: 468 →
 Speedometer 3.1: 12.03 against 12.00 (three runs each, one slow run per
 build), Preact-Complex-DOM +2.7 %, Svelte +0.3 %, CodeMirror −2.0 %: within
 spread. WPT css/css-backgrounds and css-position: no regressions.
+
+### #289: cheaper containing-block checks
+
+RenderElement::mayContainOutOfFlowPositionedObjects first rejects layout and
+paint containment on style bits alone: those come only from `contain` (the
+container-type part of usedContain() adds style and size containment) and
+from `content-visibility: hidden | auto`. Only then does it fetch the element
+and run ContainmentChecker's display rules. The pending style passed by the
+caller is used as before; transform, filter, SVG, view-transition, position
+and will-change rules are unchanged.
+
+600 absolutely positioned boxes under 40 static ancestors, 40 relayouts:
+205 → 172 ms (−16.2 %); 2,000 inline-blocks: 431.5 → 434 ms (no containing
+block walks there). Speedometer 3.1: 12.17 → 12.27, Preact-Complex-DOM
+−4.5 %, other complex-DOM suites within ±1.5 %: within spread.
+WPT css/css-contain (833 files, including content-visibility) and
+css/css-position: no regressions.
+
+The WPT checks for #281–#289 were one pass over 5,284 tests (svg types,
+shapes, geometry, coordinate systems; cssom-view; html/canvas/element;
+css-contain; css-backgrounds; css-position; dom/nodes; shadow-dom;
+custom-elements; html/syntax/parsing; domparsing) on four fleet VMs, with a
+build holding all of those changes, against CI 1123: seven differences, all
+crashes of the baseline run that passed or failed the same way in the
+candidate.
