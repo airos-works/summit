@@ -29656,7 +29656,7 @@ index 25d1a39c50333e9d5c5f48936cf1d9bad22d09d8..6025a0f1ed9ea0e138b59a0c6a8870b4
      }
  
 diff --git a/Source/WebCore/dom/Document.cpp b/Source/WebCore/dom/Document.cpp
-index 79f2bcbc106c7c43e8a971816c183dcc00610b83..d937e8cd1344159d4eb7796bbde5553ca26a2706 100644
+index 79f2bcbc106c7c43e8a971816c183dcc00610b83..b3b82d3c071149710e68f49fee16243df8811140 100644
 --- a/Source/WebCore/dom/Document.cpp
 +++ b/Source/WebCore/dom/Document.cpp
 @@ -384,6 +384,7 @@
@@ -30129,7 +30129,22 @@ index 79f2bcbc106c7c43e8a971816c183dcc00610b83..d937e8cd1344159d4eb7796bbde5553c
      for (auto element : copyToVectorOf<Ref<Element>>(m_documentSuspensionCallbackElements))
          element->resumeFromDocumentSuspension();
  
-@@ -9181,6 +9422,8 @@ void Document::dispatchPageswapEvent(CanTriggerCrossDocumentViewTransition canTr
+@@ -9092,6 +9333,14 @@ Variant<Document::SkipTransition, Vector<AtomString>> Document::resolveViewTrans
+     if (hidden())
+         return SkipTransition { };
+ 
++#if PLATFORM(HAIKU)
++    // A view transition is drawn by compositing layers (setActiveViewTransition
++    // enters compositing mode). A page painted without compositing asks a
++    // renderer that has no layers for them and the web process stops (#302).
++    if (!settings().acceleratedCompositingEnabled())
++        return SkipTransition { };
++#endif
++
+     RefPtr rule = protect(styleScope().resolver())->viewTransitionRule();
+     if (rule && rule->computedNavigation() == ViewTransitionNavigation::Auto)
+         return rule->types();
+@@ -9181,6 +9430,8 @@ void Document::dispatchPageswapEvent(CanTriggerCrossDocumentViewTransition canTr
      // The navigation cannot wait, so capture now.
      if (oldViewTransition && oldViewTransition->phase() != ViewTransitionPhase::Done) {
          oldViewTransition->setupViewTransition();
@@ -30138,7 +30153,7 @@ index 79f2bcbc106c7c43e8a971816c183dcc00610b83..d937e8cd1344159d4eb7796bbde5553c
  
          // FIXME: This should set the params on the new Document, but it doesn't exist yet.
          // Store it on the old, and we'll call transferViewTransitionParams soon.
-@@ -10669,21 +10912,54 @@ void Document::removeIntersectionObserver(IntersectionObserver& observer)
+@@ -10669,21 +10920,54 @@ void Document::removeIntersectionObserver(IntersectionObserver& observer)
  static void updateAndNotifyIntersectionObservers(const Vector<WeakPtr<IntersectionObserver>>& intersectionObservers, const Frame& hostFrame)
  {
      Vector<WeakPtr<IntersectionObserver>> intersectionObserversWithPendingNotifications;
@@ -30193,7 +30208,24 @@ index 79f2bcbc106c7c43e8a971816c183dcc00610b83..d937e8cd1344159d4eb7796bbde5553c
  }
  
  void Document::updateRemoteIntersectionObservers()
-@@ -12487,7 +12763,7 @@ void Document::performPendingViewTransitions()
+@@ -12463,6 +12747,16 @@ RefPtr<ViewTransition> Document::startViewTransition(StartViewTransitionCallback
+         return viewTransition;
+     }
+ 
++#if PLATFORM(HAIKU)
++    // Without compositing there is nothing to draw the transition with (see
++    // resolveViewTransitionRule()): the update callback still runs and the
++    // page shows the new state at once, as if the transition were skipped.
++    if (!settings().acceleratedCompositingEnabled()) {
++        viewTransition->skipViewTransition(Exception { ExceptionCode::InvalidStateError, "View transition was skipped because the page is painted without compositing."_s });
++        return viewTransition;
++    }
++#endif
++
+     if (RefPtr activeViewTransition = m_activeViewTransition)
+         activeViewTransition->skipViewTransition(Exception { ExceptionCode::AbortError, "Old view transition aborted by new view transition."_s });
+ 
+@@ -12487,7 +12781,7 @@ void Document::performPendingViewTransitions()
      else if (activeViewTransition->phase() == ViewTransitionPhase::Animating)
          activeViewTransition->handleTransitionFrame();
  
@@ -30202,7 +30234,7 @@ index 79f2bcbc106c7c43e8a971816c183dcc00610b83..d937e8cd1344159d4eb7796bbde5553c
          scheduleRenderingUpdate(RenderingUpdateStep::PerformPendingViewTransitions);
  }
  
-@@ -12670,7 +12946,10 @@ void Document::updateCachedSetInnerHTML(const String& sourceString, ContainerNod
+@@ -12670,7 +12964,10 @@ void Document::updateCachedSetInnerHTML(const String& sourceString, ContainerNod
  {
      auto& cache = cachedSetInnerHTML();
  
@@ -221121,6 +221153,26 @@ index 57163f65873e5a481e5ef5a4ec3beec4b40b7cea..e25b422d16049f5343d2f04c03e42428
      bool m_forceFrameSync { false };
      bool m_compositionRequired { false };
  #if ENABLE(SCROLLING_THREAD)
+diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/NonCompositedFrameRenderer.h b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/NonCompositedFrameRenderer.h
+index eb5f426f394dfc94dc2a52d37a497b69e05e6b58..3acc6c59661b5299e75359948c346cf6a274bd7a 100644
+--- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/NonCompositedFrameRenderer.h
++++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/NonCompositedFrameRenderer.h
+@@ -80,6 +80,15 @@ private:
+ 
+     void releaseMemory(WTF::Critical) override;
+ 
++#if PLATFORM(HAIKU)
++    // Page overlays (find-in-page, the inspector's highlight) make layers
++    // whatever the page composites: without a factory they are plain layers
++    // nobody draws, instead of stopping the process (#302). A root layer
++    // still asserts: WebCore must not composite a page painted without it.
++    WebCore::GraphicsLayerFactory* graphicsLayerFactory() override { return nullptr; }
++    void setViewOverlayRootLayer(WebCore::GraphicsLayer*) override { }
++#endif
++
+     const WeakRef<WebPage> m_webPage;
+     const Ref<AcceleratedSurface> m_surface;
+     std::unique_ptr<WebCore::GLContext> m_context;
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp
 index c238029ad9c99c5028ea7e456520af85d1d85532..f02c24bc55297cbf499a9a255f80f763400f967e 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp

@@ -185,6 +185,18 @@ llvmpipe composites the same burst at 55-60 frames a second (2x, 4 cores),
 as fast as painting without layers, and stays composited: the wpt and
 reftest kits run on it.
 
+A page painted without compositing has no layers, and the non-composited
+renderer asserts when WebCore asks it for any (`FrameRenderer.h`), so nothing
+may enter compositing mode there. View transitions did: `startViewTransition()`
+switched the document to compositing mode and the web process stopped
+(YouTube on an arm64 VM, #302). Without accelerated compositing a transition is
+now skipped, as for a hidden document (`Document::startViewTransition()` and
+`resolveViewTransitionRule()`, which also covers cross-document transitions):
+the update callback runs, `ready` rejects with InvalidStateError and the page
+shows its new state at once. Page overlays (the inspector's highlight) get no
+layer factory and their view layer is ignored instead of asserting; they do
+not draw there. Find in page draws no overlay on Haiku.
+
 ## What the compositor leaves out or keeps (Haiku)
 
 The sections above describe the first, main-thread design. Today the web
