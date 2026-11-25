@@ -14020,3 +14020,41 @@ the filter, every walk direction with SKIP/REJECT, NodeIterator, a filter
 from a removed iframe's realm) gave identical results. A page that starts
 and ends workers (nested, closing themselves, terminated mid-work) ran
 without problems on the TLS build.
+
+### #293: allowed reads of another window
+
+A window's checked getters and its uncached property lookups ask
+BindingSecurity whether the calling realm may access it. A read of the
+caller's own window is answered inline (the lexical global object is the
+target), so the out-of-line check runs for another frame's window, another
+realm's, and every lookup through `JSDOMWindow::getOwnPropertySlot`, which
+1Password's content scripts cause. On the success path the check protected
+the target document, both documents' SecurityOrigins (atomic reference
+counts) and each origin's SecurityOriginPolicy inside
+`SecurityContext::securityOrigin()` (atomic again), the active window and the
+target window, which is only used to format the message of a denial. It now
+compares the two origins first with nothing protected: the comparison runs
+no script and reports nothing. Denials, documents without an origin and the
+template-document host case continue on the unchanged path, which protects
+what it uses and makes the same message.
+
+In a 1Password TodoMVC-jQuery profile (same build, same seed), the check and
+the calls it makes (`shouldAllowAccessToDOMWindow`,
+`LocalDOMWindow::document`, the origin lookups, `isSameOriginDomain`) went
+from 537 samples (7.7 % of the web process main thread) to 257 (3.4 %). In
+micro pages the change is within run-to-run spread: a same-origin frame's
+`length` 20 → 22 ns and `document` 25 → 27 ns per read, an isolated world's
+(a content script's) reads 74 → 72 ns (`window.innerWidth`) and 21 → 22 ns
+(a frame's `length`); a miss on a frame's window is 10 or 300 ns depending on
+whether the JIT caches it, in both builds.
+TodoMVC-jQuery with 1Password (4 ABBA rounds): 2.83 → 2.85; Sync per step
+70/151/83 → 69/154/85 ms, within spread.
+
+A differential page (`win293.html`: the page's own window, a same-origin and
+a cross-origin frame (another port), sandboxed opaque frames with and without
+allow-same-origin, a frame removed while its window is kept, a frame
+navigated cross-origin and back with the old window kept, about:blank,
+`document.domain`, a window from `window.open`, a cross-origin frame's
+`contentDocument` and `frameElement`, cross-origin writes, defineProperty,
+getOwnPropertyNames and getPrototypeOf) gave identical values and exception
+messages, and the console logged the same "Blocked a frame" message.

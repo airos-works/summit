@@ -26767,6 +26767,70 @@ index 585bc6ac3d615a7fe1dc7fea426f7679b3d5cbee..51d6efb025cb91a10b248b0d29773dc0
      JSC::Weak<JSDOMGlobalObject> m_globalObject;
  
      class WEBCORE_EXPORT WeakOwner : public JSC::WeakHandleOwner {
+diff --git a/Source/WebCore/bindings/js/JSDOMBindingSecurity.cpp b/Source/WebCore/bindings/js/JSDOMBindingSecurity.cpp
+index 3d502e0f9ca0f63faf736a1de0d8157eae479401..90094ec0637aad90578e125850fb726824b19986 100644
+--- a/Source/WebCore/bindings/js/JSDOMBindingSecurity.cpp
++++ b/Source/WebCore/bindings/js/JSDOMBindingSecurity.cpp
+@@ -33,6 +33,7 @@
+ #include "NodeDocument.h"
+ #include "RemoteDOMWindow.h"
+ #include "SecurityOrigin.h"
++#include "SecurityOriginPolicy.h"
+ #include <JavaScriptCore/TopExceptionScope.h>
+ #include <wtf/text/MakeString.h>
+ #include <wtf/text/WTFString.h>
+@@ -105,6 +106,14 @@ static inline bool canAccessFrame(JSC::JSGlobalObject* lexicalGlobalObject, Fram
+     return canAccessTargetOrigin(lexicalGlobalObject, protect(*targetFrame->frameDocumentSecurityOrigin()), protect(targetFrame->window()), reportingOption);
+ }
+ 
++#if PLATFORM(HAIKU)
++static inline SecurityOrigin* securityOriginWithoutProtecting(const Document& document)
++{
++    SUPPRESS_UNCOUNTED_LOCAL auto* policy = document.securityOriginPolicy();
++    return policy ? &policy->origin() : nullptr;
++}
++#endif
++
+ static inline bool canAccessDocument(JSC::JSGlobalObject* lexicalGlobalObject, Document* targetDocument, SecurityReportingOption reportingOption)
+ {
+     if (!targetDocument)
+@@ -113,6 +122,23 @@ static inline bool canAccessDocument(JSC::JSGlobalObject* lexicalGlobalObject, D
+     if (auto* templateHost = targetDocument->templateDocumentHost())
+         targetDocument = templateHost;
+ 
++#if PLATFORM(HAIKU)
++    // Every property read on a window (an isolated world's, a frame's) asks
++    // this, and nearly always the answer is yes. Make the same origin check
++    // first with nothing protected: it runs no script and reports nothing,
++    // so nothing can go away under it. Each protect() here was an atomic
++    // reference count (origins and their policies), and the target window
++    // is only needed for the message of a denial (#293). Denials, and
++    // documents without an origin, take the path below unchanged.
++    {
++        SUPPRESS_UNCOUNTED_LOCAL auto* activeDocument = activeDOMWindow(*lexicalGlobalObject).document();
++        SUPPRESS_UNCOUNTED_LOCAL auto* activeOrigin = activeDocument ? securityOriginWithoutProtecting(*activeDocument) : nullptr;
++        SUPPRESS_UNCOUNTED_LOCAL auto* targetOrigin = securityOriginWithoutProtecting(*targetDocument);
++        if (activeOrigin && targetOrigin && activeOrigin->isSameOriginDomain(*targetOrigin))
++            return true;
++    }
++    RefPtr protectedTargetDocument = targetDocument;
++#endif
+     return canAccessTargetOrigin(lexicalGlobalObject, protect(targetDocument->securityOrigin()), protect(targetDocument->window()), reportingOption);
+ }
+ 
+@@ -144,7 +170,12 @@ bool BindingSecurity::shouldAllowAccessToDOMWindow(JSGlobalObject& lexicalGlobal
+ 
+ bool BindingSecurity::shouldAllowAccessToDOMWindow(JSC::JSGlobalObject* lexicalGlobalObject, LocalDOMWindow& target, SecurityReportingOption reportingOption)
+ {
++#if PLATFORM(HAIKU)
++    // canAccessDocument() protects the document itself where it can run code.
++    return canAccessDocument(lexicalGlobalObject, target.document(), reportingOption);
++#else
+     return canAccessDocument(lexicalGlobalObject, protect(target.document()), reportingOption);
++#endif
+ }
+ 
+ bool BindingSecurity::shouldAllowAccessToDOMWindow(JSC::JSGlobalObject* lexicalGlobalObject, LocalDOMWindow* target, SecurityReportingOption reportingOption)
 diff --git a/Source/WebCore/bindings/js/ScriptController.cpp b/Source/WebCore/bindings/js/ScriptController.cpp
 index 7a84d14d26456ba43f25368f1f5c492aed49416b..4c1031ea9451a24734b415160eebc8fc92e2cdb1 100644
 --- a/Source/WebCore/bindings/js/ScriptController.cpp
