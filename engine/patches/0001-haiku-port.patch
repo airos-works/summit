@@ -1002,6 +1002,37 @@ index d28d762587ad6b3fd4985365905b87cb781917e4..1517de71a7f7f659b3166e26f290f898
  
      promise->fulfill(vm, result.value());
      RELEASE_AND_RETURN(scope, promise);
+diff --git a/Source/JavaScriptCore/runtime/JSONObject.cpp b/Source/JavaScriptCore/runtime/JSONObject.cpp
+index a1d69a4f717d8b483317dc5efe70ed5bd9365ca3..5781317c511fedc1adc1f59b61df9c01a94eeb02 100644
+--- a/Source/JavaScriptCore/runtime/JSONObject.cpp
++++ b/Source/JavaScriptCore/runtime/JSONObject.cpp
+@@ -1468,8 +1468,10 @@ void FastStringifier<CharType, bufferMode>::append(JSValue value)
+                 // It's possible the UTF-16 string is actually Latin-1. We try to avoid that but bailing out here is _way_ more expensive if it does sometimes happen.
+                 bool success = WTF::appendEscapedJSONStringContent(output, string.data.span16());
+                 if (!success) [[unlikely]] {
++                    // Summit (#287): the dynamic Latin-1 pass reports a late 16-bit string too, so
++                    // the caller can retry with the UTF-16 fast stringifier instead of the generic one.
+                     if constexpr (bufferMode == BufferMode::DynamicBuffer)
+-                        recordFailure(FailureReason::Unknown, "16-bit string, "_s);
++                        recordFailure(FailureReason::Found16BitLate, "16-bit string, "_s);
+                     else
+                         recordFailure(m_length < (m_capacity / 2) ? FailureReason::Found16BitEarly : FailureReason::Found16BitLate, "16-bit string, "_s);
+                     return;
+@@ -1866,6 +1868,14 @@ static NEVER_INLINE String stringify(JSGlobalObject& globalObject, JSValue value
+             if (String result = FastStringifier<Latin1Character, BufferMode::DynamicBuffer>::stringify(globalObject, value, replacer, space, failureReason); !result.isNull())
+                 return result;
+         }
++        // Summit (#287): a 16-bit string found late in a Latin-1 pass used to send the whole
++        // operation to the generic Stringifier, which costs several fast passes. The output so
++        // far is mostly written, so the UTF-16 retry goes straight to the growable buffer.
++        if (failureReason == FailureReason::Found16BitLate) {
++            failureReason = std::nullopt;
++            if (String result = FastStringifier<char16_t, BufferMode::DynamicBuffer>::stringify(globalObject, value, replacer, space, failureReason); !result.isNull())
++                return result;
++        }
+     }
+     String result = Stringifier::stringify(globalObject, value, replacer, space);
+ #if FAST_STRINGIFY_LOG_USAGE
 diff --git a/Source/JavaScriptCore/runtime/MachineContext.h b/Source/JavaScriptCore/runtime/MachineContext.h
 index 2ac8b24f00e624acb564a0e11fd2437b5f02a99c..94578295634cfe05af20ee169477506c530a3c81 100644
 --- a/Source/JavaScriptCore/runtime/MachineContext.h

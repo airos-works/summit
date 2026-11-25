@@ -13797,3 +13797,26 @@ CodeMirror's Long and Highlight steps did not move measurably (+1.5 %, +0.3 %):
 the geometry read is a small part of their measurement routine.
 Full Speedometer 3.1 within spread (12.12 against 11.86 over three runs each
 with one slow run per build). WPT css/cssom-view: no regressions.
+
+### #287: JSON.stringify with a late non-Latin-1 string
+
+JSC's stringify tries a Latin-1 FastStringifier first. A 16-bit string in the
+first half of its buffer restarted the fast path in UTF-16; one later on, or in
+the growable-buffer pass, sent the call to the generic Stringifier, which is
+several times slower. Both late cases now retry in the UTF-16 fast stringifier
+with the growable buffer. The fast path still bails out on anything observable
+(toJSON, getters, proxies, replacers), so results are unchanged: a page that
+compares the fast result with the generic one (forced with an identity
+replacer) for late and early 16-bit strings, lone surrogates, escapes, U+2028,
+key order, toJSON, getters, sparse arrays, deep nesting, 20,000-character
+strings, 5,000-element arrays and indentation gave identical output on both
+builds, and cycles still throw a TypeError.
+
+2,000 stringifications of 100 todo objects: one non-Latin-1 character in the
+last title 87.8 → 52.3 ms (−40 %); non-Latin-1 in the first title 22.5 →
+21.5 ms; Latin-1 only 22.5 → 22.3 ms. Speedometer's vanilla TodoMVC stores do
+not reach the late case on Summit: their titles are Japanese and Russian
+(`getTodoText("ja"/"ru")`), so the Latin-1 pass fails on the first title and
+the restart costs only that prefix; their steps and the full score were within
+run-to-run spread. In-place widening of the Latin-1 writer (no restart at all)
+would save only that first title here and was not done.
