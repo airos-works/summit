@@ -13718,3 +13718,42 @@ seven geometry attributes on 500 rectangles and circles 40 times: 115.3 ms →
 run-to-run spread (12.20 against 12.25 without one run that was slow in every
 suite). WPT svg/types, shapes, geometry and coordinate-systems (with the
 combined pass described under #289): no regressions.
+
+### #284: innerHTML reuses the unchanged leading items
+
+WebKit's innerHTML cache cloned the previous result only when the old string
+was a prefix of the new one, and only for strings up to 40,000 code units.
+TodoMVC-jQuery rewrites its whole list on every change. With the template's
+indentation, 100 items come to about 45,000 code units, so the list was never
+cached, and a changed item in the middle would not have matched anyway.
+
+Now the fast parser records where each top-level child ends (element or text)
+for every string it parses. The record is keyed by the source buffer: a
+string is always fast-parsed right before it is cached, so the cached
+string's record is current. When a new string for the same context element
+differs from the cached one partway, the cached container's children that end
+in the common leading part, up to the last element boundary, are cloned and
+only the rest is parsed. Text and entities never straddle the reused part,
+and the suffix starts at top level, so the result equals a full parse. A
+child that contains a select, an option, a file input or an input with a
+dirty value or checkedness ends the reuse: cloning copies that state, and
+markup does not express it. The cache now also takes a shorter string for the
+same container (a list that lost items), and holds strings up to 262,144 code
+units. It keeps a reference to the page's own string, so the cost is one
+string per document plus four small offset records.
+
+A differential page assigns lists that change one item, shrink, gain an
+entity, have top-level text, contain a clicked checkbox and typed text (no
+re-render in between), a select with a changed selection, an interleaved
+innerHTML on another container and an attribute mutation. Serialized markup,
+checkbox and text states, select state and every MutationObserver record were
+identical on both builds. 100 re-renders of a 100-item list, each completing
+one more item: 61.0 → 47.7 ms (−22 %). In the real TodoMVC-jQuery app
+(Speedometer's copy), clicking all 100 toggles: 130–146 → 116–122 ms.
+Speedometer 3.1 (three runs each): TodoMVC-jQuery CompletingAllItems
+120.0 → 115.1 ms (−4.1 %), DeletingAllItems +1.6 %, Adding100Items 56.3 →
+59.5 ms in two of three runs (56.6 in the third; adding 100 items in the real
+app was 52–64 ms on both builds, so this is within its spread); full score
+12.23 against 12.07, one candidate run slow in every suite. WPT
+html/syntax/parsing, domparsing, dom/nodes, custom-elements and shadow-dom: no
+regressions.

@@ -29098,7 +29098,7 @@ index 25d1a39c50333e9d5c5f48936cf1d9bad22d09d8..6025a0f1ed9ea0e138b59a0c6a8870b4
      }
  
 diff --git a/Source/WebCore/dom/Document.cpp b/Source/WebCore/dom/Document.cpp
-index 79f2bcbc106c7c43e8a971816c183dcc00610b83..a8882810627b9dcc8f3c7cca51ce809d32d60d04 100644
+index 79f2bcbc106c7c43e8a971816c183dcc00610b83..820bf0e4f5b788234af00082d75dcb34c0b970f3 100644
 --- a/Source/WebCore/dom/Document.cpp
 +++ b/Source/WebCore/dom/Document.cpp
 @@ -384,6 +384,7 @@
@@ -29611,6 +29611,18 @@ index 79f2bcbc106c7c43e8a971816c183dcc00610b83..a8882810627b9dcc8f3c7cca51ce809d
          scheduleRenderingUpdate(RenderingUpdateStep::PerformPendingViewTransitions);
  }
  
+@@ -12670,7 +12941,10 @@ void Document::updateCachedSetInnerHTML(const String& sourceString, ContainerNod
+ {
+     auto& cache = cachedSetInnerHTML();
+ 
+-    if (sourceString.length() < cache.source.length() || sourceString.length() > maxCachedSetInnerHTMLStringSize())
++    // Summit (#284): a shorter string for the same container replaces the cache too (a list that
++    // lost items), so later assignments can still reuse its leading children.
++    bool sameContainer = cache.cachedContainer.get() == &container;
++    if ((!sameContainer && sourceString.length() < cache.source.length()) || sourceString.length() > maxCachedSetInnerHTMLStringSize())
+         return;
+ 
+     cache.source = sourceString;
 diff --git a/Source/WebCore/dom/DocumentFullscreen.cpp b/Source/WebCore/dom/DocumentFullscreen.cpp
 index 28af311e9b2529c78678571f3fa2f04b47cf16ab..d8cd20472f40efda97eb911d6f90d2c259e39ddb 100644
 --- a/Source/WebCore/dom/DocumentFullscreen.cpp
@@ -31225,6 +31237,18 @@ index 734ade9e4072c0b1bf4489dc13ea06c32af4cb60..fba1b6d7134610b2eccc43c669a896ff
          fireEvents = FireEvents::No;
  
      Ref document = this->document();
+diff --git a/Source/WebCore/html/HTMLInputElement.h b/Source/WebCore/html/HTMLInputElement.h
+index a6026f826ab1135d89d0a388d2d8be8d20e997d7..0e2a2ad32925867e72c116b13e68f0a5a2d9d9a1 100644
+--- a/Source/WebCore/html/HTMLInputElement.h
++++ b/Source/WebCore/html/HTMLInputElement.h
+@@ -202,6 +202,7 @@ public:
+     // We should not call this for types with no string value such as CHECKBOX and RADIO.
+     bool isValidValue(StringView) const;
+     bool hasDirtyValue() const { return !m_valueIfDirty.isNull(); }
++    bool dirtyCheckedness() const { return m_dirtyCheckednessFlag; } // Summit (#284)
+ 
+     String placeholder() const;
+ 
 diff --git a/Source/WebCore/html/HTMLLinkElement.cpp b/Source/WebCore/html/HTMLLinkElement.cpp
 index aeb17770f3e1e6fca6f5efc89419a0895221014b..dbb756d88aeab3b8845f4c58ecdc7e446e65e720 100644
 --- a/Source/WebCore/html/HTMLLinkElement.cpp
@@ -33037,6 +33061,318 @@ index f3dc9ebcfcff29852bb63e4283c9eace10927b9d..d8d781392155f4490d66444fa2a5f0af
      bool m_memoryCostUpdateScheduled { false };
  
      // Temporary holder for both ImageBuffer and NativeImage requests.
+diff --git a/Source/WebCore/html/parser/HTMLDocumentParserFastPath.cpp b/Source/WebCore/html/parser/HTMLDocumentParserFastPath.cpp
+index 2406086829634555a791e83531f465fb2b81be60..8b8e8f21d9f2d8c2eb7c07a989fd986fcb065f82 100644
+--- a/Source/WebCore/html/parser/HTMLDocumentParserFastPath.cpp
++++ b/Source/WebCore/html/parser/HTMLDocumentParserFastPath.cpp
+@@ -46,6 +46,8 @@
+ #include "HTMLLIElement.h"
+ #include "HTMLLabelElement.h"
+ #include "HTMLNameCache.h"
++#include "HTMLOptionElement.h"
++#include "TypedElementDescendantIteratorInlines.h"
+ #include "HTMLNames.h"
+ #include "HTMLOListElement.h"
+ #include "HTMLParagraphElement.h"
+@@ -96,7 +98,10 @@ private:
+ 
+ namespace WebCore {
+ 
+-static constexpr unsigned s_maxCachedStringSize = 40000;
++// Summit (#284): TodoMVC-jQuery's 100-item list is about 45,000 code units with its template's
++// indentation, just over the old 40,000 limit, so it was never cached. The cache keeps a reference
++// to the page's own string (no copy), so the cost is one string per document.
++static constexpr unsigned s_maxCachedStringSize = 262144;
+ 
+ unsigned NODELETE maxCachedSetInnerHTMLStringSize()
+ {
+@@ -113,6 +118,78 @@ enum class FragmentReuseResult : uint8_t {
+     ParseFailure
+ };
+ 
++// Summit (#284): where each top-level child of a fast-parsed string ends, so that a later
++// string sharing a leading part can clone the children inside that part instead of reparsing
++// them. Records are keyed by the source buffer; a cached string is always fast-parsed right
++// before it is cached, so the record for its buffer is current while the cache holds it.
++struct TopLevelChildEnd {
++    unsigned offset;
++    bool isElement;
++};
++
++struct RecordedFastParse {
++    const void* data { nullptr };
++    size_t length { 0 };
++    Vector<TopLevelChildEnd> childEnds;
++};
++
++static std::array<RecordedFastParse, 4>& recordedFastParses()
++{
++    static MainThreadNeverDestroyed<std::array<RecordedFastParse, 4>> records;
++    return records.get();
++}
++
++static const RecordedFastParse* NODELETE findRecordedFastParse(const void* data, size_t length)
++{
++    for (auto& record : recordedFastParses()) {
++        if (record.data == data && record.length == length)
++            return &record;
++    }
++    return nullptr;
++}
++
++static void forgetRecordedFastParse(const void* data)
++{
++    for (auto& record : recordedFastParses()) {
++        if (record.data == data) {
++            record.data = nullptr;
++            record.childEnds.clear();
++        }
++    }
++}
++
++static void storeRecordedFastParse(const void* data, size_t length, Vector<TopLevelChildEnd>&& childEnds)
++{
++    auto& records = recordedFastParses();
++    forgetRecordedFastParse(data);
++    // Most recent first.
++    for (size_t i = records.size() - 1; i > 0; --i)
++        records[i] = WTF::move(records[i - 1]);
++    records[0] = RecordedFastParse { data, length, WTF::move(childEnds) };
++}
++
++// Cloning copies control state that markup does not express; such children are reparsed.
++static bool NODELETE subtreeHasOnlyMarkupState(Node& node)
++{
++    auto hasOnlyMarkupState = [](Element& element) {
++        if (auto* input = dynamicDowncast<HTMLInputElement>(element))
++            return !input->hasDirtyValue() && !input->dirtyCheckedness() && !input->isFileUpload();
++        return !is<HTMLSelectElement>(element) && !is<HTMLOptionElement>(element);
++    };
++    RefPtr element = dynamicDowncast<Element>(node);
++    if (!element)
++        return true;
++    if (!hasOnlyMarkupState(*element))
++        return false;
++    for (Ref descendant : descendantsOfType<Element>(*element)) {
++        if (!hasOnlyMarkupState(descendant))
++            return false;
++    }
++    return true;
++}
++
++static constexpr unsigned s_minimumReusedLeadingLength = 512;
++
+ ALWAYS_INLINE static bool isCachedSubtreeValid(Node& cachedContainer)
+ {
+     return !cachedContainer.hasDidMutateSubtreeAfterSetInnerHTML();
+@@ -144,7 +221,30 @@ static bool NODELETE isCachedPrefixMatch(const CachedSetInnerHTML& cache, std::s
+ }
+ 
+ template<typename CharacterType>
+-static FragmentReuseResult tryAvoidParsingByCloningExistingSubtree(std::span<const CharacterType> source, ContainerNode& destinationParent, Element& contextElement)
++static FragmentReuseResult cloneCachedPrefixAndParseSuffix(std::span<const CharacterType> unparsedSuffix, ContainerNode& destinationParent, Element& contextElement, Node* cachedContainer, Vector<TopLevelChildEnd>* childEnds, unsigned suffixOffset, std::optional<unsigned> childLimit = std::nullopt);
++template<typename CharacterType>
++static FragmentReuseResult tryCloningCachedLeadingChildren(std::span<const CharacterType> source, ContainerNode& destinationParent, Element& contextElement, const CachedSetInnerHTML&, ContainerNode& cachedContainer, Vector<TopLevelChildEnd>& childEnds, bool& haveChildEnds);
++
++template<typename CharacterType>
++static std::span<const CharacterType> cachedSourceSpan(const String& source)
++{
++    StringView view(source);
++    if constexpr (std::is_same_v<CharacterType, Latin1Character>)
++        return view.is8Bit() ? view.span8() : std::span<const CharacterType> { };
++    else
++        return view.is8Bit() ? std::span<const CharacterType> { } : view.span16();
++}
++
++static unsigned NODELETE childCount(const ContainerNode& container)
++{
++    unsigned count = 0;
++    for (auto* child = container.firstChild(); child; child = child->nextSibling())
++        ++count;
++    return count;
++}
++
++template<typename CharacterType>
++static FragmentReuseResult tryAvoidParsingByCloningExistingSubtree(std::span<const CharacterType> source, ContainerNode& destinationParent, Element& contextElement, Vector<TopLevelChildEnd>& childEnds, bool& haveChildEnds)
+ {
+     Ref destinationParentDocument = destinationParent.document();
+     auto& cache = destinationParentDocument->cachedSetInnerHTML();
+@@ -157,7 +257,7 @@ static FragmentReuseResult tryAvoidParsingByCloningExistingSubtree(std::span<con
+     }
+ 
+     if (!isCachedPrefixMatch<CharacterType>(cache, source, contextElement.elementName()))
+-        return FragmentReuseResult::CannotReuse;
++        return tryCloningCachedLeadingChildren(source, destinationParent, contextElement, cache, *cachedContainer, childEnds, haveChildEnds);
+ 
+     // Only allow prefix reuse if cached string ends with '>' or whitespace to avoid splitting text/entities.
+     // Example: "<br>&apos", then "<br>&apos;" would incorrectly split the entity into "&apos" and ";".
+@@ -167,17 +267,25 @@ static FragmentReuseResult tryAvoidParsingByCloningExistingSubtree(std::span<con
+             return FragmentReuseResult::CannotReuse;
+     }
+ 
++    // The cloned children are all of the cached container's; their ends come from the cached string's record.
++    auto cachedSpan = cachedSourceSpan<CharacterType>(cache.source);
++    if (auto* record = findRecordedFastParse(cachedSpan.data(), cachedSpan.size()); record && record->childEnds.size() == childCount(*cachedContainer)) {
++        childEnds.appendVector(record->childEnds);
++        haveChildEnds = true;
++    }
++
+     auto unparsedSuffix = source.subspan(cache.source.length());
+-    return cloneCachedPrefixAndParseSuffix(unparsedSuffix, destinationParent, contextElement, cachedContainer.get());
++    return cloneCachedPrefixAndParseSuffix(unparsedSuffix, destinationParent, contextElement, cachedContainer.get(), haveChildEnds ? &childEnds : nullptr, cache.source.length());
+ }
+ 
+ template<typename CharacterType>
+-static FragmentReuseResult cloneCachedPrefixAndParseSuffix(std::span<const CharacterType> unparsedSuffix, ContainerNode& destinationParent, Element& contextElement, Node* cachedContainer)
++static FragmentReuseResult cloneCachedPrefixAndParseSuffix(std::span<const CharacterType> unparsedSuffix, ContainerNode& destinationParent, Element& contextElement, Node* cachedContainer, Vector<TopLevelChildEnd>* childEnds, unsigned suffixOffset, std::optional<unsigned> childLimit)
+ {
+ 
+     ASSERT(cachedContainer->hasChildNodes());
+ 
+-    for (RefPtr nodeToClone = cachedContainer->firstChild(); nodeToClone; nodeToClone = nodeToClone->nextSibling()) {
++    unsigned cloned = 0;
++    for (RefPtr nodeToClone = cachedContainer->firstChild(); nodeToClone && (!childLimit || cloned < *childLimit); nodeToClone = nodeToClone->nextSibling(), ++cloned) {
+         Ref<Node> clonedChild = nodeToClone->cloneNodeInternal(protect(destinationParent.document()), Node::CloningOperation::SelfOnly, nullptr);
+         if (RefPtr nodeToCloneAsContainer = dynamicDowncast<ContainerNode>(*nodeToClone))
+             nodeToCloneAsContainer->cloneSubtreeForFastParser(protect(destinationParent.document()), nullptr, downcast<ContainerNode>(clonedChild.get()), 0);
+@@ -188,11 +296,55 @@ static FragmentReuseResult cloneCachedPrefixAndParseSuffix(std::span<const Chara
+         return FragmentReuseResult::Success;
+ 
+     HTMLFastPathParser<CharacterType> parser { unparsedSuffix, destinationParent.document(), destinationParent };
++    if (childEnds)
++        parser.recordTopLevelChildEnds(*childEnds, suffixOffset);
+     if (!parser.parse(contextElement))
+         return FragmentReuseResult::ParseFailure;
+     return FragmentReuseResult::Success;
+ }
+ 
++// Summit (#284): the new string differs from the cached one partway (one list item changed). Clone
++// the cached container's children that lie entirely in the common leading part, ending at an
++// element boundary, and parse only the rest. Text and entities never straddle the reused part,
++// and the suffix starts at top level, so the result equals a parse of the whole string.
++template<typename CharacterType>
++static FragmentReuseResult tryCloningCachedLeadingChildren(std::span<const CharacterType> source, ContainerNode& destinationParent, Element& contextElement, const CachedSetInnerHTML& cache, ContainerNode& cachedContainer, Vector<TopLevelChildEnd>& childEnds, bool& haveChildEnds)
++{
++    if (cache.contextElementName != contextElement.elementName())
++        return FragmentReuseResult::CannotReuse;
++    auto cachedSpan = cachedSourceSpan<CharacterType>(cache.source);
++    if (cachedSpan.size() < s_minimumReusedLeadingLength || source.size() < s_minimumReusedLeadingLength)
++        return FragmentReuseResult::CannotReuse;
++    auto* record = findRecordedFastParse(cachedSpan.data(), cachedSpan.size());
++    if (!record || record->childEnds.size() != childCount(cachedContainer))
++        return FragmentReuseResult::CannotReuse;
++
++    auto limit = std::min(cachedSpan.size(), source.size());
++    auto mismatch = std::mismatch(cachedSpan.begin(), cachedSpan.begin() + limit, source.begin());
++    size_t commonLength = mismatch.first - cachedSpan.begin();
++    if (commonLength < s_minimumReusedLeadingLength)
++        return FragmentReuseResult::CannotReuse;
++
++    unsigned reusedChildren = 0;
++    unsigned reusedLength = 0;
++    unsigned index = 0;
++    for (RefPtr child = cachedContainer.firstChild(); child; child = child->nextSibling(), ++index) {
++        auto& end = record->childEnds[index];
++        if (end.offset > commonLength || !subtreeHasOnlyMarkupState(*child))
++            break;
++        if (end.isElement) {
++            reusedChildren = index + 1;
++            reusedLength = end.offset;
++        }
++    }
++    if (reusedLength < s_minimumReusedLeadingLength)
++        return FragmentReuseResult::CannotReuse;
++
++    childEnds.append(record->childEnds.span().first(reusedChildren));
++    haveChildEnds = true;
++    return cloneCachedPrefixAndParseSuffix(source.subspan(reusedLength), destinationParent, contextElement, &cachedContainer, &childEnds, reusedLength, reusedChildren);
++}
++
+ // Captures the potential outcomes for fast path html parser.
+ enum class HTMLFastPathResult : uint8_t {
+     Succeeded,
+@@ -347,7 +499,24 @@ public:
+ 
+     HTMLFastPathResult NODELETE parseResult() const { return m_parseResult; }
+ 
++    void recordTopLevelChildEnds(Vector<TopLevelChildEnd>& childEnds, unsigned offsetBase)
++    {
++        m_childEnds = &childEnds;
++        m_childEndOffsetBase = offsetBase;
++        m_sourceStart = m_parsingBuffer.position();
++    }
++
+ private:
++    Vector<TopLevelChildEnd>* m_childEnds { nullptr };
++    unsigned m_childEndOffsetBase { 0 };
++    const CharacterType* m_sourceStart { nullptr };
++
++    void recordChildEnd(ContainerNode& parent, bool isElement)
++    {
++        if (m_childEnds && &parent == m_destinationParent.ptr()) [[unlikely]]
++            m_childEnds->append({ m_childEndOffsetBase + static_cast<unsigned>(m_parsingBuffer.position() - m_sourceStart), isElement });
++    }
++
+     const Ref<Document> m_document;
+     const Ref<ContainerNode> m_destinationParent;
+ 
+@@ -919,11 +1088,13 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
+                     parent.parserAppendChildIntoIsolatedTree(Text::create(m_document, result.tryUseWhitespaceCache()));
+                 else
+                     parent.parserAppendChild(Text::create(m_document, result.tryUseWhitespaceCache()));
++                recordChildEnd(parent, false);
+             } else if (!result.escapedText.isEmpty()) {
+                 if (!parent.isConnected())
+                     parent.parserAppendChildIntoIsolatedTree(Text::create(m_document, WTF::move(result.escapedText)));
+                 else
+                     parent.parserAppendChild(Text::create(m_document, WTF::move(result.escapedText)));
++                recordChildEnd(parent, false);
+             }
+ 
+             if (m_parsingBuffer.atEnd())
+@@ -941,6 +1112,7 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
+             if (parsingFailed())
+                 return;
+             ASSERT(child);
++            recordChildEnd(parent, true);
+         }
+     }
+ 
+@@ -1136,14 +1308,30 @@ static bool canUseFastPath(Element& contextElement, OptionSet<ParserContentPolic
+ template<typename CharacterType>
+ static bool tryFastParsingHTMLFragmentImpl(std::span<const CharacterType> source, Document& document, ContainerNode& destinationParent, Element& contextElement)
+ {
+-    auto reuseResult = tryAvoidParsingByCloningExistingSubtree(source, destinationParent, contextElement);
+-    if (reuseResult == FragmentReuseResult::Success)
++    Vector<TopLevelChildEnd> childEnds;
++    bool haveChildEnds = false;
++    auto reuseResult = tryAvoidParsingByCloningExistingSubtree(source, destinationParent, contextElement, childEnds, haveChildEnds);
++    if (reuseResult == FragmentReuseResult::Success) {
++        if (haveChildEnds)
++            storeRecordedFastParse(source.data(), source.size(), WTF::move(childEnds));
++        else
++            forgetRecordedFastParse(source.data());
+         return true;
+-    if (reuseResult == FragmentReuseResult::ParseFailure)
++    }
++    if (reuseResult == FragmentReuseResult::ParseFailure) {
++        forgetRecordedFastParse(source.data());
+         return false;
++    }
+ 
++    childEnds.clear();
+     HTMLFastPathParser parser { source, document, destinationParent };
+-    return parser.parse(contextElement);
++    parser.recordTopLevelChildEnds(childEnds, 0);
++    if (!parser.parse(contextElement)) {
++        forgetRecordedFastParse(source.data());
++        return false;
++    }
++    storeRecordedFastParse(source.data(), source.size(), WTF::move(childEnds));
++    return true;
+ }
+ 
+ bool tryFastParsingHTMLFragment(StringView source, Document& document, ContainerNode& destinationParent, Element& contextElement, OptionSet<ParserContentPolicy> policy)
 diff --git a/Source/WebCore/inspector/CommandLineAPIModule.cpp b/Source/WebCore/inspector/CommandLineAPIModule.cpp
 index dd239696fdd09e20d7a0bc1e20508125552043d4..85702e154d0bd01f2e2d03b4cf81bbc0a441a786 100644
 --- a/Source/WebCore/inspector/CommandLineAPIModule.cpp
