@@ -850,6 +850,60 @@ index 91c28b033f0e6ef3cdb03e24d6ff4626b960f988..5c7f32ee3c1c5a191c6b61b1c46dc27f
              ASSERT_UNUSED(status, U_SUCCESS(status));
          }
          if (U_SUCCESS(status)) {
+diff --git a/Source/JavaScriptCore/runtime/JSLock.cpp b/Source/JavaScriptCore/runtime/JSLock.cpp
+index 0fa9323dc1a1120032e11b1cf525fbbbc2172e77..a9dc31f1b60525a627602c1e2600cd96e4f77a85 100644
+--- a/Source/JavaScriptCore/runtime/JSLock.cpp
++++ b/Source/JavaScriptCore/runtime/JSLock.cpp
+@@ -55,11 +55,35 @@ JSLockHolder::JSLockHolder(VM* vm)
+ JSLockHolder::JSLockHolder(VM& vm)
+     : m_vm(&vm)
+ {
++#if PLATFORM(HAIKU)
++    // Nearly every holder is taken by a thread that holds the lock already:
++    // a DOM callback (TreeWalker's NodeFilter, an event listener) takes one
++    // in its binding and one in JSExecState. Count the re-entry, as lock()
++    // does after its failed tryLock(), without that compare-and-swap and the
++    // reference counting of protect() around it (#292). Only this thread can
++    // make itself the owner, so the check cannot race.
++    JSLock& lock = m_vm->apiLock();
++    if (lock.currentThreadIsHoldingLock()) [[likely]] {
++        lock.m_lockCount++;
++        return;
++    }
++#endif
+     protect(m_vm->apiLock())->lock();
+ }
+ 
+ JSLockHolder::~JSLockHolder()
+ {
++#if PLATFORM(HAIKU)
++    // Leaving a re-entry: unlock(1) would only decrement as well. Decrement
++    // before letting go of the VM; whoever else holds the lock keeps it.
++    JSLock& lock = m_vm->apiLock();
++    RELEASE_ASSERT(lock.currentThreadIsHoldingLock());
++    if (lock.m_lockCount > 1) [[likely]] {
++        lock.m_lockCount--;
++        m_vm = nullptr;
++        return;
++    }
++#endif
+     RefPtr<JSLock> apiLock(&m_vm->apiLock());
+     m_vm = nullptr;
+     apiLock->unlock();
+diff --git a/Source/JavaScriptCore/runtime/JSLock.h b/Source/JavaScriptCore/runtime/JSLock.h
+index d4da331171e72e67ad2fcd9ac347652b6f9c75e2..1568a04e7b9c4a883d45d4cc20833be90ac01912 100644
+--- a/Source/JavaScriptCore/runtime/JSLock.h
++++ b/Source/JavaScriptCore/runtime/JSLock.h
+@@ -131,6 +131,9 @@ public:
+     bool isWebThreadAware() const { return m_isWebThreadAware; }
+ 
+ private:
++#if PLATFORM(HAIKU)
++    friend class JSLockHolder;
++#endif
+     void lock(intptr_t lockCount);
+     void unlock(intptr_t unlockCount);
+ 
 diff --git a/Source/JavaScriptCore/runtime/JSModuleLoader.cpp b/Source/JavaScriptCore/runtime/JSModuleLoader.cpp
 index d28d762587ad6b3fd4985365905b87cb781917e4..1517de71a7f7f659b3166e26f290f8980ba280e4 100644
 --- a/Source/JavaScriptCore/runtime/JSModuleLoader.cpp
@@ -5146,10 +5200,23 @@ index cd2186c7e61118e7eb6da2ea24d9c501700bb0d7..346d7f8cd24069833fe0fa7a4cf3b14d
  
      LayerTreeHostRenderingUpdateStart,
 diff --git a/Source/WTF/wtf/Threading.h b/Source/WTF/wtf/Threading.h
-index 94d2c4b11dcf5ad50ddb06306ce1fa29fbbc858e..a4bf8c2da2131ddc336fd69959066745472c1e6f 100644
+index 94d2c4b11dcf5ad50ddb06306ce1fa29fbbc858e..309caeb5c59cc18bff6aa2377f8e701f1db9b5e7 100644
 --- a/Source/WTF/wtf/Threading.h
 +++ b/Source/WTF/wtf/Threading.h
-@@ -198,7 +198,7 @@ public:
+@@ -56,6 +56,12 @@
+ #include <wtf/WordLock.h>
+ #include <wtf/text/AtomStringTable.h>
+ 
++#if OS(HAIKU) && !HAVE(FAST_TLS)
++// Haiku's native thread-local slots (<TLS.h>), declared here so that WTF's
++// headers do not pull in SupportDefs.h.
++extern "C" void* tls_get(int32_t index);
++#endif
++
+ #if USE(PTHREADS) && !OS(DARWIN)
+ #include <signal.h>
+ #endif
+@@ -198,7 +204,7 @@ public:
      WTF_EXPORT_PRIVATE void barrierInstructionCache();
  
  #if USE(PTHREADS)
@@ -5158,7 +5225,23 @@ index 94d2c4b11dcf5ad50ddb06306ce1fa29fbbc858e..a4bf8c2da2131ddc336fd69959066745
      WTF_EXPORT_PRIVATE static ThreadIdentifier currentID();
      ThreadIdentifier id() const { return m_id; }
  #endif
-@@ -409,7 +409,7 @@ protected:
+@@ -371,6 +377,15 @@ protected:
+ 
+ #if !HAVE(FAST_TLS) && !OS(WINDOWS)
+     static WTF_EXPORT_PRIVATE ThreadSpecificKey s_key;
++#if OS(HAIKU)
++    // A native TLS slot that mirrors s_key's value, so that currentMayBeNull()
++    // is one load instead of pthread_getspecific(), which on Haiku is three
++    // libroot calls (pthread_self, tls_get, the key check). JSLockHolder and
++    // the atom string table ask for the current thread on every DOM callback
++    // (#292). -1 if no slot was free: s_key is read then.
++    static WTF_EXPORT_PRIVATE int32_t s_nativeTLSSlot;
++    static void setNativeTLS(Thread*);
++#endif
+     // One time initialization for this class as a whole.
+     // This method must be called before initializeTLS() and it is not thread-safe.
+     static void initializeTLSKey();
+@@ -409,7 +424,7 @@ protected:
  #elif OS(DARWIN)
      mach_port_t m_platformThread { MACH_PORT_NULL };
  #elif USE(PTHREADS)
@@ -5167,6 +5250,29 @@ index 94d2c4b11dcf5ad50ddb06306ce1fa29fbbc858e..a4bf8c2da2131ddc336fd69959066745
      ThreadIdentifier m_id { 0 };
  #endif
      PlatformRegisters* m_platformRegisters { nullptr };
+@@ -436,7 +451,21 @@ public:
+ #if !OS(WINDOWS)
+ inline Thread* Thread::currentMayBeNull()
+ {
+-#if !HAVE(FAST_TLS)
++#if OS(HAIKU) && !HAVE(FAST_TLS)
++    ASSERT(s_key != InvalidThreadSpecificKey);
++    if (s_nativeTLSSlot >= 0) [[likely]] {
++#if CPU(X86_64)
++        // What libroot's tls_get() does: the slots start at %fs:0 (a fresh,
++        // zero-filled stack area's top, so a new thread reads null).
++        void** slots;
++        __asm__("movq %%fs:0, %0" : "=r"(slots));
++        return static_cast<Thread*>(slots[s_nativeTLSSlot]);
++#else
++        return static_cast<Thread*>(tls_get(s_nativeTLSSlot));
++#endif
++    }
++    return static_cast<Thread*>(threadSpecificGet(s_key));
++#elif !HAVE(FAST_TLS)
+     ASSERT(s_key != InvalidThreadSpecificKey);
+     return static_cast<Thread*>(threadSpecificGet(s_key));
+ #else
 diff --git a/Source/WTF/wtf/ThreadingPrimitives.h b/Source/WTF/wtf/ThreadingPrimitives.h
 index 5b4c0629b5ef8281d65a961b2f498fd1ff6eafbd..3e68a322f0076b856cd6b96f19b691e7975ec89e 100644
 --- a/Source/WTF/wtf/ThreadingPrimitives.h
@@ -6271,7 +6377,7 @@ index 581c21b35e31c8af0f8ecb698586bf6f023bb132..0ab9b3d335549f2646bea23957ad5812
  #else
      UNUSED_PARAM(address);
 diff --git a/Source/WTF/wtf/posix/ThreadingPOSIX.cpp b/Source/WTF/wtf/posix/ThreadingPOSIX.cpp
-index 94ecfb0a7d65820ae25a1dab5eed53b73b3b6b4d..a89e5058efee46ea61858ea2cb46b8870ffe9a0d 100644
+index 94ecfb0a7d65820ae25a1dab5eed53b73b3b6b4d..7fc084296755bf9f9f31301d74c572db41a31c80 100644
 --- a/Source/WTF/wtf/posix/ThreadingPOSIX.cpp
 +++ b/Source/WTF/wtf/posix/ThreadingPOSIX.cpp
 @@ -31,6 +31,7 @@
@@ -6282,17 +6388,18 @@ index 94ecfb0a7d65820ae25a1dab5eed53b73b3b6b4d..a89e5058efee46ea61858ea2cb46b887
  #include <wtf/Threading.h>
  
  #if USE(PTHREADS)
-@@ -47,6 +48,9 @@
+@@ -47,6 +48,10 @@
  
  #if OS(HAIKU)
  #include <OS.h>
++#include <TLS.h>
 +#include <wtf/haiku/ProcessPriorityHaiku.h>
 +#include <wtf/Lock.h>
 +#include <wtf/HashMap.h>
  #endif
  
  #if OS(LINUX)
-@@ -97,6 +101,52 @@
+@@ -97,6 +102,52 @@
  
  namespace WTF {
  
@@ -6345,7 +6452,7 @@ index 94ecfb0a7d65820ae25a1dab5eed53b73b3b6b4d..a89e5058efee46ea61858ea2cb46b887
  Thread::~Thread() = default;
  
  #if !OS(DARWIN)
-@@ -243,6 +293,11 @@ ThreadIdentifier Thread::currentID()
+@@ -243,6 +294,11 @@ ThreadIdentifier Thread::currentID()
  {
      return static_cast<ThreadIdentifier>(syscall(SYS_gettid));
  }
@@ -6357,7 +6464,7 @@ index 94ecfb0a7d65820ae25a1dab5eed53b73b3b6b4d..a89e5058efee46ea61858ea2cb46b887
  #endif
  
  void Thread::initializeCurrentThreadEvenIfNonWTFCreated()
-@@ -445,6 +500,38 @@ void Thread::updateSchedulingAttributes(SchedulingState state) const
+@@ -445,6 +501,38 @@ void Thread::updateSchedulingAttributes(SchedulingState state) const
          || setpriority(PRIO_PROCESS, m_id, attributes.niceLevel))
          logSchedulingAttributesFailure(m_id);
  #endif // HAVE(SCHED_SETATTR)
@@ -6396,7 +6503,7 @@ index 94ecfb0a7d65820ae25a1dab5eed53b73b3b6b4d..a89e5058efee46ea61858ea2cb46b887
  #else
      UNUSED_PARAM(state);
  #endif // OS(LINUX)
-@@ -726,6 +813,11 @@ void Thread::establishPlatformSpecificHandle(pthread_t handle)
+@@ -726,15 +814,36 @@ void Thread::establishPlatformSpecificHandle(pthread_t handle)
  {
      Locker locker { m_mutex };
      m_handle = handle;
@@ -6408,7 +6515,63 @@ index 94ecfb0a7d65820ae25a1dab5eed53b73b3b6b4d..a89e5058efee46ea61858ea2cb46b887
  #if OS(DARWIN)
      m_platformThread = pthread_mach_thread_np(handle);
  #endif
-@@ -873,6 +965,8 @@ void Thread::yield()
+ }
+ 
+ #if !HAVE(FAST_TLS)
++#if OS(HAIKU)
++int32_t Thread::s_nativeTLSSlot = -1;
++
++// The slot follows the pthread key's value exactly, also while a thread
++// exits: the key reads null while destructTLS() runs until it is set again.
++void Thread::setNativeTLS(Thread* thread)
++{
++    if (s_nativeTLSSlot >= 0)
++        tls_set(s_nativeTLSSlot, thread);
++}
++#endif
++
+ void Thread::initializeTLSKey()
+ {
+     threadSpecificKeyCreate(&s_key, destructTLS);
++#if OS(HAIKU)
++    int32 slot = tls_allocate();
++    s_nativeTLSSlot = slot >= 0 ? slot : -1;
++#endif
+ }
+ #endif
+ 
+@@ -745,6 +854,9 @@ Thread& Thread::initializeTLS(Ref<Thread>&& thread)
+ #if !HAVE(FAST_TLS)
+     ASSERT(s_key != InvalidThreadSpecificKey);
+     threadSpecificSet(s_key, &threadInTLS);
++#if OS(HAIKU)
++    setNativeTLS(&threadInTLS);
++#endif
+ #else
+     _pthread_setspecific_direct(WTF_THREAD_DATA_KEY, &threadInTLS);
+     pthread_key_init_np(WTF_THREAD_DATA_KEY, &destructTLS);
+@@ -756,6 +868,10 @@ void Thread::destructTLS(void* data)
+ {
+     Thread* thread = static_cast<Thread*>(data);
+     ASSERT(thread);
++#if OS(HAIKU) && !HAVE(FAST_TLS)
++    // pthread cleared the key before calling its destructor.
++    setNativeTLS(nullptr);
++#endif
+ 
+     if (thread->m_isDestroyedOnce) {
+         thread->didExit();
+@@ -768,6 +884,9 @@ void Thread::destructTLS(void* data)
+ #if !HAVE(FAST_TLS)
+     ASSERT(s_key != InvalidThreadSpecificKey);
+     threadSpecificSet(s_key, thread);
++#if OS(HAIKU)
++    setNativeTLS(thread);
++#endif
+ #else
+     _pthread_setspecific_direct(WTF_THREAD_DATA_KEY, thread);
+     pthread_key_init_np(WTF_THREAD_DATA_KEY, &destructTLS);
+@@ -873,6 +992,8 @@ void Thread::yield()
  #endif
  }
  
@@ -26524,6 +26687,86 @@ index 0000000000000000000000000000000000000000..2c20205753574d55df3541bf00934968
 +} // namespace WebCore
 +
 +#endif // PLATFORM(HAIKU)
+diff --git a/Source/WebCore/bindings/js/JSCallbackData.cpp b/Source/WebCore/bindings/js/JSCallbackData.cpp
+index 8b1e5ec03b22a5cbdfd3890ad2d5f7abc9965cda..022779faa7afcbab3c93b7d49f578f0eb9c043a4 100644
+--- a/Source/WebCore/bindings/js/JSCallbackData.cpp
++++ b/Source/WebCore/bindings/js/JSCallbackData.cpp
+@@ -76,6 +76,23 @@ JSC::JSValue JSCallbackData::invokeCallback(JSC::JSValue thisValue, JSC::MarkedA
+     return JSCallbackData::invokeCallback(*globalObject, callback(), thisValue, args, callbackType, functionName, returnedException);
+ }
+ 
++JSC::JSValue JSCallbackData::invokeCallback(JSC::JSValue thisValue, JSC::MarkedArgumentBuffer& args, CallbackType callbackType, ASCIILiteral functionName, NakedPtr<JSC::Exception>& returnedException)
++{
++    auto* globalObject = this->globalObject();
++    if (!globalObject)
++        return { };
++
++    return invokeCallbackInternal(*globalObject, callback(), thisValue, args, callbackType, [&]() -> JSC::PropertyName {
++        // One literal per operation, so a pointer compare; an interface with
++        // several operations just makes the identifier again on a switch.
++        if (m_functionName.isNull() || m_functionNameLiteral.characters() != functionName.characters()) {
++            m_functionName = JSC::Identifier::fromString(globalObject->vm(), functionName);
++            m_functionNameLiteral = functionName;
++        }
++        return m_functionName;
++    }, returnedException);
++}
++
+ bool JSCallbackData::WeakOwner::isReachableFromOpaqueRoots(JSC::Handle<JSC::Unknown>, void* owner, JSC::AbstractSlotVisitor& visitor, ASCIILiteral* reason)
+ {
+     if (reason) [[unlikely]]
+@@ -87,6 +104,12 @@ WTF_MAKE_TZONE_ALLOCATED_IMPL(JSCallbackData);
+ 
+ // https://webidl.spec.whatwg.org/#call-a-user-objects-operation
+ JSValue JSCallbackData::invokeCallback(JSDOMGlobalObject& globalObject, JSObject* callback, JSValue thisValue, MarkedArgumentBuffer& args, CallbackType method, PropertyName functionName, NakedPtr<JSC::Exception>& returnedException)
++{
++    return invokeCallbackInternal(globalObject, callback, thisValue, args, method, [functionName] { return functionName; }, returnedException);
++}
++
++template<typename FunctionName>
++JSValue JSCallbackData::invokeCallbackInternal(JSDOMGlobalObject& globalObject, JSObject* callback, JSValue thisValue, MarkedArgumentBuffer& args, CallbackType method, const FunctionName& lazyFunctionName, NakedPtr<JSC::Exception>& returnedException)
+ {
+     ASSERT(callback);
+ 
+@@ -108,6 +131,7 @@ JSValue JSCallbackData::invokeCallback(JSDOMGlobalObject& globalObject, JSObject
+             return JSValue();
+         }
+ 
++        PropertyName functionName = lazyFunctionName();
+         ASSERT(!functionName.isNull());
+         function = callback->get(lexicalGlobalObject, functionName);
+         if (scope.exception()) [[unlikely]] {
+diff --git a/Source/WebCore/bindings/js/JSCallbackData.h b/Source/WebCore/bindings/js/JSCallbackData.h
+index 585bc6ac3d615a7fe1dc7fea426f7679b3d5cbee..51d6efb025cb91a10b248b0d29773dc08a6e9372 100644
+--- a/Source/WebCore/bindings/js/JSCallbackData.h
++++ b/Source/WebCore/bindings/js/JSCallbackData.h
+@@ -29,6 +29,7 @@
+ #pragma once
+ 
+ #include "ScriptExecutionContext.h"
++#include <JavaScriptCore/Identifier.h>
+ #include <JavaScriptCore/PropertyName.h>
+ #include <JavaScriptCore/Weak.h>
+ #include <JavaScriptCore/WeakHandleOwner.h>
+@@ -69,8 +70,18 @@ public:
+     static JSC::JSValue invokeCallback(JSDOMGlobalObject&, JSC::JSObject* callback, JSC::JSValue thisValue, JSC::MarkedArgumentBuffer&, CallbackType, JSC::PropertyName functionName, NakedPtr<JSC::Exception>& returnedException);
+ 
+     JSC::JSValue invokeCallback(JSC::JSValue thisValue, JSC::MarkedArgumentBuffer&, CallbackType, JSC::PropertyName functionName, NakedPtr<JSC::Exception>&);
++    // The generated callback interfaces' path: the operation's name becomes an
++    // Identifier only when the callback is an object whose method must be
++    // looked up, once per callback (#292). A TreeWalker's function filter
++    // never needs it; an object filter used to intern "acceptNode" per node.
++    JSC::JSValue invokeCallback(JSC::JSValue thisValue, JSC::MarkedArgumentBuffer&, CallbackType, ASCIILiteral functionName, NakedPtr<JSC::Exception>&);
+ 
+ private:
++    template<typename FunctionName>
++    static JSC::JSValue invokeCallbackInternal(JSDOMGlobalObject&, JSC::JSObject* callback, JSC::JSValue thisValue, JSC::MarkedArgumentBuffer&, CallbackType, const FunctionName&, NakedPtr<JSC::Exception>& returnedException);
++
++    ASCIILiteral m_functionNameLiteral;
++    JSC::Identifier m_functionName;
+     JSC::Weak<JSDOMGlobalObject> m_globalObject;
+ 
+     class WEBCORE_EXPORT WeakOwner : public JSC::WeakHandleOwner {
 diff --git a/Source/WebCore/bindings/js/ScriptController.cpp b/Source/WebCore/bindings/js/ScriptController.cpp
 index 7a84d14d26456ba43f25368f1f5c492aed49416b..4c1031ea9451a24734b415160eebc8fc92e2cdb1 100644
 --- a/Source/WebCore/bindings/js/ScriptController.cpp
@@ -26854,6 +27097,194 @@ index 6d3962f03ae12aa4f41c8cba628877c5efa76bba..83ec7c44176c2a579fef2d181764c46d
      macro(onpush) \
      macro(onpushsubscriptionchange) \
      macro(onrtctransform) \
+diff --git a/Source/WebCore/bindings/scripts/CodeGeneratorJS.pm b/Source/WebCore/bindings/scripts/CodeGeneratorJS.pm
+index 56ee0a15f44b196059acc0d9c16aa38132a69878..05ebd16f2d6f7fb7be877a02bcc948656624c965 100644
+--- a/Source/WebCore/bindings/scripts/CodeGeneratorJS.pm
++++ b/Source/WebCore/bindings/scripts/CodeGeneratorJS.pm
+@@ -7425,7 +7425,7 @@ sub GenerateCallbackImplementationOperationBody
+         $callbackInvocation = "m_data->invokeCallback(thisValue, args, JSCallbackData::CallbackType::Function, Identifier(), returnedException)";
+     } else {
+         my $callbackType = @{$operations} > 1 ? "Object" : "FunctionOrObject";
+-        $callbackInvocation = "m_data->invokeCallback(thisValue, args, JSCallbackData::CallbackType::${callbackType}, Identifier::fromString(vm, \"${functionName}\"_s), returnedException)";
++        $callbackInvocation = "m_data->invokeCallback(thisValue, args, JSCallbackData::CallbackType::${callbackType}, \"${functionName}\"_s, returnedException)";
+     }
+ 
+     if ($operation->type->name eq "undefined") {
+diff --git a/Source/WebCore/bindings/scripts/test/JS/JSTestCallbackInterface.cpp b/Source/WebCore/bindings/scripts/test/JS/JSTestCallbackInterface.cpp
+index d3d482ef5dfc7dc0035eec0f767bd5f54ff12607..8e43877a2d4a7b7a72995a1e75f15716fd68f191 100644
+--- a/Source/WebCore/bindings/scripts/test/JS/JSTestCallbackInterface.cpp
++++ b/Source/WebCore/bindings/scripts/test/JS/JSTestCallbackInterface.cpp
+@@ -220,7 +220,7 @@ CallbackResult<typename IDLUndefined::CallbackReturnType> JSTestCallbackInterfac
+     ASSERT(!args.hasOverflowed());
+ 
+     NakedPtr<JSC::Exception> returnedException;
+-    m_data->invokeCallback(thisValue, args, JSCallbackData::CallbackType::Object, Identifier::fromString(vm, "callbackWithNoParam"_s), returnedException);
++    m_data->invokeCallback(thisValue, args, JSCallbackData::CallbackType::Object, "callbackWithNoParam"_s, returnedException);
+     if (returnedException) {
+         UNUSED_PARAM(lexicalGlobalObject);
+         auto* callbackRealm = m_data->callback()->realmMayBeNull();
+@@ -248,7 +248,7 @@ CallbackResult<typename IDLUndefined::CallbackReturnType> JSTestCallbackInterfac
+     ASSERT(!args.hasOverflowed());
+ 
+     NakedPtr<JSC::Exception> returnedException;
+-    m_data->invokeCallback(thisValue, args, JSCallbackData::CallbackType::Object, Identifier::fromString(vm, "callbackWithNoParam"_s), returnedException);
++    m_data->invokeCallback(thisValue, args, JSCallbackData::CallbackType::Object, "callbackWithNoParam"_s, returnedException);
+     if (returnedException) {
+         auto throwScope = DECLARE_THROW_SCOPE(vm);
+         throwException(&lexicalGlobalObject, throwScope, returnedException);
+@@ -276,7 +276,7 @@ CallbackResult<typename IDLUndefined::CallbackReturnType> JSTestCallbackInterfac
+     ASSERT(!args.hasOverflowed());
+ 
+     NakedPtr<JSC::Exception> returnedException;
+-    m_data->invokeCallback(thisValue, args, JSCallbackData::CallbackType::Object, Identifier::fromString(vm, "callbackWithArrayParam"_s), returnedException);
++    m_data->invokeCallback(thisValue, args, JSCallbackData::CallbackType::Object, "callbackWithArrayParam"_s, returnedException);
+     if (returnedException) {
+         UNUSED_PARAM(lexicalGlobalObject);
+         auto* callbackRealm = m_data->callback()->realmMayBeNull();
+@@ -305,7 +305,7 @@ CallbackResult<typename IDLUndefined::CallbackReturnType> JSTestCallbackInterfac
+     ASSERT(!args.hasOverflowed());
+ 
+     NakedPtr<JSC::Exception> returnedException;
+-    m_data->invokeCallback(thisValue, args, JSCallbackData::CallbackType::Object, Identifier::fromString(vm, "callbackWithArrayParam"_s), returnedException);
++    m_data->invokeCallback(thisValue, args, JSCallbackData::CallbackType::Object, "callbackWithArrayParam"_s, returnedException);
+     if (returnedException) {
+         auto throwScope = DECLARE_THROW_SCOPE(vm);
+         throwException(&lexicalGlobalObject, throwScope, returnedException);
+@@ -334,7 +334,7 @@ CallbackResult<typename IDLUndefined::CallbackReturnType> JSTestCallbackInterfac
+     ASSERT(!args.hasOverflowed());
+ 
+     NakedPtr<JSC::Exception> returnedException;
+-    m_data->invokeCallback(thisValue, args, JSCallbackData::CallbackType::Object, Identifier::fromString(vm, "callbackWithSerializedScriptValueParam"_s), returnedException);
++    m_data->invokeCallback(thisValue, args, JSCallbackData::CallbackType::Object, "callbackWithSerializedScriptValueParam"_s, returnedException);
+     if (returnedException) {
+         UNUSED_PARAM(lexicalGlobalObject);
+         auto* callbackRealm = m_data->callback()->realmMayBeNull();
+@@ -364,7 +364,7 @@ CallbackResult<typename IDLUndefined::CallbackReturnType> JSTestCallbackInterfac
+     ASSERT(!args.hasOverflowed());
+ 
+     NakedPtr<JSC::Exception> returnedException;
+-    m_data->invokeCallback(thisValue, args, JSCallbackData::CallbackType::Object, Identifier::fromString(vm, "callbackWithSerializedScriptValueParam"_s), returnedException);
++    m_data->invokeCallback(thisValue, args, JSCallbackData::CallbackType::Object, "callbackWithSerializedScriptValueParam"_s, returnedException);
+     if (returnedException) {
+         auto throwScope = DECLARE_THROW_SCOPE(vm);
+         throwException(&lexicalGlobalObject, throwScope, returnedException);
+@@ -392,7 +392,7 @@ CallbackResult<typename IDLUndefined::CallbackReturnType> JSTestCallbackInterfac
+     ASSERT(!args.hasOverflowed());
+ 
+     NakedPtr<JSC::Exception> returnedException;
+-    m_data->invokeCallback(thisValue, args, JSCallbackData::CallbackType::Object, Identifier::fromString(vm, "callbackWithStringList"_s), returnedException);
++    m_data->invokeCallback(thisValue, args, JSCallbackData::CallbackType::Object, "callbackWithStringList"_s, returnedException);
+     if (returnedException) {
+         UNUSED_PARAM(lexicalGlobalObject);
+         auto* callbackRealm = m_data->callback()->realmMayBeNull();
+@@ -421,7 +421,7 @@ CallbackResult<typename IDLUndefined::CallbackReturnType> JSTestCallbackInterfac
+     ASSERT(!args.hasOverflowed());
+ 
+     NakedPtr<JSC::Exception> returnedException;
+-    m_data->invokeCallback(thisValue, args, JSCallbackData::CallbackType::Object, Identifier::fromString(vm, "callbackWithStringList"_s), returnedException);
++    m_data->invokeCallback(thisValue, args, JSCallbackData::CallbackType::Object, "callbackWithStringList"_s, returnedException);
+     if (returnedException) {
+         auto throwScope = DECLARE_THROW_SCOPE(vm);
+         throwException(&lexicalGlobalObject, throwScope, returnedException);
+@@ -449,7 +449,7 @@ CallbackResult<typename IDLUndefined::CallbackReturnType> JSTestCallbackInterfac
+     ASSERT(!args.hasOverflowed());
+ 
+     NakedPtr<JSC::Exception> returnedException;
+-    m_data->invokeCallback(thisValue, args, JSCallbackData::CallbackType::Object, Identifier::fromString(vm, "callbackWithBoolean"_s), returnedException);
++    m_data->invokeCallback(thisValue, args, JSCallbackData::CallbackType::Object, "callbackWithBoolean"_s, returnedException);
+     if (returnedException) {
+         UNUSED_PARAM(lexicalGlobalObject);
+         auto* callbackRealm = m_data->callback()->realmMayBeNull();
+@@ -478,7 +478,7 @@ CallbackResult<typename IDLUndefined::CallbackReturnType> JSTestCallbackInterfac
+     ASSERT(!args.hasOverflowed());
+ 
+     NakedPtr<JSC::Exception> returnedException;
+-    m_data->invokeCallback(thisValue, args, JSCallbackData::CallbackType::Object, Identifier::fromString(vm, "callbackWithBoolean"_s), returnedException);
++    m_data->invokeCallback(thisValue, args, JSCallbackData::CallbackType::Object, "callbackWithBoolean"_s, returnedException);
+     if (returnedException) {
+         auto throwScope = DECLARE_THROW_SCOPE(vm);
+         throwException(&lexicalGlobalObject, throwScope, returnedException);
+@@ -506,7 +506,7 @@ CallbackResult<typename IDLDOMString::CallbackReturnType> JSTestCallbackInterfac
+     ASSERT(!args.hasOverflowed());
+ 
+     NakedPtr<JSC::Exception> returnedException;
+-    auto jsResult = m_data->invokeCallback(thisValue, args, JSCallbackData::CallbackType::Object, Identifier::fromString(vm, "callbackWithEnum"_s), returnedException);
++    auto jsResult = m_data->invokeCallback(thisValue, args, JSCallbackData::CallbackType::Object, "callbackWithEnum"_s, returnedException);
+     if (returnedException) {
+         UNUSED_PARAM(lexicalGlobalObject);
+         auto* callbackRealm = m_data->callback()->realmMayBeNull();
+@@ -539,7 +539,7 @@ CallbackResult<typename IDLDOMString::CallbackReturnType> JSTestCallbackInterfac
+     ASSERT(!args.hasOverflowed());
+ 
+     NakedPtr<JSC::Exception> returnedException;
+-    auto jsResult = m_data->invokeCallback(thisValue, args, JSCallbackData::CallbackType::Object, Identifier::fromString(vm, "callbackWithEnum"_s), returnedException);
++    auto jsResult = m_data->invokeCallback(thisValue, args, JSCallbackData::CallbackType::Object, "callbackWithEnum"_s, returnedException);
+     if (returnedException) {
+         auto throwScope = DECLARE_THROW_SCOPE(vm);
+         throwException(&lexicalGlobalObject, throwScope, returnedException);
+@@ -572,7 +572,7 @@ CallbackResult<typename IDLUndefined::CallbackReturnType> JSTestCallbackInterfac
+     ASSERT(!args.hasOverflowed());
+ 
+     NakedPtr<JSC::Exception> returnedException;
+-    m_data->invokeCallback(thisValue, args, JSCallbackData::CallbackType::Object, Identifier::fromString(vm, "callbackRequiresThisToPass"_s), returnedException);
++    m_data->invokeCallback(thisValue, args, JSCallbackData::CallbackType::Object, "callbackRequiresThisToPass"_s, returnedException);
+     if (returnedException) {
+         UNUSED_PARAM(lexicalGlobalObject);
+         auto* callbackRealm = m_data->callback()->realmMayBeNull();
+@@ -602,7 +602,7 @@ CallbackResult<typename IDLUndefined::CallbackReturnType> JSTestCallbackInterfac
+     ASSERT(!args.hasOverflowed());
+ 
+     NakedPtr<JSC::Exception> returnedException;
+-    m_data->invokeCallback(thisValue, args, JSCallbackData::CallbackType::Object, Identifier::fromString(vm, "callbackRequiresThisToPass"_s), returnedException);
++    m_data->invokeCallback(thisValue, args, JSCallbackData::CallbackType::Object, "callbackRequiresThisToPass"_s, returnedException);
+     if (returnedException) {
+         auto throwScope = DECLARE_THROW_SCOPE(vm);
+         throwException(&lexicalGlobalObject, throwScope, returnedException);
+@@ -629,7 +629,7 @@ CallbackResult<typename IDLDOMString::CallbackReturnType> JSTestCallbackInterfac
+     ASSERT(!args.hasOverflowed());
+ 
+     NakedPtr<JSC::Exception> returnedException;
+-    auto jsResult = m_data->invokeCallback(thisValue, args, JSCallbackData::CallbackType::Object, Identifier::fromString(vm, "callbackWithAReturnValue"_s), returnedException);
++    auto jsResult = m_data->invokeCallback(thisValue, args, JSCallbackData::CallbackType::Object, "callbackWithAReturnValue"_s, returnedException);
+     if (returnedException) {
+         UNUSED_PARAM(lexicalGlobalObject);
+         auto* callbackRealm = m_data->callback()->realmMayBeNull();
+@@ -661,7 +661,7 @@ CallbackResult<typename IDLDOMString::CallbackReturnType> JSTestCallbackInterfac
+     ASSERT(!args.hasOverflowed());
+ 
+     NakedPtr<JSC::Exception> returnedException;
+-    auto jsResult = m_data->invokeCallback(thisValue, args, JSCallbackData::CallbackType::Object, Identifier::fromString(vm, "callbackWithAReturnValue"_s), returnedException);
++    auto jsResult = m_data->invokeCallback(thisValue, args, JSCallbackData::CallbackType::Object, "callbackWithAReturnValue"_s, returnedException);
+     if (returnedException) {
+         auto throwScope = DECLARE_THROW_SCOPE(vm);
+         throwException(&lexicalGlobalObject, throwScope, returnedException);
+@@ -693,7 +693,7 @@ CallbackResult<typename IDLPromise<IDLUndefined>::CallbackReturnType> JSTestCall
+     ASSERT(!args.hasOverflowed());
+ 
+     NakedPtr<JSC::Exception> returnedException;
+-    auto jsResult = m_data->invokeCallback(thisValue, args, JSCallbackData::CallbackType::Object, Identifier::fromString(vm, "callbackThatTreatsExceptionAsRejectedPromise"_s), returnedException);
++    auto jsResult = m_data->invokeCallback(thisValue, args, JSCallbackData::CallbackType::Object, "callbackThatTreatsExceptionAsRejectedPromise"_s, returnedException);
+     if (returnedException) {
+         auto* jsPromise = JSC::JSPromise::create(vm, globalObject.promiseStructure());
+         jsPromise->rejectAsHandled(vm, returnedException->value());
+@@ -730,7 +730,7 @@ CallbackResult<typename IDLDOMString::CallbackReturnType> JSTestCallbackInterfac
+     ASSERT(!args.hasOverflowed());
+ 
+     NakedPtr<JSC::Exception> returnedException;
+-    auto jsResult = m_data->invokeCallback(thisValue, args, JSCallbackData::CallbackType::Object, Identifier::fromString(vm, "callbackWithThisObject"_s), returnedException);
++    auto jsResult = m_data->invokeCallback(thisValue, args, JSCallbackData::CallbackType::Object, "callbackWithThisObject"_s, returnedException);
+     if (returnedException) {
+         UNUSED_PARAM(lexicalGlobalObject);
+         auto* callbackRealm = m_data->callback()->realmMayBeNull();
+@@ -763,7 +763,7 @@ CallbackResult<typename IDLDOMString::CallbackReturnType> JSTestCallbackInterfac
+     ASSERT(!args.hasOverflowed());
+ 
+     NakedPtr<JSC::Exception> returnedException;
+-    auto jsResult = m_data->invokeCallback(thisValue, args, JSCallbackData::CallbackType::Object, Identifier::fromString(vm, "callbackWithThisObject"_s), returnedException);
++    auto jsResult = m_data->invokeCallback(thisValue, args, JSCallbackData::CallbackType::Object, "callbackWithThisObject"_s, returnedException);
+     if (returnedException) {
+         auto throwScope = DECLARE_THROW_SCOPE(vm);
+         throwException(&lexicalGlobalObject, throwScope, returnedException);
 diff --git a/Source/WebCore/contentextensions/ContentExtension.cpp b/Source/WebCore/contentextensions/ContentExtension.cpp
 index 369fb6f3979e2f42a0a84bb659f3c30789084568..1edc19de057fe7e9a35a498a087377fa8c82f767 100644
 --- a/Source/WebCore/contentextensions/ContentExtension.cpp

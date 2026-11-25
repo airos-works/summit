@@ -13935,3 +13935,88 @@ gave identical records on both builds. WPT intersection-observer,
 the-label-element, form-control-infrastructure, dom/collections,
 back-forward-cache, html/syntax/parsing and domparsing (570 tests): identical
 to CI 1123.
+
+## Speedometer enhancement issues #292–#301 (26 November 2026)
+
+Same method as #280–#290 above: `~/summit-test/k25/cand.sh` builds the
+committed engine patch plus one change's files with the CI's 10 November
+profile, and each candidate is compared with the build before it on the X399
+(air/OS x86_64), alternating builds (ABBA) in freshly started Summits with
+fresh profiles. The baseline is 2652f5f. Each landed change is the next
+one's baseline. Micro pages live in `~/summit-test/k25/www`. Behavior pages
+there print a digest that has to be identical between the two builds.
+(cand.sh now writes a file into the build tree only when its content
+changed: rewriting every unlisted in-progress file bumped its mtime, so one
+uncommitted WTF header made every candidate a full rebuild.)
+
+### #292: TreeWalker's JavaScript NodeFilter
+
+Per visited node, a filter that only returns FILTER_ACCEPT took 380 ns on the
+baseline (`tw.html`: 8,000 elements). Without a filter the walk takes 36 ns
+and calling the same filter from a JavaScript loop takes 28 ns, so about
+316 ns was the native callback path. A profile of that loop showed where it
+went:
+
+| Baseline self samples (7,055) | |
+|---|---|
+| `AtomStringImpl::addLiteral` ("acceptNode" made an Identifier per node) | 18.5 % |
+| `JSLockHolder` ctor/dtor + `JSLock::lock` (taking a held lock again) | 26.9 % |
+| `pthread_getspecific` + `tls_get` + `pthread_self` (`Thread::currentSingleton`) | 9.5 % |
+
+Three changes, each kept because it measured on its own:
+
+1. **The operation name only when it is needed.** The generated callback
+   interfaces pass the operation name as a literal; JSCallbackData makes the
+   Identifier only when the callback is an object whose method has to be
+   looked up, and keeps it for that callback. A function filter never makes
+   it. The Get of `acceptNode` still happens on every call, so a method
+   replaced between calls, or a getter, behaves as before. 380 → 297 ns.
+2. **Re-entering the JS lock.** Every DOM callback takes a JSLockHolder in
+   its binding and another in JSExecState, both on a thread that already
+   holds the lock. JSLockHolder now counts such a re-entry directly, as
+   JSLock::lock() does after its failed tryLock(), without the
+   compare-and-swap and the two reference-count pairs around it; leaving a
+   re-entry only decrements. 297 → 261 ns. The profile then showed what
+   remained: two TLS lookups per holder.
+3. **The current thread in one load.** WTF finds the current Thread with
+   `pthread_getspecific`, which on Haiku is three libroot calls. It now also
+   keeps it in a native TLS slot (`tls_allocate()`), set and cleared
+   wherever the pthread key is, including the two-pass destruction at thread
+   exit (the key reads null while its destructor runs). On x86_64 the read is
+   the same `%fs:0`-relative load libroot's `tls_get()` does; on arm64 it
+   calls `tls_get()`, one call instead of three (not measured: no arm64
+   board was up; the arm64 cross-compiler builds it). A new thread's slot is
+   null because its TLS block is a fresh stack area, which libroot's own
+   syslog slot also relies on. This helps everything that asks for the
+   current thread (the atom string table, JSLock, ThreadSpecific).
+   261 → 156 ns.
+
+| ns per node (medians, 4 ABBA launches) | Baseline | 1 | 1+2 | 1+2+3 |
+|---|---|---|---|---|
+| function filter | 380 | 267 | 261 | 156 (−59 %) |
+| object filter `{acceptNode(n) {…}}` | 366 | 277 | 262 | 167 (−54 %) |
+| 1Password's subtree scan (a new walker per element, all rejected) | 1,437 | 1,294 | 1,356 | 1,114 (−22 %) |
+| no filter | 36 | 35 | 37 | 34 |
+
+The native part went from about 316 ns to about 96 ns per node; the callback
+body (28 ns) and the traversal are unchanged.
+
+Speedometer 3.1, X399 (3 ABBA rounds): no extensions 12.13 (12.0, 12.5,
+11.9) → 12.27 (12.1, 12.4, 12.3); signed-out 1Password 9.43 (9.44, 9.64,
+9.2) → 9.73 (9.8, 9.55, 9.83), +3.2 %. TodoMVC-jQuery alone with 1Password
+(4 rounds) did not move: 2.87 → 2.84 (one 2.61 run), Sync per step
+65/154/85 ms → 67/155/85 ms, Async 15/24/8 → 13/31/9 ms (single-iteration
+spikes in both builds); without extensions 3.50 → 3.51. So 1Password's
+walker callbacks mostly run outside jQuery's timed steps. The profile's 39 %
+covered the whole sampling window. The Framework Desktop run the issue asks
+for was not done: it is the owner's daily machine.
+
+A differential page (`twcheck.html`: function and object filters, `this`, a
+method replaced during the walk, a getter (one Get per node), a function with
+its own `acceptNode` property, non-callable and missing `acceptNode`, string
+and object results, exceptions from the filter and from the getter,
+re-entering the same walker (InvalidStateError) and a new one, mutation from
+the filter, every walk direction with SKIP/REJECT, NodeIterator, a filter
+from a removed iframe's realm) gave identical results. A page that starts
+and ends workers (nested, closing themselves, terminated mid-work) ran
+without problems on the TLS build.
