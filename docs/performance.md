@@ -13778,3 +13778,22 @@ Speedometer 3.1: Charts-chartjs 101.2 → 99.4 ms; Perf-Dashboard 143.5 →
 148.3 ms on two candidate runs, one of them slow in every suite (the other,
 141.2 ms, is inside the baseline's 139–150 ms); score within spread. WPT
 html/canvas/element (2,000 files): no regressions.
+
+### #286: one border quad for getBoundingClientRect
+
+Element::boundingAbsoluteRectWithoutLayout maps the border box of an ordinary
+RenderBox that is not in a fragmented flow (and is not the RenderView)
+directly, with the same `localToAbsoluteQuad(…, UseTransforms)` call
+RenderBox::absoluteQuads makes, instead of filling a Vector<FloatRect> and a
+Vector<FloatQuad> and uniting one entry. Inline boxes, SVG, list-box options,
+multicolumn content and the view keep the general route; every call still
+returns a new DOMRect.
+
+A differential page (transforms, 3D, page zoom, scrolled container, document
+scroll, multicolumn, vertical-rl, fixed and relative positioning, inline span,
+table cell, list-box option, SVG, form controls; then again at zoom 1.25):
+all 34 rectangles identical. 60,000 rectangle reads: 38.3 → 31.0 ms (−19 %).
+CodeMirror's Long and Highlight steps did not move measurably (+1.5 %, +0.3 %):
+the geometry read is a small part of their measurement routine.
+Full Speedometer 3.1 within spread (12.12 against 11.86 over three runs each
+with one slow run per build). WPT css/cssom-view: no regressions.
