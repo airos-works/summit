@@ -13647,3 +13647,53 @@ be imported (-4)`) and, while a page keeps changing, a frame goes through
 app_server every 250 ms with a blocking read of the changed area: 2-3 a
 second while scrolling The Verge, 2.2-6.6 ms on average and up to 11 ms.
 Importing the buffer object itself is airos-works/haiku#67.
+
+## Speedometer enhancement issues #280–#290 (25 November 2026)
+
+Each change was measured on its own against the same baseline: the engine of
+6c7f67b built with the CI's 10 November profile (`~/summit-test/k25/cand.sh`
+builds the committed patch plus one change's files, so a candidate differs
+from the baseline only there). Runs are on the X399 (air/OS x86_64,
+hrev60207+2864), alternating baseline and candidate (ABBA), each in a freshly
+started Summit with a fresh profile, 1121×538 viewport, normal rendering
+settings. A candidate is compiled with the baseline's profile, so its changed
+functions are built without one; #280's retrain covers them. Correctness was
+checked with the WPT directories named below on the fleet VMs against the CI
+1123 build, and with differential pages that compare the old and new build's
+output.
+
+### #281: single-node insertion for parentless children
+
+appendChild and insertBefore of a node that has no parent, is not a fragment
+and belongs to the same document now take ContainerNode's single-child
+insertion path (the one the parser and replaceAll use) instead of a one-entry
+NodeVector. Without a parent there is no removal step, so no script can run
+before the insertion; moves, adoption and fragments keep the general path.
+The child's ChildChange now names it as `siblingChanged`, as the parser path
+does.
+
+The vector path was already cheap (inline storage, no allocation): 200,000
+parentless insertions took 27.5 ms before and 27.7 ms after (medians of six
+launches). Full Speedometer 3.1: 12.26 (12.2, 12.4, 12.2) against 12.25
+(12.2, 12.3); TodoMVC-Preact-Complex-DOM −1.3 %, NewsSite-Next −1.1 %,
+Charts-observable-plot +0.2 %: within run-to-run spread. WPT dom/nodes,
+dom/ranges, custom-elements, shadow-dom, the select/option and script element
+directories and global-attributes: no test worse than CI 1123 (six better,
+from #276 and baseline crash flakes).
+
+### #282: inherited changes that fully resolve valid children
+
+An instrumented build (SUMMIT_STYLE_TRACE, not landed) counted every style
+resolution in TreeResolver::resolveComposedTree by element validity, the
+parent's descendant mode and resolution type. The September trace this issue
+cites (240 of 422 elements individually valid but reached through parent
+changes) came from an older engine. On the current one, TodoMVC-Preact- and
+Svelte-Complex-DOM never fully resolve a valid child because of an inherited
+change in its parent: their steady-state work is newly inserted subtrees
+(SubtreeInvalid, about 2,000 per iteration) and the elements whose class
+changed. Over a whole Speedometer 3.1 run (514,000 resolutions), 9,203 (1.8 %)
+were such full resolves; 98 % of them followed a change of inherited custom
+properties and 96 % changed the child's style, so they cannot be skipped. A
+further 1,020 resolutions of children with explicitly inherited properties
+after a non-inherited parent change were all no-ops (0.2 %). No change was
+made.

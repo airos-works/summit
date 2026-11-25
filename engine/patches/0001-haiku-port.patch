@@ -28889,6 +28889,66 @@ index 624fb5b85a5aeea5c069e0c48c738e2eaee68281..98f704405fbb5de03622631735d6831e
      return Range::boundingClientRect(SimpleRange { BoundaryPoint { *m_offsetNode, m_offset }, BoundaryPoint { *m_offsetNode, m_offset } });
  }
  
+diff --git a/Source/WebCore/dom/ContainerNode.cpp b/Source/WebCore/dom/ContainerNode.cpp
+index f47d4ad1de38e7aa5a64ec81eadadaecc90c6e47..232498ae83930cdcf0020bcf02a0ffcd17b662f1 100644
+--- a/Source/WebCore/dom/ContainerNode.cpp
++++ b/Source/WebCore/dom/ContainerNode.cpp
+@@ -689,6 +689,15 @@ static inline ExceptionOr<void> checkPreReplacementValidity(ContainerNode& newPa
+     return checkAcceptChild(newParent, newChild, &oldChild, AcceptChildOperation::Replace, shouldValidateChildParent);
+ }
+ 
++// Summit (#281): most API insertions build detached trees from newly created nodes. A node
++// with no parent needs no removal step, so it cannot run script before it is inserted; a
++// non-fragment node in this document needs no adoption. Such a node takes the single-child
++// insertion path (as the parser and replaceAll do) instead of a one-entry NodeVector.
++static inline bool canUseSingleChildInsertion(const ContainerNode& newParent, const Node& newChild)
++{
++    return !newChild.parentNode() && !newChild.isDocumentFragment() && &newChild.document() == &newParent.document();
++}
++
+ ExceptionOr<void> ContainerNode::insertBefore(Node& newChild, RefPtr<Node>&& refChild)
+ {
+     // Check that this node is not "floating".
+@@ -710,6 +719,19 @@ ExceptionOr<void> ContainerNode::insertBefore(Node& newChild, RefPtr<Node>&& ref
+     Ref<ContainerNode> protectedThis(*this);
+     Ref next = refChild.releaseNonNull();
+ 
++    if (canUseSingleChildInsertion(*this, newChild)) {
++        Ref protectedNewChild { newChild };
++        InspectorInstrumentation::willInsertDOMNode(protect(document()), *this);
++
++        executeNodeInsertionWithScriptAssertion(*this, newChild, next.ptr(), ChildChange::Source::API, ReplacedAllChildren::No, [&] {
++            newChild.setTreeScopeRecursively(treeScope());
++            insertBeforeCommon(next, newChild);
++        });
++
++        dispatchSubtreeModifiedEvent();
++        return { };
++    }
++
+     uint64_t beforeScriptExecutionCount = ScriptController::scriptExecutionCount();
+ 
+     NodeVector targets;
+@@ -1045,6 +1067,19 @@ ExceptionOr<void> ContainerNode::appendChildWithoutPreInsertionValidityCheck(Nod
+ {
+     Ref protectedThis { *this };
+ 
++    if (canUseSingleChildInsertion(*this, newChild)) {
++        Ref protectedNewChild { newChild };
++        InspectorInstrumentation::willInsertDOMNode(protect(document()), *this);
++
++        executeNodeInsertionWithScriptAssertion(*this, newChild, nullptr, ChildChange::Source::API, ReplacedAllChildren::No, [&] {
++            newChild.setTreeScopeRecursively(treeScope());
++            appendChildCommon(newChild);
++        });
++
++        dispatchSubtreeModifiedEvent();
++        return { };
++    }
++
+     uint64_t beforeScriptExecutionCount = ScriptController::scriptExecutionCount();
+ 
+     NodeVector targets;
 diff --git a/Source/WebCore/dom/DataTransfer.cpp b/Source/WebCore/dom/DataTransfer.cpp
 index a7339e182f59f517e27c3c754bb13a0fd9d64576..4260356cb468093d4bb496f1b8df012db96c286c 100644
 --- a/Source/WebCore/dom/DataTransfer.cpp
