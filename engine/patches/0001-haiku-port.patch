@@ -219510,16 +219510,22 @@ index efd16800da06dcf0fb4248500b730c89d92388fe..1ee9ed77ed614b0c96726c0d36bbb3ea
  #include "UpdateInfo.h"
  #include "WebDisplayRefreshMonitor.h"
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/DrawingAreaCoordinatedGraphicsGLib.cpp b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/DrawingAreaCoordinatedGraphicsGLib.cpp
-index f188f71c7802934b0e1f335c11fb85ab6b000d95..8038a6add9acab04f20c7fee3ab757a0df8500b9 100644
+index f188f71c7802934b0e1f335c11fb85ab6b000d95..c26425f4a95904b4612b87df3d55c8dbfbc72a8e 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/DrawingAreaCoordinatedGraphicsGLib.cpp
 +++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/DrawingAreaCoordinatedGraphicsGLib.cpp
-@@ -49,8 +49,17 @@
+@@ -49,10 +49,58 @@
  #include <WebCore/WindowEventLoop.h>
  #include <wtf/SetForScope.h>
  #include <wtf/SystemTracing.h>
 +#if PLATFORM(HAIKU)
 +#include "WebPageProxyMessages.h"
++#include <WebCore/GLContext.h>
 +#include <WebCore/PlatformDisplay.h>
++#if USE(LIBEPOXY)
++#include <epoxy/gl.h>
++#else
++#include <GLES2/gl2.h>
++#endif
 +#endif
  
  namespace WebKit {
@@ -219530,8 +219536,43 @@ index f188f71c7802934b0e1f335c11fb85ab6b000d95..8038a6add9acab04f20c7fee3ab757a0
 +#endif
  using namespace WebCore;
  
++#if PLATFORM(HAIKU)
++// Whether the display's OpenGL is Mesa's softpipe, which runs every shader in
++// an interpreter on one core. That is what air/OS has without a GPU driver on
++// arm64 (its Mesa has no llvmpipe: a virtual machine's virtio-gpu, a board
++// whose driver failed) and what GALLIUM_DRIVER=softpipe selects. Compositing
++// with it is far slower than painting the page with Skia on the CPU: in a
++// 4-core VM at 200%, 139 ms to draw a 2.5 Mpx frame: a wheel burst got 5
++// frames, against 62 painted without compositing (#291). llvmpipe (x86_64
++// without a GPU) composites the same page at 55-60 frames a second and keeps
++// it. Asked once a process, on the sharing context that every compositor's
++// context is made with anyway (the first page waits for that context, a
++// spare process has made it already). SUMMIT_COORDINATED_COMPOSITING=1
++// composites on softpipe too; =0 never composites.
++static bool displayIsSoftpipeHaiku(PlatformDisplay& display)
++{
++    static std::optional<bool> softpipe;
++    if (softpipe)
++        return *softpipe;
++    softpipe = false;
++    if (const char* value = getenv("SUMMIT_COORDINATED_COMPOSITING"); value && !strcmp(value, "1"))
++        return false;
++    auto context = display.sharingGLContext();
++    if (!context)
++        return false;
++    GLContext::ScopedGLContextCurrent current(*context);
++    const char* renderer = reinterpret_cast<const char*>(glGetString(GL_RENDERER));
++    softpipe = renderer && strstr(renderer, "softpipe");
++    if (*softpipe)
++        WTFLogAlways("Summit: %s composites too slowly; pages are painted without compositing (SUMMIT_COORDINATED_COMPOSITING=1 composites anyway)", renderer);
++    return *softpipe;
++}
++#endif
++
  DrawingAreaCoordinatedGraphics::DrawingAreaCoordinatedGraphics(WebPage& webPage, const WebPageCreationParameters& parameters)
-@@ -121,6 +130,32 @@ void DrawingAreaCoordinatedGraphics::updatePreferences(const WebPreferencesStore
+     : DrawingArea(parameters.drawingAreaIdentifier, webPage)
+     , m_isPaintingSuspended(!(parameters.activityState & ActivityState::IsVisible))
+@@ -121,6 +169,35 @@ void DrawingAreaCoordinatedGraphics::updatePreferences(const WebPreferencesStore
      }
  #endif
      settings.setForceCompositingMode(store.getBoolValueForKey(WebPreferencesKey::forceCompositingModeKey()));
@@ -219556,7 +219597,10 @@ index f188f71c7802934b0e1f335c11fb85ab6b000d95..8038a6add9acab04f20c7fee3ab757a0
 +    // SUMMIT_COORDINATED_COMPOSITING=0 (enterAcceleratedCompositingModeIfNeeded)
 +    // paints without a layer tree: WebCore must not composite either, or it
 +    // asks the non-composited renderer for layers and the process stops.
-+    if (const char* value = getenv("SUMMIT_COORDINATED_COMPOSITING"); value && !strcmp(value, "0")) {
++    // On softpipe the same, decided by the driver (displayIsSoftpipeHaiku()).
++    // WebGL stays: its canvases are painted into the page.
++    auto* display = PlatformDisplay::sharedDisplayIfExists();
++    if (const char* value = getenv("SUMMIT_COORDINATED_COMPOSITING"); (value && !strcmp(value, "0")) || (display && displayIsSoftpipeHaiku(*display))) {
 +        settings.setAcceleratedCompositingEnabled(false);
 +        settings.setForceCompositingMode(false);
 +    }
@@ -219564,7 +219608,7 @@ index f188f71c7802934b0e1f335c11fb85ab6b000d95..8038a6add9acab04f20c7fee3ab757a0
      // Fixed position elements need to be composited and create stacking contexts
      // in order to be scrolled by the ScrollingCoordinator.
      settings.setAcceleratedCompositingForFixedPositionEnabled(settings.acceleratedCompositingEnabled());
-@@ -133,6 +168,17 @@ void DrawingAreaCoordinatedGraphics::updatePreferences(const WebPreferencesStore
+@@ -133,6 +210,17 @@ void DrawingAreaCoordinatedGraphics::updatePreferences(const WebPreferencesStore
              m_supportsAsyncScrolling = false;
      }
  #endif
@@ -219582,7 +219626,7 @@ index f188f71c7802934b0e1f335c11fb85ab6b000d95..8038a6add9acab04f20c7fee3ab757a0
  
      // If async scrolling is disabled, we have to force-disable async frame and overflow scrolling
      // to keep the non-async scrolling on those elements working.
-@@ -145,10 +191,22 @@ void DrawingAreaCoordinatedGraphics::updatePreferences(const WebPreferencesStore
+@@ -145,10 +233,22 @@ void DrawingAreaCoordinatedGraphics::updatePreferences(const WebPreferencesStore
  bool DrawingAreaCoordinatedGraphics::enterAcceleratedCompositingModeIfNeeded()
  {
      Ref webPage = m_webPage;
@@ -219606,7 +219650,7 @@ index f188f71c7802934b0e1f335c11fb85ab6b000d95..8038a6add9acab04f20c7fee3ab757a0
  
      if (m_renderer) {
          if (m_layerTreeStateIsFrozen)
-@@ -236,10 +294,19 @@ void DrawingAreaCoordinatedGraphics::triggerRenderingUpdate()
+@@ -236,10 +336,19 @@ void DrawingAreaCoordinatedGraphics::triggerRenderingUpdate()
      m_renderer->scheduleRenderingUpdate();
  }
  

@@ -159,6 +159,32 @@ it" cost a full raster of every tile kept. On Haiku:
 
 See `docs/performance.md`, 30 October 2026, for measurements.
 
+## Software OpenGL (Haiku)
+
+Without a GPU driver the display's OpenGL is Mesa's software rasterizer:
+llvmpipe on x86_64 (Summit's private Mesa) and softpipe on arm64, whose
+system Mesa is built without LLVM (Panfrost and V3D plus softpipe). That is
+an arm64 virtual machine on virtio-gpu (QEMU on an Apple Silicon Mac, #291),
+a board whose driver failed, or `GALLIUM_DRIVER=softpipe`.
+
+softpipe runs every shader in an interpreter on one core. In a 4-core VM at
+200% (1121x538 logical view, 2.5 Mpx a frame), compositing a frame of a long
+text page took 139 ms, and a wheel burst (MCP `frame_stats` with
+`scroll=true`) delivered 5-6 frames, 145-169 ms apart. At 100% the same
+window is a quarter of the pixels, which is why lowering the scale seemed to
+help, but a frame still took about 140 ms. So when the sharing context's
+`GL_RENDERER` is softpipe the drawing area turns accelerated compositing off
+for the process (`displayIsSoftpipeHaiku()` in
+`DrawingAreaCoordinatedGraphicsGLib.cpp`), as `SUMMIT_COORDINATED_COMPOSITING=0`
+does: the non-composited renderer paints the page with Skia on the CPU. The
+same burst then delivers 62 frames, 16 ms apart. WebGL, video, CSS animations
+and `position: fixed` still draw. `SUMMIT_COORDINATED_COMPOSITING=1` keeps
+compositing on softpipe.
+
+llvmpipe composites the same burst at 55-60 frames a second (2x, 4 cores),
+as fast as painting without layers, and stays composited: the wpt and
+reftest kits run on it.
+
 ## What the compositor leaves out or keeps (Haiku)
 
 The sections above describe the first, main-thread design. Today the web
