@@ -13697,3 +13697,24 @@ properties and 96 % changed the child's style, so they cannot be skipped. A
 further 1,020 resolutions of children with explicitly inherited properties
 after a non-inherited parent change were all no-ops (0.2 %). No change was
 made.
+
+### #283: plain decimal SVG lengths skip the CSS parser
+
+SVGLengthValue::setValueAsString recognizes a complete `[+-]?(digits[.digits]|.digits)`
+string and stores it as a CSS number (SVG_LENGTHTYPE_NUMBER) converted with
+`charactersToDouble`, the function the CSS tokenizer uses, so the value is the
+same bit for bit; the float-overflow rule is applied as before. Whitespace,
+exponents, units, percentages, `calc()` and malformed input still go through
+the tokenizer and property parser, and construct's negative-value and fallback
+handling is unchanged.
+
+A differential page (41 inputs: signs, `-0`, `.5`, `5.`, `1e3`, units,
+percentages, leading and trailing whitespace, FLT_MAX overflow, 20-digit
+integers, 17-digit fractions, malformed strings) gave identical baseVal
+values, unit types, `valueAsString` and bounding boxes on both builds. Setting
+seven geometry attributes on 500 rectangles and circles 40 times: 115.3 ms →
+98.5 ms (−14.5 %). Speedometer 3.1: Charts-observable-plot 108.7 → 105.0 ms
+(−3.3 %, every run), React-Stockcharts-SVG and the full score within
+run-to-run spread (12.20 against 12.25 without one run that was slow in every
+suite). WPT svg/types, shapes, geometry and coordinate-systems (with the
+combined pass described under #289): no regressions.

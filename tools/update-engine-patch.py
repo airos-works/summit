@@ -28,6 +28,8 @@ def main():
     parser.add_argument('--only', nargs='+', metavar='PATH',
                         help='Stage only these paths (relative to the WebKit tree) and leave other working-tree '
                              'changes out of the patch, to land one change while others are still in progress.')
+    parser.add_argument('--from-index', action='store_true',
+                        help='Stage nothing: write the patch from the index as it is (for hand-staged hunks).')
     args = parser.parse_args()
     lock_path = ROOT / 'engine/sources.lock.json'
     lock = json.loads(lock_path.read_text())
@@ -45,7 +47,8 @@ def main():
         env = dict(os.environ, GIT_INDEX_FILE=scratch.name)
     try:
         paths = args.only or ['CMakeLists.txt', 'Configurations', 'Source', 'Tools']
-        git(args.source, 'add', '-A', '--', *paths, env=env)
+        if not args.from_index:
+            git(args.source, 'add', '-A', '--', *paths, env=env)
         patch = git(args.source, 'diff', '--cached', '--no-ext-diff', '--no-textconv', '--binary',
                     '--full-index', 'HEAD', env=env)
     finally:

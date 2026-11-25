@@ -112842,6 +112842,67 @@ index 09157397434a3b8be47ca214db284c726e878693..517120285158ab416a825d3d70804e22
      static bool NODELETE propertyCreatesStackingContext(CSSPropertyID);
      static bool NODELETE propertyTriggersCompositing(CSSPropertyID);
      static bool NODELETE propertyTriggersCompositingOnBoxesOnly(CSSPropertyID);
+diff --git a/Source/WebCore/svg/SVGLengthValue.cpp b/Source/WebCore/svg/SVGLengthValue.cpp
+index 7b28ddeda6932b4b15b3b0cef2e6536966746537..895bd0fcc920013c3876806ec8e24c9f7b83b856 100644
+--- a/Source/WebCore/svg/SVGLengthValue.cpp
++++ b/Source/WebCore/svg/SVGLengthValue.cpp
+@@ -81,6 +81,41 @@ static inline CSS::LengthPercentageUnit NODELETE svgLengthTypeToCSSLengthUnit(SV
+     }
+ }
+ 
++// Summit (#283): chart libraries write geometry attributes as plain decimals ("12", "-4.75").
++// Recognize a complete [+-]?(digits[.digits]|.digits) string and convert it with the same
++// function the CSS tokenizer uses, so the value is identical to the general parser's result;
++// anything else (whitespace, exponents, units, percentages, calc) takes the CSS parser.
++template<typename CharacterType>
++static std::optional<double> parsePlainDecimalLength(std::span<const CharacterType> characters)
++{
++    size_t index = 0;
++    size_t length = characters.size();
++    if (index < length && (characters[index] == '+' || characters[index] == '-'))
++        ++index;
++    size_t integerDigits = 0;
++    while (index < length && isASCIIDigit(characters[index])) {
++        ++index;
++        ++integerDigits;
++    }
++    size_t fractionDigits = 0;
++    if (index < length && characters[index] == '.') {
++        ++index;
++        while (index < length && isASCIIDigit(characters[index])) {
++            ++index;
++            ++fractionDigits;
++        }
++        if (!fractionDigits)
++            return std::nullopt;
++    }
++    if (index != length || (!integerDigits && !fractionDigits))
++        return std::nullopt;
++    bool ok = false;
++    double value = charactersToDouble(characters, &ok);
++    if (!ok)
++        return std::nullopt;
++    return value;
++}
++
+ static Variant<CSS::Number<>, CSS::LengthPercentage<>> createVariantForLengthType(float value, SVGLengthType lengthType)
+ {
+     if (lengthType == SVGLengthType::Number)
+@@ -372,6 +407,14 @@ ExceptionOr<void> SVGLengthValue::setValueAsString(StringView string)
+         return value > FLT_MAX || value < -FLT_MAX;
+     };
+ 
++    if (auto value = string.is8Bit() ? parsePlainDecimalLength(string.span8()) : parsePlainDecimalLength(string.span16())) {
++        if (isFloatOverflow(*value))
++            m_value = CSS::Number<>(0);
++        else
++            m_value = CSS::Number<>(*value);
++        return { };
++    }
++
+     auto parserContext = CSSParserContext { SVGAttributeMode };
+     auto parserState = CSS::PropertyParserState {
+         .context = parserContext
 diff --git a/Source/WebCore/testing/Internals.idl b/Source/WebCore/testing/Internals.idl
 index 004110288068340109f3dd98a57123c0779675aa..e468ceb71c006aaf5a037d127c3d66695f7af617 100644
 --- a/Source/WebCore/testing/Internals.idl
