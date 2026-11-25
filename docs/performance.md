@@ -13864,3 +13864,74 @@ custom-elements; html/syntax/parsing; domparsing) on four fleet VMs, with a
 build holding all of those changes, against CI 1123: seven differences, all
 crashes of the baseline run that passed or failed the same way in the
 candidate.
+
+### #290: Speedometer with 1Password and uBlock Origin
+
+The extension packages were copied from the Framework Desktop's profile into
+fresh test profiles (no extension storage: 1Password signed out, uBlock Origin
+1.77.0 with its default lists), warmed once, and the four combinations run
+alternately on the same build. 1Password 8.12.46.29 is almost the whole cost;
+uBlock Origin costs 3–6 %:
+
+| Speedometer 3.1 | none | uBlock | 1Password | both |
+|---|---|---|---|---|
+| X399 | 11.95 | 11.55 | 8.28 | 7.97 |
+| Framework Desktop | 27.75 | 26.15 | 19.80 | 19.30 |
+
+The extra time is in the Async half of the steps (Preact Adding100Items:
+Sync +0.2 ms, Async +49 ms on the X399). A profile of the web process with
+1Password on (Preact-Complex-DOM, 200 iterations) showed
+Document::updateIntersectionObservers at 12.9 % of samples,
+WeakListHashSet<Element>::removeNullReferences at 6.5 % and
+CollectionTraversal<LabelsNodeList>::begin at 4 %. MutationObserver recipient
+lookup, which the issue suspected, did not appear.
+
+**Intersection observers of removed frames.** 1Password's field watcher
+registers every field with an IntersectionObserver in each frame. Speedometer
+loads every suite iteration in a new iframe. The observers of removed frames
+stay registered with the top document until garbage collection, and every
+rendering update copied and walked their targets: 96 % of the targets visited
+were in documents that are not fully active (177,590 of 184,223 in one
+half-second window). An implicit-root observer that finds none of its targets
+in a fully active document is now dormant and skipped. A generation counter
+wakes all dormant observers when a document may have become fully active
+again (a new current document in a frame, back/forward cache attach, resume
+or state change) or when nodes are adopted into another document; observe()
+wakes that observer. A trace showed adoption must be caught in
+Node::moveTreeToNewScope: the fast adoption path does not call
+Element::didMoveToNewDocument (WPT
+intersection-observer/target-in-detached-document caught the first attempt).
+
+**Labels.** 1Password reads `labels` of every field, and each read walked the
+whole tree scope after any DOM change. In the owner's tree scope a label can
+label the owner only as a label ancestor or through a `for` attribute equal
+to the owner's id. If there is no label ancestor and no label with that `for`
+value (TreeScope::labelElementsForId), the list is empty without a walk;
+otherwise the traversal runs as before.
+
+Results, same engine baseline:
+
+| Speedometer 3.1 | 1Password | both | none |
+|---|---|---|---|
+| X399 baseline | 8.30 | 7.97 | 11.67 |
+| X399 both fixes | 9.71–9.79 (+17–20 %) | | 11.58 |
+| Framework Desktop baseline | 19.80 | 19.30 | 27.75 |
+| Framework Desktop both fixes | | 22.00 (+14 %) | 27.50 |
+
+That recovers 42 % (X399, 1Password) and 32 % (desktop, both) of the loss.
+Preact-Complex-DOM with 1Password went from 100 to 60 ms on the X399; the
+no-extension control is within spread. The rest is the extensions' own
+JavaScript (the TreeWalker filter callbacks are 5.5 % of samples), garbage
+collection, and the layout and style work that 1Password's field handling
+causes. In full desktop runs with both extensions, TodoMVC-jQuery was 14 %
+slower on the candidate (two runs each). Run alone in three alternating
+pairs it was 2.3 % faster, and on the X399 it was not slower with uBlock
+or both, so this looks like an ordering effect of the full run.
+
+A differential page (observers of a frame that is removed, a target adopted
+into the live document, scrolling, a new observer; labels through an
+ancestor, `for`, none, duplicate ids, a label added later and retargeted)
+gave identical records on both builds. WPT intersection-observer,
+the-label-element, form-control-infrastructure, dom/collections,
+back-forward-cache, html/syntax/parsing and domparsing (570 tests): identical
+to CI 1123.

@@ -29129,7 +29129,7 @@ index 25d1a39c50333e9d5c5f48936cf1d9bad22d09d8..6025a0f1ed9ea0e138b59a0c6a8870b4
      }
  
 diff --git a/Source/WebCore/dom/Document.cpp b/Source/WebCore/dom/Document.cpp
-index 79f2bcbc106c7c43e8a971816c183dcc00610b83..820bf0e4f5b788234af00082d75dcb34c0b970f3 100644
+index 79f2bcbc106c7c43e8a971816c183dcc00610b83..d937e8cd1344159d4eb7796bbde5553ca26a2706 100644
 --- a/Source/WebCore/dom/Document.cpp
 +++ b/Source/WebCore/dom/Document.cpp
 @@ -384,6 +384,7 @@
@@ -29451,7 +29451,23 @@ index 79f2bcbc106c7c43e8a971816c183dcc00610b83..820bf0e4f5b788234af00082d75dcb34
      resolveStyle(ResolveStyleType::Rebuild);
  
  #if PLATFORM(MAC)
-@@ -6029,6 +6190,37 @@ void Document::runScrollSteps()
+@@ -3528,6 +3689,7 @@ void Document::createRenderTree()
+ 
+ void Document::didBecomeCurrentDocumentInFrame()
+ {
++    IntersectionObserver::documentsMayHaveBecomeFullyActive();
+     protect(frame()->script())->updateDocument();
+ 
+     // Many of these functions have event handlers which can detach the frame synchronously, so we must check repeatedly in this function.
+@@ -3600,6 +3762,7 @@ void Document::willDetachPage()
+ void Document::attachToCachedFrame(CachedFrameBase& cachedFrame)
+ {
+     RELEASE_ASSERT(cachedFrame.document() == this);
++    IntersectionObserver::documentsMayHaveBecomeFullyActive();
+     ASSERT(cachedFrame.view());
+     ASSERT(m_backForwardCacheState == Document::InBackForwardCache);
+     if (CheckedPtr localFrameView = dynamicDowncast<LocalFrameView>(cachedFrame.view()))
+@@ -6029,6 +6192,37 @@ void Document::runScrollSteps()
      if (auto page = this->page(); page && page->shouldDeferScrollEvents())
          return;
  
@@ -29489,7 +29505,7 @@ index 79f2bcbc106c7c43e8a971816c183dcc00610b83..820bf0e4f5b788234af00082d75dcb34
      // Service user scroll animations before scroll event dispatch.
      if (RefPtr frameView = view()) {
          MonotonicTime now = MonotonicTime::now();
-@@ -6050,7 +6242,13 @@ void Document::runScrollSteps()
+@@ -6050,7 +6244,13 @@ void Document::runScrollSteps()
          if (scrollAnimationsInProgress)
              protect(page())->scheduleRenderingUpdate({ RenderingUpdateStep::Scroll });
  
@@ -29503,7 +29519,7 @@ index 79f2bcbc106c7c43e8a971816c183dcc00610b83..820bf0e4f5b788234af00082d75dcb34
      }
  
      // FIXME: The order of dispatching is not specified: https://github.com/WICG/visual-viewport/issues/66.
-@@ -6058,6 +6256,15 @@ void Document::runScrollSteps()
+@@ -6058,6 +6258,15 @@ void Document::runScrollSteps()
          LOG_WITH_STREAM(Events, stream << "Document " << this << " sending scroll events to pending scroll event targets");
          auto currentTargets = WTF::move(m_pendingScrollEventTargetList->targets);
          for (auto& [target, type] : currentTargets) {
@@ -29519,7 +29535,7 @@ index 79f2bcbc106c7c43e8a971816c183dcc00610b83..820bf0e4f5b788234af00082d75dcb34
              auto bubbles = target->isDocumentNode() ? Event::CanBubble::Yes : Event::CanBubble::No;
              auto eventName = [&] {
                  switch (type) {
-@@ -6079,13 +6286,31 @@ void Document::runScrollSteps()
+@@ -6079,13 +6288,31 @@ void Document::runScrollSteps()
                  return frameView->scrollableAreaForNode(target.get());
              }();
  
@@ -29551,7 +29567,7 @@ index 79f2bcbc106c7c43e8a971816c183dcc00610b83..820bf0e4f5b788234af00082d75dcb34
          }
      }
      if (m_needsVisualViewportScrollEvent) {
-@@ -6094,6 +6319,17 @@ void Document::runScrollSteps()
+@@ -6094,6 +6321,17 @@ void Document::runScrollSteps()
          if (RefPtr window = this->window())
              window->visualViewport().dispatchEvent(Event::create(eventNames().scrollEvent, Event::CanBubble::No, Event::IsCancelable::No));
      }
@@ -29569,7 +29585,24 @@ index 79f2bcbc106c7c43e8a971816c183dcc00610b83..820bf0e4f5b788234af00082d75dcb34
  }
  
  void Document::flushDeferredScrollEvents()
-@@ -9181,6 +9417,8 @@ void Document::dispatchPageswapEvent(CanTriggerCrossDocumentViewTransition canTr
+@@ -7682,6 +7920,7 @@ void Document::setBackForwardCacheState(BackForwardCacheState state)
+     if (m_backForwardCacheState == state)
+         return;
+ 
++    IntersectionObserver::documentsMayHaveBecomeFullyActive();
+     m_backForwardCacheState = state;
+ 
+     RefPtr frameView = view();
+@@ -7782,6 +8021,8 @@ void Document::resume(ReasonForSuspension reason)
+     if (!m_isSuspended)
+         return;
+ 
++    IntersectionObserver::documentsMayHaveBecomeFullyActive();
++
+     for (auto element : copyToVectorOf<Ref<Element>>(m_documentSuspensionCallbackElements))
+         element->resumeFromDocumentSuspension();
+ 
+@@ -9181,6 +9422,8 @@ void Document::dispatchPageswapEvent(CanTriggerCrossDocumentViewTransition canTr
      // The navigation cannot wait, so capture now.
      if (oldViewTransition && oldViewTransition->phase() != ViewTransitionPhase::Done) {
          oldViewTransition->setupViewTransition();
@@ -29578,7 +29611,7 @@ index 79f2bcbc106c7c43e8a971816c183dcc00610b83..820bf0e4f5b788234af00082d75dcb34
  
          // FIXME: This should set the params on the new Document, but it doesn't exist yet.
          // Store it on the old, and we'll call transferViewTransitionParams soon.
-@@ -10669,21 +10907,54 @@ void Document::removeIntersectionObserver(IntersectionObserver& observer)
+@@ -10669,21 +10912,54 @@ void Document::removeIntersectionObserver(IntersectionObserver& observer)
  static void updateAndNotifyIntersectionObservers(const Vector<WeakPtr<IntersectionObserver>>& intersectionObservers, const Frame& hostFrame)
  {
      Vector<WeakPtr<IntersectionObserver>> intersectionObserversWithPendingNotifications;
@@ -29633,7 +29666,7 @@ index 79f2bcbc106c7c43e8a971816c183dcc00610b83..820bf0e4f5b788234af00082d75dcb34
  }
  
  void Document::updateRemoteIntersectionObservers()
-@@ -12487,7 +12758,7 @@ void Document::performPendingViewTransitions()
+@@ -12487,7 +12763,7 @@ void Document::performPendingViewTransitions()
      else if (activeViewTransition->phase() == ViewTransitionPhase::Animating)
          activeViewTransition->handleTransitionFrame();
  
@@ -29642,7 +29675,7 @@ index 79f2bcbc106c7c43e8a971816c183dcc00610b83..820bf0e4f5b788234af00082d75dcb34
          scheduleRenderingUpdate(RenderingUpdateStep::PerformPendingViewTransitions);
  }
  
-@@ -12670,7 +12941,10 @@ void Document::updateCachedSetInnerHTML(const String& sourceString, ContainerNod
+@@ -12670,7 +12946,10 @@ void Document::updateCachedSetInnerHTML(const String& sourceString, ContainerNod
  {
      auto& cache = cachedSetInnerHTML();
  
@@ -30148,6 +30181,21 @@ index 6faad9e9d37eb57e560df1b47dbc6c904b2a85a9..143c3ea0597790a862b53993b3c2cc58
          || eventType == eventNames.touchmoveEvent;
  }
  
+diff --git a/Source/WebCore/dom/Node.cpp b/Source/WebCore/dom/Node.cpp
+index 266ff00acf75ea08edf70cb485e147b9d9609701..176add1dbc26b5a6ab31efa2add40e3f7dce3389 100644
+--- a/Source/WebCore/dom/Node.cpp
++++ b/Source/WebCore/dom/Node.cpp
+@@ -2227,6 +2227,10 @@ void Node::moveTreeToNewScope(Node& root, TreeScope& oldScope, TreeScope& newSco
+     Ref newDocument = newScope.documentScope();
+     bool newScopeIsUAShadowTree = newScope.rootNode().hasBeenInUserAgentShadowTree();
+     if (&oldDocument.get() != &newDocument.get()) {
++        // Summit (#290): adopted nodes may be observation targets that are now in a fully active
++        // document, so dormant intersection observers look at their targets again. (The fast
++        // adoption path below does not call Element::didMoveToNewDocument.)
++        IntersectionObserver::documentsMayHaveBecomeFullyActive();
+         oldDocument->incrementReferencingNodeCount();
+         bool isFastCase = isDocumentEligibleForFastAdoption(oldDocument, newDocument) && !newScopeIsUAShadowTree;
+         if (isFastCase) {
 diff --git a/Source/WebCore/dom/PointerEvent.cpp b/Source/WebCore/dom/PointerEvent.cpp
 index dd8c59fe17c70a72f03df3c884b5a92f8f655e61..3ba23dc2dc6419d05a1e573a3d133c05652c0ec8 100644
 --- a/Source/WebCore/dom/PointerEvent.cpp
@@ -31209,6 +31257,32 @@ index 205fd8d4e80e6c9bfe0e2374676062012d50281c..e96d43642c5b5ff55754b96bcc6cbad2
      using CachedFrameBase::view;
      using CachedFrameBase::url;
      DocumentLoader* documentLoader() const { return m_documentLoader.get(); }
+diff --git a/Source/WebCore/html/CollectionTraversalInlines.h b/Source/WebCore/html/CollectionTraversalInlines.h
+index 255315c77fabe5cbcbd35cdefcb130c74c65846a..79fb9421773fd8c163a6837fdef182d054f799dd 100644
+--- a/Source/WebCore/html/CollectionTraversalInlines.h
++++ b/Source/WebCore/html/CollectionTraversalInlines.h
+@@ -87,6 +87,10 @@ inline void CollectionTraversal<CollectionTraversalType::Descendants>::traverseB
+ template <typename CollectionClass>
+ inline auto CollectionTraversal<CollectionTraversalType::WeakPtrDescendants>::begin(const CollectionClass& collection, ContainerNode& rootNode) -> Iterator
+ {
++    if constexpr (requires { collection.isDefinitelyEmpty(); }) {
++        if (collection.isDefinitelyEmpty())
++            return nullptr;
++    }
+     auto it = descendantsOfType<Element>(rootNode).begin();
+     while (it && !collection.elementMatches(*it))
+         ++it;
+@@ -98,6 +102,10 @@ inline auto CollectionTraversal<CollectionTraversalType::WeakPtrDescendants>::be
+ template <typename CollectionClass>
+ inline auto CollectionTraversal<CollectionTraversalType::WeakPtrDescendants>::last(const CollectionClass& collection, ContainerNode& rootNode) -> Iterator
+ {
++    if constexpr (requires { collection.isDefinitelyEmpty(); }) {
++        if (collection.isDefinitelyEmpty())
++            return nullptr;
++    }
+     ElementDescendantIterator<Element> it { rootNode, ElementTraversal::lastWithin(rootNode) };
+     while (it && !collection.elementMatches(*it))
+         --it;
 diff --git a/Source/WebCore/html/HTMLAttributeNames.in b/Source/WebCore/html/HTMLAttributeNames.in
 index 69cdf33473f25d81d415289b8390791f03279282..35ead79216897eae7ee4c404c353055307578639 100644
 --- a/Source/WebCore/html/HTMLAttributeNames.in
@@ -31445,6 +31519,63 @@ index 8870f94c05533db3ade70ce6c584e61d7189952e..d34e592b18ebeef591a35900b8a9369f
      if (insertionType.treeScopeChanged && isInShadowTree()) {
          if (RefPtr shadowRoot = containingShadowRoot())
              shadowRoot->addSlotElementByName(attributeWithoutSynchronization(nameAttr), *this);
+diff --git a/Source/WebCore/html/LabelsNodeList.cpp b/Source/WebCore/html/LabelsNodeList.cpp
+index 610feec950ca008375876b9e4e37279380044017..3c172ad48ef43913a9b6351090d451b1efced7dc 100644
+--- a/Source/WebCore/html/LabelsNodeList.cpp
++++ b/Source/WebCore/html/LabelsNodeList.cpp
+@@ -25,10 +25,12 @@
+ #include "LabelsNodeList.h"
+ 
+ #include "CommonAtomStrings.h"
++#include "ElementInlines.h"
+ #include "HTMLLabelElement.h"
+ #include "HTMLNames.h"
+ #include "LiveNodeListInlines.h"
+ #include "NodeRareData.h"
++#include "TreeScope.h"
+ #include <wtf/TZoneMallocInlines.h>
+ 
+ namespace WebCore {
+@@ -52,6 +54,24 @@ LabelsNodeList::~LabelsNodeList()
+     ownerNode().nodeLists()->removeCacheWithAtomName(*this, starAtom());
+ } 
+     
++bool LabelsNodeList::isDefinitelyEmpty() const
++{
++    // In the owner's tree scope a label labels the owner only if it is an ancestor without a for
++    // attribute (its control is a labelable descendant), or if its for attribute names the owner's
++    // id. Labels elsewhere resolve to controls in other tree scopes. Field watchers in password
++    // managers read `labels` of every new field, and each read walked the whole document.
++    Ref owner = downcast<HTMLElement>(ownerNode());
++    for (RefPtr ancestor = owner->parentNode(); ancestor; ancestor = ancestor->parentNode()) {
++        if (is<HTMLLabelElement>(*ancestor))
++            return false;
++    }
++    auto& id = owner->getIdAttribute();
++    if (id.isEmpty())
++        return true;
++    auto* labels = owner->treeScope().labelElementsForId(id);
++    return !labels || labels->isEmpty();
++}
++
+ bool LabelsNodeList::elementMatches(Element& testNode) const
+ {
+     RefPtr label = dynamicDowncast<HTMLLabelElement>(testNode);
+diff --git a/Source/WebCore/html/LabelsNodeList.h b/Source/WebCore/html/LabelsNodeList.h
+index 2b8f55cbf0efc009c43082086014d895de28938f..f434680e84f667ff12a5b2622cfdd3bd967b8cea 100644
+--- a/Source/WebCore/html/LabelsNodeList.h
++++ b/Source/WebCore/html/LabelsNodeList.h
+@@ -39,6 +39,10 @@ public:
+     bool elementMatches(Element&) const final;
+     bool isRootedAtTreeScope() const final { return true; }
+ 
++    // Summit (#290): true when no label in the tree scope can label the owner, so the list is
++    // empty without walking the whole tree scope.
++    bool isDefinitelyEmpty() const;
++
+ private:
+     explicit LabelsNodeList(HTMLElement&);
+ };
 diff --git a/Source/WebCore/html/MonthInputType.cpp b/Source/WebCore/html/MonthInputType.cpp
 index d28d814bfb7fc086d84ecb726bbd3c89f1ae2663..1f3f0978fcc27c7e424fccd89d64dd9c500ee39a 100644
 --- a/Source/WebCore/html/MonthInputType.cpp
@@ -36188,6 +36319,92 @@ index 77e75ff0a5b36532d012290a137583185c705f32..45713de5d5bfd71aa8ddaa47baf7eeeb
              current = found;
              continue;
          }
+diff --git a/Source/WebCore/page/IntersectionObserver.cpp b/Source/WebCore/page/IntersectionObserver.cpp
+index b5b854c4fbadc27bd57a7189b4444e68e34e59e8..2507af1c56103d264527101c657c91637da4c969 100644
+--- a/Source/WebCore/page/IntersectionObserver.cpp
++++ b/Source/WebCore/page/IntersectionObserver.cpp
+@@ -257,11 +257,20 @@ void IntersectionObserver::resetPreviousThresholdIndexForTarget(const Element& t
+     }
+ }
+ 
++static uint64_t s_fullyActiveGeneration { 1 };
++
++void IntersectionObserver::documentsMayHaveBecomeFullyActive()
++{
++    ++s_fullyActiveGeneration;
++}
++
+ void IntersectionObserver::observe(Element& target)
+ {
+     if (!trackingDocument() || isObserving(target))
+         return;
+ 
++    m_dormantGeneration = 0;
++
+     target.ensureIntersectionObserverData().registrations.append({ *this, std::nullopt });
+     bool hadObservationTargets = hasObservationTargets();
+     m_observationTargets.add(target);
+@@ -583,6 +592,14 @@ auto IntersectionObserver::updateObservations(const Frame& hostFrame) -> NeedNot
+ 
+     auto needNotify = NeedNotify::No;
+ 
++    // Summit (#290): observers created by frames that were removed (an extension's field watcher in
++    // each of Speedometer's suite frames) stay registered until garbage collection, and walking
++    // their targets on every rendering update cost several percent of the main thread.
++    if (m_dormantGeneration == s_fullyActiveGeneration)
++        return NeedNotify::No;
++    bool sawTargetInFullyActiveDocument = false;
++    bool sawTarget = false;
++
+     // Cache Document::isFullyActive() because it's expensive, and it's likely that observation
+     // targets all belong to a handful of documents.
+     auto isDocumentFullyActive = [cache = WeakHashMap<Document, bool, WeakPtrImplWithEventTargetData> { }] (const Document &document) mutable {
+@@ -599,8 +616,10 @@ auto IntersectionObserver::updateObservations(const Frame& hostFrame) -> NeedNot
+         // Per HTML spec, "update the rendering" step (which includes "run the update intersection
+         // observations") only occurs for fully active documents. Hence skip updating the target if
+         // its document is not fully active.
++        sawTarget = true;
+         if (!root() && !isDocumentFullyActive(protect(target->document())))
+             continue;
++        sawTargetInFullyActiveDocument = true;
+ 
+         auto& targetRegistrations = target->intersectionObserverDataIfExists()->registrations;
+         auto index = targetRegistrations.findIf([&](auto& registration) {
+@@ -672,6 +691,9 @@ auto IntersectionObserver::updateObservations(const Frame& hostFrame) -> NeedNot
+         }
+     }
+ 
++    if (!root() && sawTarget && !sawTargetInFullyActiveDocument)
++        m_dormantGeneration = s_fullyActiveGeneration;
++
+     return needNotify;
+ }
+ 
+diff --git a/Source/WebCore/page/IntersectionObserver.h b/Source/WebCore/page/IntersectionObserver.h
+index 5fd9def6d4b636a2d68ee7da93bd4c2367571bb7..a21d5f2277de2b83109e99bebe98077c772ace42 100644
+--- a/Source/WebCore/page/IntersectionObserver.h
++++ b/Source/WebCore/page/IntersectionObserver.h
+@@ -83,6 +83,10 @@ public:
+ 
+     ~IntersectionObserver();
+ 
++    // Summit (#290): a document may have become fully active again (back/forward cache restore,
++    // a new current document in a frame); observers skipped as dormant check their targets again.
++    static void documentsMayHaveBecomeFullyActive();
++
+     // Local: root is in the same process as the observer.
+     // Remote: root is in different process as the observer.
+     // Only situation where this applies is an observer created in a cross-site frame,
+@@ -159,6 +163,9 @@ private:
+     Vector<double> m_thresholds;
+     const Ref<IntersectionObserverCallback> m_callback;
+     WeakListHashSet<Element, WeakPtrImplWithEventTargetData> m_observationTargets;
++    // Summit (#290): nonzero while every target is in a document that is not fully active, as of
++    // that fully-active generation; such an observer is skipped instead of walking its targets.
++    uint64_t m_dormantGeneration { 0 };
+     Vector<GCReachableRef<Element>> m_pendingTargets;
+     Vector<Ref<IntersectionObserverEntry>> m_queuedEntries;
+     Vector<GCReachableRef<Element>> m_targetsWaitingForFirstObservation;
 diff --git a/Source/WebCore/page/LargestContentfulPaintData.cpp b/Source/WebCore/page/LargestContentfulPaintData.cpp
 index bbb54b89194cc6399eba94d1f9ea11ad625d5285..f9883c5c58f83ff0c429d302aab104b0566d91f8 100644
 --- a/Source/WebCore/page/LargestContentfulPaintData.cpp
