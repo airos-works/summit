@@ -1977,7 +1977,9 @@ private:
             for (const auto& record : fWindows) {
                 // Not a web app's window, which shows only its own pages.
                 if (record.messenger == source || record.privateBrowsing != privateTab || !record.webApp.empty()) continue;
-                if (!record.window->LockWithTimeout(200000)) continue;
+                // status_t: B_OK (0) is success. Testing it as a bool kept every locked
+                // window locked for good (#273).
+                if (record.window->LockWithTimeout(200000) != B_OK) continue;
                 const bool under = record.window->Frame().Contains(where) && !record.window->IsHidden();
                 record.window->Unlock();
                 if (under) { target = record.messenger; break; }
