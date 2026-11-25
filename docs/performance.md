@@ -13820,3 +13820,22 @@ not reach the late case on Summit: their titles are Japanese and Russian
 the restart costs only that prefix; their steps and the full score were within
 run-to-run spread. In-place widening of the Latin-1 writer (no restart at all)
 would save only that first title here and was not done.
+
+### #288: zero border widths skip device-pixel snapping
+
+The LineWidth evaluations (float and LayoutUnit) are now inline and return 0
+for a zero width before zooming and snapping, which keep their out-of-line
+code. Zero stays zero through both (snap(0 × zoom) = 0), so results are the
+same; nonzero widths, collapsed tables and native controls take the existing
+paths. RenderBoxModelObject's border accessors and everything else that
+evaluates a LineWidth get the check.
+
+A geometry page (widths 0, 0.25–2.49 px, thin, medium, thick and one-sided,
+with and without a border style, at zoom 1, 1.5 and 0.8; collapsed table cells
+with fractional and zero borders; input, button, select, textarea; vertical-rl
+boxes) gave identical rectangles, client and offset sizes and computed border
+widths on both builds. 20 relayouts of 2,000 borderless inline-blocks: 468 →
+391 ms (−16.4 %).
+Speedometer 3.1: 12.03 against 12.00 (three runs each, one slow run per
+build), Preact-Complex-DOM +2.7 %, Svelte +0.3 %, CodeMirror −2.0 %: within
+spread. WPT css/css-backgrounds and css-position: no regressions.

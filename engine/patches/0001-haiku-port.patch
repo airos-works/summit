@@ -113049,6 +113049,57 @@ index 97f47c51bfe97f2649de7153298141cb46468654..757f5bef6480cd6c1824f88be829b5c3
      case PrimaryKind::Left:
          return visitOverflowPosition(CSS::Keyword::Left { }, overflowPosition(), visitor);
      case PrimaryKind::Right:
+diff --git a/Source/WebCore/style/values/backgrounds/StyleLineWidth.cpp b/Source/WebCore/style/values/backgrounds/StyleLineWidth.cpp
+index 2fd5c1e5963e3e87a3bf5e4051a3fd2993ab4684..e333a3e2aa9587d823359677fb02439fe9ad1768 100644
+--- a/Source/WebCore/style/values/backgrounds/StyleLineWidth.cpp
++++ b/Source/WebCore/style/values/backgrounds/StyleLineWidth.cpp
+@@ -75,12 +75,12 @@ auto Blending<LineWidth>::blend(const LineWidth& a, const LineWidth& b, const St
+ 
+ // MARK: - Evaluation
+ 
+-auto Evaluation<LineWidth, float>::operator()(const LineWidth& value, ZoomFactor zoom, float deviceScaleFactor) -> float
++float Evaluation<LineWidth, float>::evaluateNonZero(const LineWidth& value, ZoomFactor zoom, float deviceScaleFactor)
+ {
+     return snapLengthAsBorderWidth(evaluate<float>(value.value, zoom), deviceScaleFactor);
+ }
+ 
+-auto Evaluation<LineWidth, LayoutUnit>::operator()(const LineWidth& value, ZoomFactor zoom, float deviceScaleFactor) -> LayoutUnit
++LayoutUnit Evaluation<LineWidth, LayoutUnit>::evaluateNonZero(const LineWidth& value, ZoomFactor zoom, float deviceScaleFactor)
+ {
+     // NOTE: Using `evaluate<float>`, not `evaluate<LayoutUnit>`, as snapLengthAsBorderWidth takes a `float`.
+     return LayoutUnit { snapLengthAsBorderWidth(evaluate<float>(value.value, zoom), deviceScaleFactor) };
+diff --git a/Source/WebCore/style/values/backgrounds/StyleLineWidth.h b/Source/WebCore/style/values/backgrounds/StyleLineWidth.h
+index f70c153f4aef1dee8be943c9f0f8b8f36b1494f1..b3bf6eeaf19f3ec0507a7c773e7d95b547e7b0ae 100644
+--- a/Source/WebCore/style/values/backgrounds/StyleLineWidth.h
++++ b/Source/WebCore/style/values/backgrounds/StyleLineWidth.h
+@@ -75,11 +75,25 @@ template<> struct Blending<LineWidth> {
+ 
+ // MARK: - Evaluation
+ 
++// Summit (#288): most boxes have no border. A zero width stays zero through zoom and
++// device-pixel snapping, so answer it inline and keep the snapping call for nonzero widths.
+ template<> struct Evaluation<LineWidth, float> {
+-    WEBCORE_EXPORT auto operator()(const LineWidth&, ZoomFactor, float deviceScaleFactor) -> float;
++    auto operator()(const LineWidth& value, ZoomFactor zoom, float deviceScaleFactor) -> float
++    {
++        if (value.isZero())
++            return 0.0f;
++        return evaluateNonZero(value, zoom, deviceScaleFactor);
++    }
++    WEBCORE_EXPORT static float evaluateNonZero(const LineWidth&, ZoomFactor, float deviceScaleFactor);
+ };
+ template<> struct Evaluation<LineWidth, LayoutUnit> {
+-    WEBCORE_EXPORT auto operator()(const LineWidth&, ZoomFactor, float deviceScaleFactor) -> LayoutUnit;
++    auto operator()(const LineWidth& value, ZoomFactor zoom, float deviceScaleFactor) -> LayoutUnit
++    {
++        if (value.isZero())
++            return { };
++        return evaluateNonZero(value, zoom, deviceScaleFactor);
++    }
++    WEBCORE_EXPORT static LayoutUnit evaluateNonZero(const LineWidth&, ZoomFactor, float deviceScaleFactor);
+ };
+ 
+ template<> struct Evaluation<LineWidthBox, FloatBoxExtent> {
 diff --git a/Source/WebCore/style/values/content/StyleContent.cpp b/Source/WebCore/style/values/content/StyleContent.cpp
 index 5ac00f4b8b69f5225162d4746369d6d32309b4ff..198f9ac65d1489bf9d6f80b56b24a400d2dd9016 100644
 --- a/Source/WebCore/style/values/content/StyleContent.cpp
