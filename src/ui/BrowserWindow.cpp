@@ -4962,8 +4962,21 @@ void BrowserWindow::FullScreenRequested(const BMessage& message)
     if (!tab) return;
     const bool enter = message.GetBool("fullscreen", false);
     const bool accepted = SetPageFullScreen(tab->id, enter);
-    if (auto request = message.GetUInt64("request", 0))
+    auto request = message.GetUInt64("request", 0);
+    if (!request) return;
+    if (enter || !accepted) {
         tab->view->CompleteFullScreenRequest(request, accepted);
+        return;
+    }
+    // Leaving full screen, the page must have its restored viewport before exitFullscreen()
+    // resolves (#275: a WebDriver click computed in the full-screen viewport missed). The view
+    // hears of its new size from B_VIEW_RESIZED messages that the resize and the layout post
+    // to this window: lay out now, and answer behind those messages.
+    Layout(false);
+    BMessage answer('fsra');
+    answer.AddMessenger("view", messenger);
+    answer.AddUInt64("request", request);
+    PostMessage(&answer);
 }
 
 bool BrowserWindow::SetPageFullScreen(int64 tab, bool enter)
@@ -6253,6 +6266,13 @@ void BrowserWindow::MessageReceived(BMessage* message)
             tab->noticeUntil = system_time() + 30 * 1000000LL;
             ShowTabStatus(*tab);
             std::fprintf(stderr, "Summit: %s\n", notice.c_str());
+            break;
+        }
+        case 'fsra': {
+            BMessenger messenger;
+            if (message->FindMessenger("view", &messenger) == B_OK)
+                if (auto* tab = FindTab(messenger))
+                    tab->view->CompleteFullScreenRequest(message->GetUInt64("request", 0), true);
             break;
         }
         case 'fsnh':

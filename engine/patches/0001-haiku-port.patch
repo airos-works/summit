@@ -212,11 +212,46 @@ index bd6c6dbcbeee1d413f8c880e56fb7e74c78749f8..8a559ca7ad8b75cf12a8ba7065b66d1d
                      const auto& methodName = event.methodName;
                      auto& methods = dispatchMap();
                      if (methods.contains(methodName)) {
+diff --git a/Source/JavaScriptCore/inspector/remote/socket/RemoteInspectorSocket.h b/Source/JavaScriptCore/inspector/remote/socket/RemoteInspectorSocket.h
+index 5fa74385d01a88d5732b79a348207dd00358bbe6..d491ddcbe17335e701ae7d086feab364952f317e 100644
+--- a/Source/JavaScriptCore/inspector/remote/socket/RemoteInspectorSocket.h
++++ b/Source/JavaScriptCore/inspector/remote/socket/RemoteInspectorSocket.h
+@@ -68,6 +68,9 @@ void init();
+ JS_EXPORT_PRIVATE std::optional<PlatformSocketType> connect(UTF8CStringView serverAddress, uint16_t serverPort);
+ JS_EXPORT_PRIVATE std::optional<PlatformSocketType> listen(UTF8CStringView address, uint16_t port);
+ JS_EXPORT_PRIVATE std::optional<PlatformSocketType> accept(PlatformSocketType);
++// Whether the last accept() on this thread failed for a reason that leaves the listening socket
++// usable (the client gave up before it was accepted, a signal, a spurious wake-up, ...).
++JS_EXPORT_PRIVATE bool lastAcceptFailureIsTransient();
+ JS_EXPORT_PRIVATE std::optional<std::array<PlatformSocketType, 2>> createPair();
+ 
+ JS_EXPORT_PRIVATE bool setup(PlatformSocketType);
+diff --git a/Source/JavaScriptCore/inspector/remote/socket/RemoteInspectorSocketEndpoint.cpp b/Source/JavaScriptCore/inspector/remote/socket/RemoteInspectorSocketEndpoint.cpp
+index 2ba7ebf66d94050d4e4ec24f11358d649c44f43e..63a4a624b157af6b2ed7790f1e4e9d14d160b1e3 100644
+--- a/Source/JavaScriptCore/inspector/remote/socket/RemoteInspectorSocketEndpoint.cpp
++++ b/Source/JavaScriptCore/inspector/remote/socket/RemoteInspectorSocketEndpoint.cpp
+@@ -362,7 +362,7 @@ void RemoteInspectorSocketEndpoint::acceptInetSocketIfEnabled(ConnectionID id)
+                 return;
+ 
+             Socket::close(*socket);
+-        } else {
++        } else if (!Socket::lastAcceptFailureIsTransient()) {
+             // If accept() returns error, we have to start over with bind() and listen().
+             // By closing socket here, listen() will be called again at the next loop of worker thread.
+             Socket::close(connection->socket);
 diff --git a/Source/JavaScriptCore/inspector/remote/socket/posix/RemoteInspectorSocketPOSIX.cpp b/Source/JavaScriptCore/inspector/remote/socket/posix/RemoteInspectorSocketPOSIX.cpp
-index ef01a259256ac7d938105ec678c4f93ad18d376b..0d4e6f31c7b8c3c591e43ccd5d026ed17643f54f 100644
+index ef01a259256ac7d938105ec678c4f93ad18d376b..62689989386ba46aa3d531367d871fc3f35d641b 100644
 --- a/Source/JavaScriptCore/inspector/remote/socket/posix/RemoteInspectorSocketPOSIX.cpp
 +++ b/Source/JavaScriptCore/inspector/remote/socket/posix/RemoteInspectorSocketPOSIX.cpp
-@@ -87,6 +87,11 @@ std::optional<PlatformSocketType> listen(UTF8CStringView addressStr, uint16_t po
+@@ -29,6 +29,7 @@
+ #if ENABLE(REMOTE_INSPECTOR)
+ 
+ #include <arpa/inet.h>
++#include <errno.h>
+ #include <fcntl.h>
+ #include <netinet/in.h>
+ #include <sys/socket.h>
+@@ -87,6 +88,11 @@ std::optional<PlatformSocketType> listen(UTF8CStringView addressStr, uint16_t po
      }
  
      error = setsockopt(fdListen, SOL_SOCKET, SO_REUSEPORT, &enabled, sizeof(enabled));
@@ -228,7 +263,78 @@ index ef01a259256ac7d938105ec678c4f93ad18d376b..0d4e6f31c7b8c3c591e43ccd5d026ed1
      if (error < 0) {
          LOG_ERROR("setsockopt() SO_REUSEPORT, errno = %d", errno);
          ::close(fdListen);
-@@ -160,12 +165,14 @@ bool setup(PlatformSocketType socket)
+@@ -115,7 +121,10 @@ std::optional<PlatformSocketType> listen(UTF8CStringView addressStr, uint16_t po
+         return std::nullopt;
+     }
+ 
+-    error = ::listen(fdListen, 1);
++    // Room for a few connections waiting to be accepted: WebDriver clients open one per command,
++    // and with a backlog of 1 a second connection arriving before the first is accepted can be
++    // refused (#274).
++    error = ::listen(fdListen, SOMAXCONN);
+     if (error < 0) {
+         LOG_ERROR("listen() failed, errno = %d", errno);
+         ::close(fdListen);
+@@ -125,19 +134,54 @@ std::optional<PlatformSocketType> listen(UTF8CStringView addressStr, uint16_t po
+     return fdListen;
+ }
+ 
++static thread_local int lastAcceptError;
++
+ std::optional<PlatformSocketType> accept(PlatformSocketType socket)
+ {
+     struct sockaddr_in address = { };
+ 
+-    socklen_t len = sizeof(struct sockaddr_in);
+-    int fd = ::accept(socket, (struct sockaddr*) &address, &len);
+-    if (fd >= 0)
++    int fd;
++    do {
++        socklen_t len = sizeof(struct sockaddr_in);
++        fd = ::accept(socket, (struct sockaddr*) &address, &len);
++    } while (fd < 0 && errno == EINTR);
++    if (fd >= 0) {
++        lastAcceptError = 0;
+         return fd;
++    }
+ 
+-    LOG_ERROR("accept(inet) error (errno = %d)", errno);
++    lastAcceptError = errno;
++    LOG_ERROR("accept(inet) error (errno = %d)", lastAcceptError);
+     return std::nullopt;
+ }
+ 
++bool lastAcceptFailureIsTransient()
++{
++    // The errors accept(2) can report for one pending connection, after which the listening
++    // socket still works. Closing the listener for them (as for a broken one) refuses every
++    // connection until it is bound again (#274).
++    switch (lastAcceptError) {
++    case EAGAIN:
++#if EWOULDBLOCK != EAGAIN
++    case EWOULDBLOCK:
++#endif
++    case EINTR:
++    case ECONNABORTED:
++    case ECONNRESET:
++    case EPROTO:
++    case ENETDOWN:
++    case ENETUNREACH:
++    case EHOSTUNREACH:
++    case ENOBUFS:
++    case ENOMEM:
++    case EMFILE:
++    case ENFILE:
++        return true;
++    default:
++        return false;
++    }
++}
++
+ std::optional<std::array<PlatformSocketType, 2>> createPair()
+ {
+     std::array<PlatformSocketType, 2> sockets;
+@@ -160,12 +204,14 @@ bool setup(PlatformSocketType socket)
          return false;
      }
  
@@ -245,7 +351,7 @@ index ef01a259256ac7d938105ec678c4f93ad18d376b..0d4e6f31c7b8c3c591e43ccd5d026ed1
          LOG_ERROR("setsockopt(SO_SNDBUF) error (errno = %d)", errno);
          return false;
      }
-@@ -180,6 +187,11 @@ bool isValid(PlatformSocketType socket)
+@@ -180,6 +226,11 @@ bool isValid(PlatformSocketType socket)
  
  bool isListening(PlatformSocketType socket)
  {
@@ -257,6 +363,22 @@ index ef01a259256ac7d938105ec678c4f93ad18d376b..0d4e6f31c7b8c3c591e43ccd5d026ed1
      int out;
      socklen_t outSize = sizeof(out);
      if (getsockopt(socket, SOL_SOCKET, SO_ACCEPTCONN, &out, &outSize) != -1)
+diff --git a/Source/JavaScriptCore/inspector/remote/socket/win/RemoteInspectorSocketWin.cpp b/Source/JavaScriptCore/inspector/remote/socket/win/RemoteInspectorSocketWin.cpp
+index 3da77d1d133047655219ee435a59c65c2e2527ed..43fe347fa6bd4897290f2d3cf6b91bcc663da99d 100644
+--- a/Source/JavaScriptCore/inspector/remote/socket/win/RemoteInspectorSocketWin.cpp
++++ b/Source/JavaScriptCore/inspector/remote/socket/win/RemoteInspectorSocketWin.cpp
+@@ -216,6 +216,11 @@ std::optional<PlatformSocketType> accept(PlatformSocketType socket)
+     return std::nullopt;
+ }
+ 
++bool lastAcceptFailureIsTransient()
++{
++    return false;
++}
++
+ std::optional<std::array<PlatformSocketType, 2>> createPair()
+ {
+     struct sockaddr_in address;
 diff --git a/Source/JavaScriptCore/inspector/scripts/codegen/preprocess.pl b/Source/JavaScriptCore/inspector/scripts/codegen/preprocess.pl
 index 630f6c989889b00e6c8817a819df1d9eed083d95..90dfd0dbc79faf617f61332f5248966addffc795 100644
 --- a/Source/JavaScriptCore/inspector/scripts/codegen/preprocess.pl
@@ -24891,11 +25013,64 @@ index 43dc4f03966450fd070bab03a5ee20a2878330d2..a54912a31482f1658826bfc1475b5859
  #endif
      }
  }
+diff --git a/Source/WebCore/accessibility/AXStitchUtilities.cpp b/Source/WebCore/accessibility/AXStitchUtilities.cpp
+index 16b44a101984111d6919b93109d6f62fa4c282c3..6e54b7919a26d5cd321fb938392ede9a8aca45df 100644
+--- a/Source/WebCore/accessibility/AXStitchUtilities.cpp
++++ b/Source/WebCore/accessibility/AXStitchUtilities.cpp
+@@ -130,11 +130,15 @@ StitchAction stitchActionFor(const RenderObject& renderer, const AccessibilityOb
+         return StitchAction::BreakAndSkip;
+     }
+ 
+-    if (renderer.parent() && (renderer.parent()->isBeforeOrAfterContent() || renderer.parent()->isFirstLetter())) {
++    if (renderer.parent() && (renderer.parent()->isBeforeOrAfterContent() || renderer.parent()->isFirstLetter() || renderer.parent()->style().isListMarkerStyle())) {
+         // Stitching generated content will cause incorrect behavior because
+         // some of our code that handles stitched text (e.g. stringValue) assumes
+         // the presence of a Node. For now, stop stitching at generated content.
+         // Ideally we remove this restriction in the future.
++        // The text of an inside list marker is generated content too. If it started a group it would be the
++        // group's representative, and the list item's own text would then be stitched into an object that
++        // has no node to build a value from. (An outside marker is stitched as the marker box, see
++        // AccessibilityNodeObject::stitchGroups().)
+         return StitchAction::BreakAndSkip;
+     }
+ 
 diff --git a/Source/WebCore/accessibility/AccessibilityNodeObject.cpp b/Source/WebCore/accessibility/AccessibilityNodeObject.cpp
-index 391c278d56c55ea9a48b2e8c6d9b5251fcbe63ec..648e4cf977ecbea051d1d8254f2039234e9f33df 100644
+index 391c278d56c55ea9a48b2e8c6d9b5251fcbe63ec..c41512e979eb816d87ffe9577ed32e7e19de039d 100644
 --- a/Source/WebCore/accessibility/AccessibilityNodeObject.cpp
 +++ b/Source/WebCore/accessibility/AccessibilityNodeObject.cpp
-@@ -3364,6 +3364,12 @@ String AccessibilityNodeObject::textForLabelElements(Vector<Ref<HTMLElement>>&&
+@@ -920,6 +920,10 @@ bool AccessibilityNodeObject::canHaveChildren() const
+     if (node() && !renderer() && WebCore::elementName(node()) == ElementName::HTML_noscript)
+         return false;
+ 
++    // Alternative text replaces the generated content as a whole, so the content itself isn't exposed.
++    if (!altTextFromStyle().isNull())
++        return false;
++
+     if (CheckedPtr listMarker = dynamicDowncast<RenderListOutsideMarker>(renderer()))
+         return listMarker->hasContentProperty();
+ 
+@@ -3285,7 +3289,7 @@ String AccessibilityNodeObject::textAsLabelFor(const AccessibilityObject& labele
+     if (!labelAttribute.isEmpty())
+         return labelAttribute;
+ 
+-    labelAttribute = altTextFromAttributeOrStyle();
++    labelAttribute = getAttribute(altAttr);
+     if (!labelAttribute.isEmpty())
+         return labelAttribute;
+ 
+@@ -3293,6 +3297,11 @@ String AccessibilityNodeObject::textAsLabelFor(const AccessibilityObject& labele
+     if (!labelAttribute.isEmpty())
+         return labelAttribute;
+ 
++    // The alt text of 'content' stands in for this element's content, so it ranks with the content
++    // (below the attributes above), and replaces the children it hides.
++    if (auto contentAlt = altTextFromContent(); !contentAlt.isEmpty())
++        return contentAlt;
++
+     if (isNativeLabel()) {
+         StringBuilder builder;
+         for (const auto& child : const_cast<AccessibilityNodeObject*>(this)->unignoredChildren()) {
+@@ -3364,6 +3373,12 @@ String AccessibilityNodeObject::textForLabelElements(Vector<Ref<HTMLElement>>&&
  #if PLATFORM(COCOA)
          else if (RefPtr axLabel = dynamicDowncast<AccessibilityNodeObject>(*label); axLabel && axLabel->isNativeLabel())
              appendNameToStringBuilder(result, axLabel->textAsLabelFor(*this));
@@ -24908,7 +25083,7 @@ index 391c278d56c55ea9a48b2e8c6d9b5251fcbe63ec..648e4cf977ecbea051d1d8254f203923
  #endif
          else
              appendNameToStringBuilder(result, accessibleNameForNode(labelElement.get(), /* labelledByNode */ protect(node()), descendIntoContainers));
-@@ -3401,6 +3407,14 @@ void AccessibilityNodeObject::labelText(Vector<AccessibilityText>& textOrder) co
+@@ -3401,6 +3416,14 @@ void AccessibilityNodeObject::labelText(Vector<AccessibilityText>& textOrder) co
          elementLabels.appendVector(WTF::compactMap(axLabels, [] (auto& axLabel) {
              return RefPtr { dynamicDowncast<HTMLElement>(axLabel->element()) };
          }));
@@ -24923,11 +25098,65 @@ index 391c278d56c55ea9a48b2e8c6d9b5251fcbe63ec..648e4cf977ecbea051d1d8254f203923
      }
      // Labels sourced from aria-labelledby are an accname relation traversal, so the text of the
      // whole referenced subtree counts, containers included. Native <label> elements keep the
+@@ -3462,7 +3485,7 @@ void AccessibilityNodeObject::alternativeText(Vector<AccessibilityText>& textOrd
+         }
+         // Images should use alt as long as the attribute is present, even if empty.
+         // Otherwise, it should fallback to other methods, like the title attribute.
+-        if (String alt = altTextFromAttributeOrStyle(); !alt.isNull())
++        if (String alt = altText(); !alt.isNull())
+             textOrder.append(AccessibilityText(WTF::move(alt), AccessibilityTextSource::Alternative));
+     }
+ 
+@@ -3538,9 +3561,9 @@ void AccessibilityNodeObject::alternativeText(Vector<AccessibilityText>& textOrd
+         textOrder.append(AccessibilityText(getAttribute(MathMLNames::alttextAttr), AccessibilityTextSource::Alternative));
+ #endif
+ 
+-    if (CheckedPtr style = this->style()) {
+-        String altText = style->content().altText();
+-        if (!altText.isEmpty())
++    // An element replaced by a 'content' image is described by that image's alt text, whatever its role.
++    if (CheckedPtr image = dynamicDowncast<RenderImage>(renderer()); image && image->isGeneratedContent()) {
++        if (String altText = image->altText(); !altText.isEmpty())
+             textOrder.append(AccessibilityText(WTF::move(altText), AccessibilityTextSource::Alternative));
+     }
+ }
+@@ -3708,7 +3731,7 @@ String AccessibilityNodeObject::description() const
+     if (usesAltForTextComputation()) {
+         // Images should use alt as long as the attribute is present, even if empty.
+         // Otherwise, it should fallback to other methods, like the title attribute.
+-        if (String alt = altTextFromAttributeOrStyle(); !alt.isNull())
++        if (String alt = altText(); !alt.isNull())
+             return alt;
+         // Image map elements shouldn't fallback.
+         if (isImageMapLink())
+@@ -3987,7 +4010,13 @@ String AccessibilityNodeObject::textUnderElement(TextUnderElementMode mode) cons
+ 
+         auto childText = object.textUnderElement(mode);
+         if (childText.length()) {
+-            appendNameToStringBuilder(builder, WTF::move(childText), previousRequiresSpace || shouldPrependSpace(object, previous.get()), shouldPrependNewline(previous.get()));
++            // The alternative text of generated content (`content: ... / "alt"`) stands apart from the
++            // text next to it, like other alternative text (Blink separates kCssAltText names the
++            // same way), unless whitespace already separates them.
++            bool separateAltText = (!object.altTextFromStyle().isNull() || (previous && !previous->altTextFromStyle().isNull()))
++                && !(builder.length() && isASCIIWhitespace(builder[builder.length() - 1]))
++                && !isASCIIWhitespace(childText[0]);
++            appendNameToStringBuilder(builder, WTF::move(childText), previousRequiresSpace || separateAltText || shouldPrependSpace(object, previous.get()), shouldPrependNewline(previous.get()));
+             previousRequiresSpace = false;
+         }
+     };
 diff --git a/Source/WebCore/accessibility/AccessibilityObject.cpp b/Source/WebCore/accessibility/AccessibilityObject.cpp
-index eaf3aee12b98b01a9d97a71cecdee1af09b66458..403ac738b6839c419959fe55310cc6f2b951eaf8 100644
+index eaf3aee12b98b01a9d97a71cecdee1af09b66458..d27b12bb7ff97d15fb93083fddc3905686a78641 100644
 --- a/Source/WebCore/accessibility/AccessibilityObject.cpp
 +++ b/Source/WebCore/accessibility/AccessibilityObject.cpp
-@@ -468,7 +468,7 @@ Vector<AXTextMarkerRange> AccessibilityObject::misspellingRanges() const
+@@ -101,6 +101,7 @@
+ #include "RemoteFrame.h"
+ #include "RenderBlockFlow.h"
+ #include "RenderDescendantIterator.h"
++#include "RenderCounter.h"
+ #include "RenderElementInlines.h"
+ #include "RenderImage.h"
+ #include "RenderImageResource.h"
+@@ -468,7 +469,7 @@ Vector<AXTextMarkerRange> AccessibilityObject::misspellingRanges() const
      } else {
          int location = -1;
          int length = 0;
@@ -24936,6 +25165,214 @@ index eaf3aee12b98b01a9d97a71cecdee1af09b66458..403ac738b6839c419959fe55310cc6f2
          if (location > -1 && length > 0)
              ranges = { { treeID(), objectID(), static_cast<unsigned>(location), static_cast<unsigned>(length) } };
      }
+@@ -1400,7 +1401,7 @@ Vector<String> AccessibilityObject::performTextOperation(const AccessibilityText
+     return result;
+ }
+ 
+-String AccessibilityObject::altTextFromAttributeOrStyle() const
++String AccessibilityObject::altText() const
+ {
+     const auto& alt = getAttribute(altAttr);
+     if (!alt.isNull()) {
+@@ -1409,8 +1410,35 @@ String AccessibilityObject::altTextFromAttributeOrStyle() const
+         return alt;
+     }
+ 
+-    CheckedPtr style = this->style();
+-    return style ? style->content().altText() : nullString();
++    return altTextFromContent();
++}
++
++// Alternative text from 'content' only applies where that content is used: a pseudo-element's
++// generated content, or an element replaced by a 'content' image.
++String AccessibilityObject::altTextFromContent() const
++{
++    if (auto contentAlt = altTextFromStyle(); !contentAlt.isNull())
++        return contentAlt;
++    if (CheckedPtr image = dynamicDowncast<RenderImage>(renderer()); image && image->isGeneratedContent())
++        return image->altText();
++    return nullString();
++}
++
++String AccessibilityObject::altTextFromStyle() const
++{
++    CheckedPtr renderer = dynamicDowncast<RenderElement>(this->renderer());
++    if (!renderer || !renderer->style().pseudoElementType())
++        return nullString();
++    // A ::marker's alternative text replaces its text renderer's text (AccessibilityRenderObject), so
++    // its marker box stays an ordinary container: list markers have their own text rules.
++    if (renderer->style().isListMarkerStyle())
++        return nullString();
++    auto& content = renderer->style().content();
++    if (!content.altTextHasCounters())
++        return content.altText();
++    return content.altText([&](const Style::Content::Counter& counter) {
++        return RenderCounter::altTextForCounter(*renderer, counter);
++    });
+ }
+ 
+ bool AccessibilityObject::isARIAInput(AccessibilityRole ariaRole)
+@@ -2273,8 +2301,8 @@ bool AccessibilityObject::shouldCacheStringValue() const
+     if (renderer->isAnonymous()) {
+         auto* parent = renderer ? renderer->parent() : nullptr;
+         if (is<PseudoElement>(parent ? parent->element() : nullptr)) {
+-            // RenderTexts descending from pseudo-elements (e.g. ::before) can have alt text that
+-            // we don't currently handle via text runs, and thus we must cache the string value.
++            // RenderTexts descending from pseudo-elements (e.g. ::before) have no text runs,
++            // and thus we must cache the string value.
+             return true;
+         }
+     }
+diff --git a/Source/WebCore/accessibility/AccessibilityObject.h b/Source/WebCore/accessibility/AccessibilityObject.h
+index 0f96a1ddbe2ae2a8f4cec87fca089385207a580c..14710e5922d0dbdfbd87ea90f83ab3c335187ff1 100644
+--- a/Source/WebCore/accessibility/AccessibilityObject.h
++++ b/Source/WebCore/accessibility/AccessibilityObject.h
+@@ -421,7 +421,10 @@ public:
+ 
+     String description() const override { return { }; }
+     virtual String helpText() const { return { }; }
+-    String altTextFromAttributeOrStyle() const;
++    String altText() const;
++    String altTextFromContent() const;
++    // Only for pseudo-element boxes, whose alt text replaces their generated content as a whole. Empty marks it as decorative.
++    String altTextFromStyle() const;
+ 
+     std::optional<String> textContent() const final;
+     bool hasTextContent() const;
+diff --git a/Source/WebCore/accessibility/AccessibilityRenderObject.cpp b/Source/WebCore/accessibility/AccessibilityRenderObject.cpp
+index 05e420fb9bbd505f0804f8113f9c21750a4c31d1..f50509d9bbfbfcaf97d2d4d16b6053904245f6de 100644
+--- a/Source/WebCore/accessibility/AccessibilityRenderObject.cpp
++++ b/Source/WebCore/accessibility/AccessibilityRenderObject.cpp
+@@ -412,9 +412,18 @@ Element* AccessibilityRenderObject::anchorElement() const
+     return nullptr;
+ }
+ 
+-// Null is distinct from empty: empty asks for the content to be ignored.
+-static const String& generatedContentAltText(const RenderText* renderText)
++// Other generated content has its alt text on its pseudo-element box (altTextFromStyle()); a
++// ::marker keeps it on the renderers made from its `content`. Null is distinct from empty: empty
++// asks for the content to be ignored.
++static const String& markerContentAltText(const RenderText* renderText)
+ {
++    if (!renderText)
++        return nullString();
++    CheckedPtr ancestor = renderText->parent();
++    while (ancestor && !ancestor->style().pseudoElementType())
++        ancestor = ancestor->parent();
++    if (!ancestor || !ancestor->style().isListMarkerStyle())
++        return nullString();
+     if (auto* renderTextFragment = dynamicDowncast<RenderTextFragment>(renderText))
+         return renderTextFragment->altText();
+     if (auto* renderGlyph = dynamicDowncast<RenderGlyph>(renderText))
+@@ -430,6 +439,12 @@ String AccessibilityRenderObject::textUnderElement(TextUnderElementMode mode) co
+     if (!m_renderer || mode.isHidden())
+         return AccessibilityNodeObject::textUnderElement(WTF::move(mode));
+ 
++    if (auto contentAlt = altTextFromStyle(); !contentAlt.isNull()) {
++        if (m_renderer->style().isListMarkerStyle() && mode.includeListMarkers == IncludeListMarkerText::No)
++            return { };
++        return contentAlt;
++    }
++
+     if (CheckedPtr fileUpload = dynamicDowncast<RenderFileUploadControl>(*m_renderer))
+         return fileUpload->buttonValue();
+ 
+@@ -507,7 +522,7 @@ String AccessibilityRenderObject::textUnderElement(TextUnderElementMode mode) co
+ 
+         // Sometimes text fragments don't have Nodes associated with them (like when
+         // CSS content is used to insert text or when a RenderCounter is used.)
+-        if (auto& altText = generatedContentAltText(renderText.get()); !altText.isNull())
++        if (auto& altText = markerContentAltText(renderText.get()); !altText.isNull())
+             return altText;
+         if (WeakPtr renderTextFragment = dynamicDowncast<RenderTextFragment>(renderText.get()))
+             return renderTextFragment->contentString();
+@@ -561,12 +576,17 @@ String AccessibilityRenderObject::stringValue() const
+         return AccessibilityNodeObject::stringValue();
+ 
+     bool isStaticText = this->isStaticText();
+-    if (isStaticText && node()) {
+-        // FIXME: Implement text stitching for node-less static text, like CSS generated content.
+-        // This is relevant here because only AccessibilityNodeObject::stringValue() knows how to
+-        // stitch text. Ideally, we would shrink this implementation into AccessibilityNodeObject,
+-        // since that is intended to become the "node and or renderer having" accessibility object class.
+-        return AccessibilityNodeObject::stringValue();
++    if (isStaticText) {
++        if (auto contentAlt = altTextFromStyle(); !contentAlt.isNull())
++            return contentAlt;
++
++        if (node()) {
++            // FIXME: Implement text stitching for node-less static text, like CSS generated content.
++            // This is relevant here because only AccessibilityNodeObject::stringValue() knows how to
++            // stitch text. Ideally, we would shrink this implementation into AccessibilityNodeObject,
++            // since that is intended to become the "node and or renderer having" accessibility object class.
++            return AccessibilityNodeObject::stringValue();
++        }
+     }
+ 
+     if (isStaticText || isTextControl() || isSecureField()) {
+@@ -1122,6 +1142,10 @@ bool AccessibilityRenderObject::computeIsIgnored() const
+     if (m_renderer->isBR())
+         return true;
+ 
++    // The alt text may be set on generated content through CSS, which should be honored.
++    if (auto contentAlt = altTextFromStyle(); !contentAlt.isNull())
++        return objectInclusionFromAltText(contentAlt) == AccessibilityObjectInclusion::IgnoreObject;
++
+     if (WeakPtr renderText = dynamicDowncast<RenderText>(m_renderer.get())) {
+         // Text elements with no rendered text, or only whitespace should not be part of the AX tree.
+         if (!renderText->hasRenderedText()) {
+@@ -1141,8 +1165,8 @@ bool AccessibilityRenderObject::computeIsIgnored() const
+         if (renderText->text().containsOnly<isASCIIWhitespace>())
+             return true;
+ 
+-        // The alt text may be set on generated content through CSS, which should be honored.
+-        auto altTextInclusion = objectInclusionFromAltText(generatedContentAltText(renderText.get()));
++        // The alt text of a ::marker's `content` (empty hides it) applies to its text.
++        auto altTextInclusion = objectInclusionFromAltText(markerContentAltText(renderText.get()));
+         if (altTextInclusion == AccessibilityObjectInclusion::IgnoreObject)
+             return true;
+         if (altTextInclusion == AccessibilityObjectInclusion::IncludeObject)
+@@ -1236,7 +1260,7 @@ bool AccessibilityRenderObject::computeIsIgnored() const
+         if (image)
+             altTextInclusion = objectInclusionFromAltText(image->altText());
+         else
+-            altTextInclusion = objectInclusionFromAltText(altTextFromAttributeOrStyle());
++            altTextInclusion = objectInclusionFromAltText(altText());
+ 
+         if (altTextInclusion == AccessibilityObjectInclusion::IncludeObject)
+             return false;
+@@ -2460,6 +2484,18 @@ bool AccessibilityRenderObject::shouldIgnoreAttributeRole() const
+     return m_ariaRole == AccessibilityRole::Document && hasContentEditableAttributeSet();
+ }
+ 
++NODELETE static bool generatedContentIsOnlyImages(const Style::ComputedStyle& style)
++{
++    auto* contentData = style.content().tryData();
++    if (!contentData || contentData->visible.isEmpty())
++        return false;
++    for (auto& item : contentData->visible) {
++        if (!WTF::holdsAlternative<Style::Content::Image>(item))
++            return false;
++    }
++    return true;
++}
++
+ AccessibilityRole AccessibilityRenderObject::determineAccessibilityRole()
+ {
+     // Handle list role determination before checking for a renderer, because we want to use the same codepath in both scenarios.
+@@ -2596,6 +2632,12 @@ AccessibilityRole AccessibilityRenderObject::determineAccessibilityRole()
+     if (roleFromNode != AccessibilityRole::Unknown)
+         return roleFromNode;
+ 
++    if (!altTextFromStyle().isNull()) {
++        // FIXME: Generated content made only of images is exposed as an image, and other generated content as text.
++        // Should all generated content with alternative text be exposed as text?
++        return generatedContentIsOnlyImages(m_renderer->style()) ? AccessibilityRole::Image : AccessibilityRole::StaticText;
++    }
++
+ #if !PLATFORM(COCOA)
+     // This block should be deleted for all platforms, but doing so causes a lot of test failures that need to be sorted out.
+     if (CheckedPtr blockRenderer = dynamicDowncast<RenderBlockFlow>(m_renderer.get()))
 diff --git a/Source/WebCore/accessibility/playstation/AXObjectCachePlayStation.cpp b/Source/WebCore/accessibility/playstation/AXObjectCachePlayStation.cpp
 index 27ff2f14f28c9e87747ac02ddde34549545c9aa1..98ee99135626c748c450d31254f5ba9abe95c204 100644
 --- a/Source/WebCore/accessibility/playstation/AXObjectCachePlayStation.cpp
@@ -28356,6 +28793,25 @@ index 770ef5bcabccf77f8419e695f7f2000386b56cfe..6a7722709b5f48931f0c6ac672fdb482
              case CSSValueFlexEnd:
              case CSSValueLeft:
              case CSSValueRight:
+diff --git a/Source/WebCore/css/parser/CSSPropertyParserConsumer+Content.cpp b/Source/WebCore/css/parser/CSSPropertyParserConsumer+Content.cpp
+index fdbdd23b66478843497b4edef8f94fc07cd10209..e328802c2b341eb79f8b48747003c1324a00523e 100644
+--- a/Source/WebCore/css/parser/CSSPropertyParserConsumer+Content.cpp
++++ b/Source/WebCore/css/parser/CSSPropertyParserConsumer+Content.cpp
+@@ -279,10 +279,13 @@ static std::optional<CSS::Content> consumeUnresolvedContent(CSSParserTokenRange&
+         if (auto string = consumeUnresolvedString(range))
+             return CSS::Content::Text { WTF::move(*string) };
+ 
+-        // FIXME: <alt-content> should support <counter> as well.
+         switch (range.peek().functionId()) {
+         case CSSValueAttr:
+             return consumeUnresolvedContentLegacyAttrFunction(consumeFunction(range), state);
++        case CSSValueCounter:
++            return consumeUnresolvedContentCounterFunction(consumeFunction(range), state);
++        case CSSValueCounters:
++            return consumeUnresolvedContentCountersFunction(consumeFunction(range), state);
+         default:
+             break;
+         }
 diff --git a/Source/WebCore/css/parser/CSSPropertyParserCustom.h b/Source/WebCore/css/parser/CSSPropertyParserCustom.h
 index a556315d3f11f3c7ba8070821a4d1637b08c0a4e..307f9bb056d5e879132a45197c7bb2406ec88a90 100644
 --- a/Source/WebCore/css/parser/CSSPropertyParserCustom.h
@@ -28369,6 +28825,19 @@ index a556315d3f11f3c7ba8070821a4d1637b08c0a4e..307f9bb056d5e879132a45197c7bb240
                  templateRowsTrackList.value.value.append(CSS::GridTrackList::Track { WTF::move(*lineNames) });
              else {
                  CSS::GridLineNames combinedLineNames;
+diff --git a/Source/WebCore/css/values/content/CSSContent.h b/Source/WebCore/css/values/content/CSSContent.h
+index 1732a28c46607e36bac97419058dc979debd461c..df7bde001b9cae2a73e2002caf5d1c0f88539430 100644
+--- a/Source/WebCore/css/values/content/CSSContent.h
++++ b/Source/WebCore/css/values/content/CSSContent.h
+@@ -147,7 +147,7 @@ struct Content {
+     using LegacyAttrFunction = ContentLegacyAttrFunction;
+     using VisibleContentListItem = Variant<Text, LegacyAttrFunction, Image, CounterFunction, CountersFunction, Quote, Glyph>;
+     using VisibleContentList = SpaceSeparatedVector<VisibleContentListItem>;
+-    using AltContentListItem = Variant<Text, LegacyAttrFunction>;
++    using AltContentListItem = Variant<Text, LegacyAttrFunction, CounterFunction, CountersFunction>;
+     using AltContentList = SpaceSeparatedVector<AltContentListItem>;
+ 
+     struct Data {
 diff --git a/Source/WebCore/css/values/grid/CSSGridAutoFlow.h b/Source/WebCore/css/values/grid/CSSGridAutoFlow.h
 index 7674da832eab51dadf844fc154cfd58fecfb82fe..bad6e72728b541ae66d4007dddd3c3e211c93ce7 100644
 --- a/Source/WebCore/css/values/grid/CSSGridAutoFlow.h
@@ -29082,8 +29551,34 @@ index 79f2bcbc106c7c43e8a971816c183dcc00610b83..a8882810627b9dcc8f3c7cca51ce809d
          scheduleRenderingUpdate(RenderingUpdateStep::PerformPendingViewTransitions);
  }
  
+diff --git a/Source/WebCore/dom/DocumentFullscreen.cpp b/Source/WebCore/dom/DocumentFullscreen.cpp
+index 28af311e9b2529c78678571f3fa2f04b47cf16ab..d8cd20472f40efda97eb911d6f90d2c259e39ddb 100644
+--- a/Source/WebCore/dom/DocumentFullscreen.cpp
++++ b/Source/WebCore/dom/DocumentFullscreen.cpp
+@@ -560,14 +560,18 @@ void DocumentFullscreen::exitFullscreen(CompletionHandler<void(ExceptionOr<void>
+             // We just popped off one fullscreen element out of the top layer, query the new one.
+             protectedThis->m_pendingFullscreenElement = protectedThis->fullscreenElement();
+             if (protectedThis->m_pendingFullscreenElement) {
+-                page->chrome().client().enterFullScreenForElement(Ref { *protectedThis->m_pendingFullscreenElement }, HTMLMediaElementEnums::VideoFullscreenModeStandard, WTF::move(completionHandler), [weakThis = WTF::move(weakThis), resetPendingExitFullscreenScope = WTF::move(resetPendingExitFullscreenScope)](bool success) mutable {
++                // This exit is done once its element left the top layer (the spec resolves the promise
++                // here). Presenting the element below is the chrome's business: another exit queued
++                // with this one can pop that element too before the chrome answers, and that must not
++                // turn this exit into a failure ("Element requested for fullscreen has changed").
++                page->chrome().client().enterFullScreenForElement(Ref { *protectedThis->m_pendingFullscreenElement }, HTMLMediaElementEnums::VideoFullscreenModeStandard, [](auto) { }, [weakThis = WTF::move(weakThis), resetPendingExitFullscreenScope = WTF::move(resetPendingExitFullscreenScope)](bool success) mutable {
+                     RefPtr protectedThis = weakThis.get();
+                     if (!protectedThis || !success)
+                         return true;
+                     return protectedThis->didEnterFullscreen();
+                 });
+-            } else
+-                completionHandler({ });
++            }
++            completionHandler({ });
+         }
+     });
+ }
 diff --git a/Source/WebCore/dom/Element.cpp b/Source/WebCore/dom/Element.cpp
-index 387e5c0ad9a258b7e70fb47b58f7492c3cb111b1..4937300cb1c8a5724705caee695b0c29497cdcc7 100644
+index 387e5c0ad9a258b7e70fb47b58f7492c3cb111b1..6804579df81c25bfee11dc3166e3fef66aaec0a9 100644
 --- a/Source/WebCore/dom/Element.cpp
 +++ b/Source/WebCore/dom/Element.cpp
 @@ -472,11 +472,6 @@ bool Element::isKeyboardFocusable(const FocusEventData&) const
@@ -29143,7 +29638,22 @@ index 387e5c0ad9a258b7e70fb47b58f7492c3cb111b1..4937300cb1c8a5724705caee695b0c29
          return false;
  
      if (!renderer()) {
-@@ -4217,6 +4229,10 @@ static bool isProgramaticallyFocusable(Element& element)
+@@ -3820,11 +3832,13 @@ void Element::childrenChanged(const ChildChange& change)
+         } else {
+             // No light DOM dir=auto ancestor, but this element may be slotted
+             // into a dir=auto slot whose direction depends on slotted content.
++            // Every such slot up the composed tree can depend on it: a slot's
++            // assigned element can hold, in a deeper shadow tree, the slot this
++            // content went to.
+             for (Ref ancestor : composedTreeAncestors(*this)) {
+                 if (auto* slot = dynamicDowncast<HTMLSlotElement>(ancestor.get())) {
+                     if (slot->selfOrPrecedingNodesAffectDirAuto())
+                         slot->updateEffectiveTextDirection();
+-                    break;
+                 }
+             }
+         }
+@@ -4217,6 +4231,10 @@ static bool isProgramaticallyFocusable(Element& element)
      if (element.document().haveStylesheetsLoaded()) {
          if (!element.isFocusable())
              return false;
@@ -29154,7 +29664,7 @@ index 387e5c0ad9a258b7e70fb47b58f7492c3cb111b1..4937300cb1c8a5724705caee695b0c29
      }
      return element.supportsFocus();
  }
-@@ -4310,6 +4326,14 @@ void Element::focus(const FocusOptions& options)
+@@ -4310,6 +4328,14 @@ void Element::focus(const FocusOptions& options)
      if (renderer() && document->haveStylesheetsLoaded())
          document->updateStyleIfNeeded();
  
@@ -29169,7 +29679,7 @@ index 387e5c0ad9a258b7e70fb47b58f7492c3cb111b1..4937300cb1c8a5724705caee695b0c29
      if (&newTarget->document() != document.ptr())
          return;
  
-@@ -4351,6 +4375,14 @@ void Element::focus(const FocusOptions& options)
+@@ -4351,6 +4377,14 @@ void Element::focus(const FocusOptions& options)
      }
  
      newTarget->findTargetAndUpdateFocusAppearance(options.selectionRestorationMode, options.preventScroll ? SelectionRevealMode::DoNotReveal : SelectionRevealMode::Reveal);
@@ -29184,6 +29694,50 @@ index 387e5c0ad9a258b7e70fb47b58f7492c3cb111b1..4937300cb1c8a5724705caee695b0c29
  }
  
  void Element::focusForBindings(FocusOptions&& options)
+diff --git a/Source/WebCore/dom/ElementTextDirection.cpp b/Source/WebCore/dom/ElementTextDirection.cpp
+index cdb489a0c92fdb455a90b44111d0a053a6a3d12c..80a92ceabb099d57aa375216ac145d9fa91d937f 100644
+--- a/Source/WebCore/dom/ElementTextDirection.cpp
++++ b/Source/WebCore/dom/ElementTextDirection.cpp
+@@ -153,8 +153,17 @@ static std::optional<TextDirection> computeTextDirection(const Element& element,
+ }
+ 
+ // Specs: https://html.spec.whatwg.org/multipage/dom.html#contained-text-auto-directionality
+-static std::optional<TextDirection> computeContainedTextAutoDirection(const Element& element)
++static std::optional<TextDirection> computeContainedTextAutoDirection(const Element& element, bool canExcludeRoot = false)
+ {
++    // Specs: If canExcludeRoot is true, the root is skipped like any descendant
++    // (with its descendants) when it is a bdi, script, style or textarea element,
++    // or has a dir attribute not in the undefined state.
++    if (canExcludeRoot) {
++        if (element.hasTagName(HTMLNames::bdiTag) || element.hasTagName(HTMLNames::scriptTag) || element.hasTagName(HTMLNames::styleTag)
++            || element.isTextField() || element.hasTagName(HTMLNames::textareaTag) || elementHasValidTextDirectionState(element))
++            return std::nullopt;
++    }
++
+     for (RefPtr child = element.firstChild(); child; ) {
+         // Specs: Skip bdi, script, style nodes.
+         if (child->hasTagName(HTMLNames::bdiTag) || child->hasTagName(HTMLNames::scriptTag) || child->hasTagName(HTMLNames::styleTag)) {
+@@ -201,7 +210,7 @@ static std::optional<TextDirection> computeTextDirectionOfSlotElement(const HTML
+         return computeContainedTextAutoDirection(slotElement);
+ 
+     auto* nodes = slotElement.assignedNodes();
+-    if (!nodes)
++    if (!nodes || nodes->isEmpty())
+         return computeContainedTextAutoDirection(slotElement);
+ 
+     for (auto& child : *nodes) {
+@@ -213,8 +222,10 @@ static std::optional<TextDirection> computeTextDirectionOfSlotElement(const HTML
+         }
+ 
+         if (RefPtr element = dynamicDowncast<Element>(child.get())) {
++            // Specs: Set childDirection to the contained text auto directionality
++            // of child with canExcludeRoot set to true.
+             // Specs: If child direction is not null, then return child direction.
+-            if (auto direction = computeAutoDirectionality(*element))
++            if (auto direction = computeContainedTextAutoDirection(*element, true))
+                 return direction;
+         }
+     }
 diff --git a/Source/WebCore/dom/EventDispatcher.cpp b/Source/WebCore/dom/EventDispatcher.cpp
 index 366a96640f8fa0e9532ff00855ed36ec0b5eeb2b..f3e096bf2779a964470a1a0aae5700036680201f 100644
 --- a/Source/WebCore/dom/EventDispatcher.cpp
@@ -29668,6 +30222,48 @@ index 6d31af2f372edd30bc7ef5bba0ae51f41b324319..fbe3a5301026d165f2546b961582b2b8
      readonly attribute DOMString pointerType;
      readonly attribute boolean isPrimary;
  
+diff --git a/Source/WebCore/dom/PopoverData.h b/Source/WebCore/dom/PopoverData.h
+index ffa14a328affde17cfff99ec1dd0fbccc7d46cb8..3017238ec1288ee2b8f0aaf08365cfd8c8fe28af 100644
+--- a/Source/WebCore/dom/PopoverData.h
++++ b/Source/WebCore/dom/PopoverData.h
+@@ -88,6 +88,29 @@ public:
+         bool m_wasSet;
+     };
+ 
++    // https://html.spec.whatwg.org/#popover-hiding: only a hide nested in another hide of the same
++    // popover skips its events. A hide during the popover's show (e.g. from a focus or blur handler
++    // run by the focusing steps) still fires them.
++    class ScopedStartHiding {
++    public:
++    explicit ScopedStartHiding(Element& popover)
++        : m_popover(popover)
++        , m_wasSet(popover.popoverData()->m_isHidingPopover)
++    {
++        m_popover->popoverData()->m_isHidingPopover = true;
++    }
++    ~ScopedStartHiding()
++    {
++        if (!m_wasSet && m_popover->popoverData())
++            m_popover->popoverData()->m_isHidingPopover = false;
++    }
++    bool wasHiding() const { return m_wasSet; }
++
++    private:
++        const Ref<Element> m_popover;
++        bool m_wasSet;
++    };
++
+     class PopoverCloseWatcherEventListener final : public EventListener {
+     public:
+         static Ref<PopoverCloseWatcherEventListener> create(HTMLElement& popover)
+@@ -109,6 +132,7 @@ private:
+     WeakPtr<HTMLElement, WeakPtrImplWithEventTargetData> m_invoker;
+     WeakPtr<HTMLElement, WeakPtrImplWithEventTargetData> m_hintStackParent;
+     bool m_isHidingOrShowingPopover = false;
++    bool m_isHidingPopover = false;
+     bool m_showingAsHint = false;
+     RefPtr<CloseWatcher> m_closeWatcher;
+ };
 diff --git a/Source/WebCore/dom/Position.cpp b/Source/WebCore/dom/Position.cpp
 index 105e7fcdcc8733c8dd1e662460015680f469a3a4..8fe399844836fefc38c61faa98bf397e65dd46d1 100644
 --- a/Source/WebCore/dom/Position.cpp
@@ -29775,7 +30371,7 @@ index e5681b29c8401304c9f8b6fd2af39bd215c6ad60..a6228336ece9513f5ad6775cf89a5500
  
  static IdMatchingType NODELETE findIdMatchingType(const CSSSelector& firstSelector)
 diff --git a/Source/WebCore/dom/SlotAssignment.cpp b/Source/WebCore/dom/SlotAssignment.cpp
-index b7cc6b07caf172c2c167a081bd963c0c0a894842..1303442c7820d596d0253cd46eba6b7086bddb22 100644
+index b7cc6b07caf172c2c167a081bd963c0c0a894842..f54859d1d6f1d244a908ab2562639a2b101435fd 100644
 --- a/Source/WebCore/dom/SlotAssignment.cpp
 +++ b/Source/WebCore/dom/SlotAssignment.cpp
 @@ -33,7 +33,11 @@
@@ -29874,6 +30470,30 @@ index b7cc6b07caf172c2c167a081bd963c0c0a894842..1303442c7820d596d0253cd46eba6b70
      didChangeSlot(childElement.attributeWithoutSynchronization(slotAttr), shadowRoot);
  }
  
+@@ -572,6 +632,14 @@ void ManualSlotAssignment::slotManualAssignmentDidChange(HTMLSlotElement& slot,
+     RenderTreeUpdater::tearDownRenderersAfterSlotChange(*shadowRootHost);
+     shadowRootHost->invalidateStyleForSubtree();
+ 
++    // A dir=auto slot takes its direction from its assigned nodes.
++    if (slot.selfOrPrecedingNodesAffectDirAuto())
++        slot.updateEffectiveTextDirection();
++    for (Ref affectedSlot : affectedSlots) {
++        if (affectedSlot->selfOrPrecedingNodesAffectDirAuto())
++            affectedSlot->updateEffectiveTextDirection();
++    }
++
+     if (!shadowRoot.shouldFireSlotchangeEvent())
+         return;
+ 
+@@ -595,6 +663,8 @@ void ManualSlotAssignment::didRemoveManuallyAssignedNode(HTMLSlotElement& slot,
+     ++m_slottableVersion;
+     RenderTreeUpdater::tearDownRenderersAfterSlotChange(*shadowRootHost);
+     shadowRootHost->invalidateStyleForSubtree();
++    if (slot.selfOrPrecedingNodesAffectDirAuto())
++        slot.updateEffectiveTextDirection();
+     if (shadowRoot.shouldFireSlotchangeEvent())
+         slot.enqueueSlotChangeEvent();
+ }
 diff --git a/Source/WebCore/dom/ViewTransition.cpp b/Source/WebCore/dom/ViewTransition.cpp
 index 0d080489846058c7981fd45c760edca8e7fb4880..3c4b4ecc281a80cbc9fe1b4963b33282551f4f39 100644
 --- a/Source/WebCore/dom/ViewTransition.cpp
@@ -30531,6 +31151,20 @@ index 85f4d52b6239e35d852f9654435554690ad0bf7d..10459daeaf57fdf98329b5f23304eb22
      ExceptionOr<std::optional<RenderingContext>> getContext(JSC::JSGlobalObject&, const String& contextId, FixedVector<JSC::Strong<JSC::Unknown>>&& arguments);
  
      RefPtr<CanvasRenderingContext> getContext(const String&);
+diff --git a/Source/WebCore/html/HTMLElement.cpp b/Source/WebCore/html/HTMLElement.cpp
+index 734ade9e4072c0b1bf4489dc13ea06c32af4cb60..fba1b6d7134610b2eccc43c669a896ff180b7186 100644
+--- a/Source/WebCore/html/HTMLElement.cpp
++++ b/Source/WebCore/html/HTMLElement.cpp
+@@ -1346,7 +1346,8 @@ ExceptionOr<void> HTMLElement::hidePopoverInternal(FocusPreviousElement focusPre
+     ASSERT(popoverData());
+ 
+     PopoverData::ScopedStartShowingOrHiding showOrHidingPopoverScope(*this);
+-    if (showOrHidingPopoverScope.wasShowingOrHiding())
++    PopoverData::ScopedStartHiding hidingPopoverScope(*this);
++    if (hidingPopoverScope.wasHiding())
+         fireEvents = FireEvents::No;
+ 
+     Ref document = this->document();
 diff --git a/Source/WebCore/html/HTMLLinkElement.cpp b/Source/WebCore/html/HTMLLinkElement.cpp
 index aeb17770f3e1e6fca6f5efc89419a0895221014b..dbb756d88aeab3b8845f4c58ecdc7e446e65e720 100644
 --- a/Source/WebCore/html/HTMLLinkElement.cpp
@@ -30662,6 +31296,23 @@ index 35fefdacfa8e5ce92579c4ab5f46241c7afe3236..14de6e363fc52d5c8e84f5ebd1492eec
  
      // tracks
      TextTrack addTextTrack([AtomString] DOMString kind, optional [AtomString] DOMString label = "", optional [AtomString] DOMString language = "");
+diff --git a/Source/WebCore/html/HTMLSlotElement.cpp b/Source/WebCore/html/HTMLSlotElement.cpp
+index 8870f94c05533db3ade70ce6c584e61d7189952e..d34e592b18ebeef591a35900b8a9369f24c26d4c 100644
+--- a/Source/WebCore/html/HTMLSlotElement.cpp
++++ b/Source/WebCore/html/HTMLSlotElement.cpp
+@@ -64,6 +64,12 @@ HTMLSlotElement::NeedsPostConnectionSteps HTMLSlotElement::insertionSteps(Insert
+     auto insertionResult = HTMLElement::insertionSteps(insertionType, parentOfInsertedTree);
+     ASSERT_UNUSED(insertionResult, insertionResult == NeedsPostConnectionSteps::No);
+ 
++    // Element::insertionSteps leaves slots alone because a dir=auto slot needs its assigned
++    // nodes (postConnectionSteps). Any other slot takes its direction from its parent, or
++    // from the shadow host across the shadow boundary, like any other element.
++    if (!selfOrPrecedingNodesAffectDirAuto())
++        updateEffectiveTextDirectionIfNeeded();
++
+     if (insertionType.treeScopeChanged && isInShadowTree()) {
+         if (RefPtr shadowRoot = containingShadowRoot())
+             shadowRoot->addSlotElementByName(attributeWithoutSynchronization(nameAttr), *this);
 diff --git a/Source/WebCore/html/MonthInputType.cpp b/Source/WebCore/html/MonthInputType.cpp
 index d28d814bfb7fc086d84ecb726bbd3c89f1ae2663..1f3f0978fcc27c7e424fccd89d64dd9c500ee39a 100644
 --- a/Source/WebCore/html/MonthInputType.cpp
@@ -35280,7 +35931,7 @@ index bbb54b89194cc6399eba94d1f9ea11ad625d5285..f9883c5c58f83ff0c429d302aab104b0
      scheduleRenderingUpdateIfNecessary(*element);
  }
 diff --git a/Source/WebCore/page/LocalDOMWindow.cpp b/Source/WebCore/page/LocalDOMWindow.cpp
-index f3af2c99162d2f25d3aa42786ddc24d827230428..558e08009f33cde5ba60cc70c60709f96fe16fc0 100644
+index f3af2c99162d2f25d3aa42786ddc24d827230428..e7ef9ced38f85259a1007c47b421f3ab018f4569 100644
 --- a/Source/WebCore/page/LocalDOMWindow.cpp
 +++ b/Source/WebCore/page/LocalDOMWindow.cpp
 @@ -30,6 +30,7 @@
@@ -35291,15 +35942,24 @@ index f3af2c99162d2f25d3aa42786ddc24d827230428..558e08009f33cde5ba60cc70c60709f9
  #include "CSSRule.h"
  #include "CSSRuleList.h"
  #include "CSSSelectorParser.h"
-@@ -83,6 +84,7 @@
+@@ -83,6 +84,8 @@
  #include "FrameLoader.h"
  #include "FrameTree.h"
  #include "HTMLFrameOwnerElement.h"
++#include "HTMLSlotElement.h"
 +#include "HTMLNames.h"
  #include "HTTPParsers.h"
  #include "History.h"
  #include "IdleRequestOptions.h"
-@@ -175,6 +177,7 @@
+@@ -138,6 +141,7 @@
+ #include "SelectorQuery.h"
+ #include "SerializedScriptValue.h"
+ #include "Settings.h"
++#include "ShadowRoot.h"
+ #include "StaticNodeList.h"
+ #include "Storage.h"
+ #include "StorageArea.h"
+@@ -175,6 +179,7 @@
  #include <wtf/TZoneMallocInlines.h>
  #include <wtf/URL.h>
  #include <wtf/text/MakeString.h>
@@ -35307,7 +35967,49 @@ index f3af2c99162d2f25d3aa42786ddc24d827230428..558e08009f33cde5ba60cc70c60709f9
  #include <wtf/text/WTFString.h>
  
  #if ENABLE(USER_MESSAGE_HANDLERS)
-@@ -2799,15 +2802,42 @@ PerformanceEventTimingCandidate LocalDOMWindow::initializeEventTiming(Event& eve
+@@ -1769,8 +1774,41 @@ StyleMedia& LocalDOMWindow::styleMedia()
+     return *m_media;
+ }
+ 
++// https://drafts.csswg.org/cssom/#dom-window-getcomputedstyle: an element outside the flattened
++// element tree has no computed style. That is a child of a shadow host that no slot takes, the
++// fallback content of a slot that has assigned nodes, and their descendants. Only author shadow
++// trees count here: user agent shadow trees keep their hosts' children styled as before.
++static bool isOutsideFlatTree(const Element& element)
++{
++    RefPtr<const Node> node = &element;
++    while (node) {
++        RefPtr parent = node->parentNode();
++        if (!parent)
++            return false;
++        if (RefPtr shadowRoot = dynamicDowncast<ShadowRoot>(*parent)) {
++            node = shadowRoot->host();
++            continue;
++        }
++        if (RefPtr parentElement = dynamicDowncast<Element>(*parent)) {
++            if (RefPtr shadowRoot = parentElement->shadowRoot(); shadowRoot && shadowRoot->mode() != ShadowRootMode::UserAgent && !node->assignedSlot())
++                return true;
++            if (RefPtr slot = dynamicDowncast<HTMLSlotElement>(*parentElement)) {
++                if (RefPtr slotRoot = slot->containingShadowRoot(); slotRoot && slotRoot->mode() != ShadowRootMode::UserAgent) {
++                    if (auto* assignedNodes = slot->assignedNodes(); assignedNodes && !assignedNodes->isEmpty())
++                        return true;
++                }
++            }
++        }
++        node = WTF::move(parent);
++    }
++    return false;
++}
++
+ Ref<CSSStyleDeclaration> LocalDOMWindow::getComputedStyle(Element& element, const String& pseudoElt) const
+ {
++    if (element.isConnected() && isOutsideFlatTree(element))
++        return CSSComputedStyleDeclaration::createEmpty(element);
++
+     if (!pseudoElt.startsWith(':'))
+         return CSSComputedStyleDeclaration::create(element, std::nullopt);
+ 
+@@ -2799,15 +2837,42 @@ PerformanceEventTimingCandidate LocalDOMWindow::initializeEventTiming(Event& eve
      return PerformanceEventTimingCandidate {
          .type = type,
          .cancelable = event.cancelable(),
@@ -35350,7 +36052,7 @@ index f3af2c99162d2f25d3aa42786ddc24d827230428..558e08009f33cde5ba60cc70c60709f9
  void LocalDOMWindow::markEndOfProcessingForEventTiming(PerformanceEventTimingCandidate& entry, const Event& event, EventType type)
  {
      // Maps to "Finalize event timing" in the spec.
-@@ -2817,9 +2847,11 @@ void LocalDOMWindow::markEndOfProcessingForEventTiming(PerformanceEventTimingCan
+@@ -2817,9 +2882,11 @@ void LocalDOMWindow::markEndOfProcessingForEventTiming(PerformanceEventTimingCan
      // Without this, when no event listeners are registered for a given event type,
      // the event target may be an un-retargeted node inside a user-agent shadow tree
      // (e.g., an internal node of <input>), leaking shadow DOM internals.
@@ -35365,7 +36067,7 @@ index f3af2c99162d2f25d3aa42786ddc24d827230428..558e08009f33cde5ba60cc70c60709f9
          entry.target = event.target();
  
      switch (type) {
-@@ -2889,15 +2921,27 @@ void LocalDOMWindow::finalizeAndQueueEventTimingEntries()
+@@ -2889,15 +2956,27 @@ void LocalDOMWindow::finalizeAndQueueEventTimingEntries()
  {
      // Maps to "Dispatch pending Event Timing entries" in the spec.
      auto renderingTime = protect(performance())->nowInReducedResolutionSeconds();
@@ -106750,6 +107452,82 @@ index 71b979677ed9ea5b375f374fdb66f824f3074ba6..6e12a53e3b504aac91236cc6cf058ae0
          return DecodingMode::Synchronous;
  
      // Choose a decodingMode such that the image does not flicker.
+diff --git a/Source/WebCore/rendering/RenderCounter.cpp b/Source/WebCore/rendering/RenderCounter.cpp
+index 05f7a153f7745203e222e4d36b03d2c807fee93f..01a5c80d9c8dda7bdaeada3d48342f14dfe5ddc3 100644
+--- a/Source/WebCore/rendering/RenderCounter.cpp
++++ b/Source/WebCore/rendering/RenderCounter.cpp
+@@ -438,21 +438,26 @@ ASCIILiteral RenderCounter::renderName() const
+ 
+ String RenderCounter::originalText() const
+ {
+-    if (!m_counterNode)
++    return counterText(m_counterNode.get(), m_counter, counterStyle(), writingMode());
++}
++
++String RenderCounter::counterText(CounterNode* node, const Style::Content::Counter& counter, CSSRegisteredCounterStyle& style, WritingMode writingMode)
++{
++    if (!node)
+         return emptyString();
+ 
+-    RefPtr counterNode = m_counterNode.get();
++    RefPtr counterNode = node;
+     int value = counterNode->actsAsReset() ? counterNode->value() : counterNode->countInParent();
+ 
+-    auto counterText = [&](int value) {
+-        return counterStyle()->text(value, writingMode());
++    auto textFor = [&](int value) {
++        return style.text(value, writingMode);
+     };
+-    auto text = counterText(value);
+-    if (!m_counter.separator.value.isNull()) {
++    auto text = textFor(value);
++    if (!counter.separator.value.isNull()) {
+         if (!counterNode->actsAsReset())
+             counterNode = counterNode->parent();
+         while (RefPtr parent = counterNode->parent()) {
+-            text = makeString(counterText(counterNode->countInParent()), m_counter.separator.value, text);
++            text = makeString(textFor(counterNode->countInParent()), counter.separator.value, text);
+             counterNode = parent;
+         }
+     }
+@@ -460,6 +465,14 @@ String RenderCounter::originalText() const
+     return text;
+ }
+ 
++String RenderCounter::altTextForCounter(RenderElement& pseudoElementRenderer, const Style::Content::Counter& counter)
++{
++    // As updateCounter() does for a RenderCounter child: the counter is used (and created if need be) on the pseudo-element.
++    auto* node = makeCounterNode(pseudoElementRenderer, counter.identifier.value, true);
++    Ref style = pseudoElementRenderer.document().counterStyleRegistry().resolvedCounterStyle(counter.style);
++    return counterText(node, counter, style.get(), pseudoElementRenderer.writingMode());
++}
++
+ void RenderCounter::updateCounter()
+ {
+     if (!m_counterNode) {
+diff --git a/Source/WebCore/rendering/RenderCounter.h b/Source/WebCore/rendering/RenderCounter.h
+index 2d840eb99a0d3dadbdff087fbaad71f9e5308867..a018cb675d3671859042eb9f03905fd643125b49 100644
+--- a/Source/WebCore/rendering/RenderCounter.h
++++ b/Source/WebCore/rendering/RenderCounter.h
+@@ -42,6 +42,10 @@ public:
+     static void rendererStyleChanged(RenderElement&, const Style::ComputedStyle* oldStyle, const Style::ComputedStyle& newStyle);
+ 
+     void updateCounter();
++
++    // The text of a counter in the alternative text of `content` (`content: ... / counter(x)`), as a
++    // RenderCounter in the generated content of pseudoElementRenderer would show it.
++    static String altTextForCounter(RenderElement& pseudoElementRenderer, const Style::Content::Counter&);
+     bool canBeSelectionLeaf() const final { return false; }
+ 
+ private:
+@@ -52,6 +56,7 @@ private:
+     String originalText() const override;
+ 
+     Ref<CSSRegisteredCounterStyle> counterStyle() const;
++    static String counterText(CounterNode*, const Style::Content::Counter&, CSSRegisteredCounterStyle&, WritingMode);
+ 
+     Style::Content::Counter m_counter;
+     SingleThreadWeakPtr<CounterNode> m_counterNode;
 diff --git a/Source/WebCore/rendering/RenderElement.cpp b/Source/WebCore/rendering/RenderElement.cpp
 index c30408dbc98900cac30cc19b6a52ac5e1b698120..99122be590285832d919a055302fa42508139e13 100644
 --- a/Source/WebCore/rendering/RenderElement.cpp
@@ -110330,6 +111108,25 @@ index b91cd6776229ae7d04e7619f00b014682f0bf252..a9c1dbea67e073db25d3c15be81f6d07
  
      auto push = [&](Element& element) {
          if constexpr (scope == TeardownScope::DescendantsOnly) {
+diff --git a/Source/WebCore/rendering/updating/RenderTreeUpdaterGeneratedContent.cpp b/Source/WebCore/rendering/updating/RenderTreeUpdaterGeneratedContent.cpp
+index 6424875235f70a55b449e99c2998ad21b1450d92..150a02f8e10d3096d0f9d1af7197677cae47a192 100644
+--- a/Source/WebCore/rendering/updating/RenderTreeUpdaterGeneratedContent.cpp
++++ b/Source/WebCore/rendering/updating/RenderTreeUpdaterGeneratedContent.cpp
+@@ -200,11 +200,12 @@ static RenderPtr<RenderObject> createContentRenderer(const Style::Content::Glyph
+ void RenderTreeUpdater::GeneratedContent::createContentRenderers(RenderTreeBuilder& builder, RenderElement& pseudoRenderer, const Style::ComputedStyle& style, PseudoElementType pseudoElementType)
+ {
+     if (auto* contentData = style.content().tryData()) {
+-        auto altText = contentData->alt.value_or(String { nullString() });
++        // Images draw it when they fail to load. Accessibility reads it, counters and all, from the pseudo-element box.
++        auto altText = style.content().altText();
+         for (auto& contentItem : contentData->visible) {
+             WTF::switchOn(contentItem,
+                 [&](const auto& item) {
+-                    if (auto child = createContentRenderer(item, altText.value, pseudoRenderer.document(), style); child && pseudoRenderer.isChildAllowed(*child, style))
++                    if (auto child = createContentRenderer(item, altText, pseudoRenderer.document(), style); child && pseudoRenderer.isChildAllowed(*child, style))
+                         builder.attach(pseudoRenderer, WTF::move(child));
+                 }
+             );
 diff --git a/Source/WebCore/style/AnchorPositionEvaluator.cpp b/Source/WebCore/style/AnchorPositionEvaluator.cpp
 index a32360d9a24a2d8974cffa52369ca6a8da963999..5ec77bb09e5e1939ac22c20ca02f328045693e0a 100644
 --- a/Source/WebCore/style/AnchorPositionEvaluator.cpp
@@ -111683,6 +112480,228 @@ index 97f47c51bfe97f2649de7153298141cb46468654..757f5bef6480cd6c1824f88be829b5c3
      case PrimaryKind::Left:
          return visitOverflowPosition(CSS::Keyword::Left { }, overflowPosition(), visitor);
      case PrimaryKind::Right:
+diff --git a/Source/WebCore/style/values/content/StyleContent.cpp b/Source/WebCore/style/values/content/StyleContent.cpp
+index 5ac00f4b8b69f5225162d4746369d6d32309b4ff..198f9ac65d1489bf9d6f80b56b24a400d2dd9016 100644
+--- a/Source/WebCore/style/values/content/StyleContent.cpp
++++ b/Source/WebCore/style/values/content/StyleContent.cpp
+@@ -39,9 +39,15 @@ namespace Style {
+ 
+ WTF::String Content::altText() const
+ {
+-    if (auto* contentData = tryData())
+-        return contentData->alt.value_or(String { nullString() }).value;
+-    return { };
++    return altText([](const Counter&) { return emptyString(); });
++}
++
++bool Content::altTextHasCounters() const
++{
++    auto* data = tryData();
++    if (!data || !data->alt)
++        return false;
++    return std::ranges::any_of(*data->alt, [](auto& item) { return WTF::holdsAlternative<Counter>(item); });
+ }
+ 
+ // MARK: - Conversion
+@@ -51,6 +57,24 @@ template<> struct ToStyle<CSS::Content::Data> { auto operator()(const CSS::Conte
+ 
+ auto ToCSS<Content::Data>::operator()(const Content::Data& value, const Style::ComputedStyle& style) -> CSS::Content::Data
+ {
++    auto counterToCSS = [&](const Content::Counter& counter) -> Variant<CSS::Content::CounterFunction, CSS::Content::CountersFunction> {
++        if (counter.separator.value.isEmpty()) {
++            return CSS::Content::CounterFunction {
++                .parameters = {
++                    toCSS(counter.identifier, style),
++                    toCSS(counter.style, style),
++                }
++            };
++        }
++        return CSS::Content::CountersFunction {
++            .parameters = {
++                toCSS(counter.identifier, style),
++                toCSS(counter.separator, style),
++                toCSS(counter.style, style),
++            }
++        };
++    };
++
+     auto computeVisibleContentList = [&] -> CSS::Content::VisibleContentList {
+         return CSS::Content::VisibleContentList::map(value.visible, [&](const auto& item) -> CSS::Content::VisibleContentListItem {
+             return WTF::switchOn(item,
+@@ -61,22 +85,7 @@ auto ToCSS<Content::Data>::operator()(const Content::Data& value, const Style::C
+                     return CSS::Content::Image { toCSS(image.image, style) };
+                 },
+                 [&](const Content::Counter& counter) -> CSS::Content::VisibleContentListItem {
+-                    if (counter.separator.value.isEmpty()) {
+-                        return CSS::Content::CounterFunction {
+-                            .parameters = {
+-                                toCSS(counter.identifier, style),
+-                                toCSS(counter.style, style),
+-                            }
+-                        };
+-                    } else {
+-                        return CSS::Content::CountersFunction {
+-                            .parameters = {
+-                                toCSS(counter.identifier, style),
+-                                toCSS(counter.separator, style),
+-                                toCSS(counter.style, style),
+-                            }
+-                        };
+-                    }
++                    return WTF::switchOn(counterToCSS(counter), [](auto&& function) -> CSS::Content::VisibleContentListItem { return function; });
+                 },
+                 [&](const Content::Quote& quote) -> CSS::Content::VisibleContentListItem {
+                     switch (quote.quote) {
+@@ -108,9 +117,18 @@ auto ToCSS<Content::Data>::operator()(const Content::Data& value, const Style::C
+         if (!value.alt)
+             return { };
+ 
+-        return CSS::Content::AltContentList {
+-            CSS::Content::Text { toCSS(*value.alt, style) }
+-        };
++        CSS::Content::AltContentList result;
++        for (auto& item : *value.alt) {
++            WTF::switchOn(item,
++                [&](const Content::Text& text) {
++                    result.value.append(CSS::Content::Text { toCSS(text.text, style) });
++                },
++                [&](const Content::Counter& counter) {
++                    result.value.append(WTF::switchOn(counterToCSS(counter), [](auto&& function) -> CSS::Content::AltContentListItem { return function; }));
++                }
++            );
++        }
++        return result;
+     };
+ 
+     return {
+@@ -187,22 +205,50 @@ auto ToStyle<CSS::Content::Data>::operator()(const CSS::Content::Data& value, co
+         });
+     };
+ 
+-    auto computeAltText = [&] -> std::optional<String> {
++    auto computeAltText = [&] -> std::optional<Content::AltContentList> {
+         if (!value.alt)
+             return { };
+ 
+-        StringBuilder altTextBuilder;
++        // Strings and attr() values are joined; each counter is its own item.
++        Vector<Content::AltContentListItem> items;
++        StringBuilder text;
++        bool hasText = false;
++        auto flushText = [&] {
++            if (hasText)
++                items.append(Content::Text { String { text.toString() } });
++            text.clear();
++            hasText = false;
++        };
+         for (auto& item : *value.alt) {
+             WTF::switchOn(item,
+-                [&](const CSS::Content::Text& text) {
+-                    altTextBuilder.append(toStyle(text.text, state).value);
++                [&](const CSS::Content::Text& textItem) {
++                    text.append(toStyle(textItem.text, state).value);
++                    hasText = true;
+                 },
+                 [&](const CSS::Content::LegacyAttrFunction& attr) {
+-                    altTextBuilder.append(processAttrContent(attr).value);
++                    text.append(processAttrContent(attr).value);
++                    hasText = true;
++                },
++                [&](const CSS::Content::CounterFunction& counterFunction) {
++                    flushText();
++                    items.append(Content::Counter {
++                        toStyle(counterFunction->identifier, state),
++                        String { nullString() },
++                        toStyle(counterFunction->style, state),
++                    });
++                },
++                [&](const CSS::Content::CountersFunction& countersFunction) {
++                    flushText();
++                    items.append(Content::Counter {
++                        toStyle(countersFunction->identifier, state),
++                        toStyle(countersFunction->separator, state),
++                        toStyle(countersFunction->style, state),
++                    });
+                 }
+             );
+         }
+-        return String { altTextBuilder.toString() };
++        flushText();
++        return Content::AltContentList { FixedVector<Content::AltContentListItem> { WTF::move(items) } };
+     };
+ 
+     return {
+diff --git a/Source/WebCore/style/values/content/StyleContent.h b/Source/WebCore/style/values/content/StyleContent.h
+index 8bb07d611d1a60edcc108c38df0f721c82e3f713..56cce5a47b3a4ca8a03529c5887efa4f9c08cbd7 100644
+--- a/Source/WebCore/style/values/content/StyleContent.h
++++ b/Source/WebCore/style/values/content/StyleContent.h
+@@ -30,6 +30,7 @@
+ #include <WebCore/StyleImageWrapper.h>
+ #include <WebCore/StyleString.h>
+ #include <WebCore/StyleValueTypes.h>
++#include <wtf/text/StringBuilder.h>
+ 
+ namespace WebCore {
+ 
+@@ -55,8 +56,6 @@ namespace Style {
+ //    <leader()>
+ //    <target>
+ 
+-// MISSING from <alt-content>:
+-//   <counter>
+ 
+ struct ContentText {
+     String text;
+@@ -107,11 +106,14 @@ struct Content {
+     using Glyph = ContentGlyph;
+     using VisibleContentListItem = Variant<Text, Image, Counter, Quote, Glyph>;
+     using VisibleContentList = SpaceSeparatedFixedVector<VisibleContentListItem>;
++    // Adjacent strings (and attr() values) are joined into one Text when the style is built.
++    using AltContentListItem = Variant<Text, Counter>;
++    using AltContentList = SpaceSeparatedFixedVector<AltContentListItem>;
+ 
+     // FIXME: This struct could be optimized down to a pointer when unused by using TrailingArray.
+     struct Data {
+         VisibleContentList visible;
+-        Markable<String> alt;
++        std::optional<AltContentList> alt;
+ 
+         bool operator==(const Data&) const = default;
+     };
+@@ -145,7 +147,11 @@ struct Content {
+         return WTF::switchOn(m_value, std::forward<F>(f)...);
+     }
+ 
++    // Null when there is no alternative text, which is distinct from empty. Counters, which only
++    // the renderer can resolve, are left out; altText(counterText) takes their text from counterText.
+     WTF::String altText() const;
++    template<typename CounterText> WTF::String altText(NOESCAPE const CounterText&) const;
++    bool altTextHasCounters() const;
+ 
+     bool operator==(const Content&) const = default;
+ 
+@@ -154,6 +160,21 @@ private:
+     Variant<CSS::Keyword::None, CSS::Keyword::Normal, Data> m_value;
+ };
+ 
++template<typename CounterText> WTF::String Content::altText(NOESCAPE const CounterText& counterText) const
++{
++    auto* data = tryData();
++    if (!data || !data->alt)
++        return nullString();
++    StringBuilder builder;
++    for (auto& item : *data->alt) {
++        WTF::switchOn(item,
++            [&](const Text& text) { builder.append(text.text.value); },
++            [&](const Counter& counter) { builder.append(counterText(counter)); }
++        );
++    }
++    return builder.toString();
++}
++
+ template<size_t I> const auto& get(const Content::Data& value)
+ {
+     if constexpr (!I)
 diff --git a/Source/WebCore/style/values/images/kinds/StyleImage.cpp b/Source/WebCore/style/values/images/kinds/StyleImage.cpp
 index 8c2140820809b4cca9a71529340875995dd059e8..1a02ba3d3a0e5130247a53f72d8e95602b1eac60 100644
 --- a/Source/WebCore/style/values/images/kinds/StyleImage.cpp
@@ -111963,6 +112982,38 @@ index 7be5dbe1b6b03197a0b8ebedca09899c39beb8b7..05168df4fd63902478ee36a197ddf0fd
      std::optional<Vector<std::pair<String, String>>> certificates;
  #endif
  #if PLATFORM(GTK)
+diff --git a/Source/WebDriver/HTTPServer.h b/Source/WebDriver/HTTPServer.h
+index 39dad79d1452b88e3ce3a78b033b58a0122a1acd..04d40df952facb4837c65410d8d951bf55303c1a 100644
+--- a/Source/WebDriver/HTTPServer.h
++++ b/Source/WebDriver/HTTPServer.h
+@@ -34,6 +34,7 @@
+ typedef struct _SoupServer SoupServer;
+ #elif USE(INSPECTOR_SOCKET_SERVER)
+ #include "HTTPParser.h"
++#include <wtf/HashMap.h>
+ #include <JavaScriptCore/RemoteInspectorSocketEndpoint.h>
+ 
+ using Inspector::ConnectionID;
+@@ -68,15 +69,15 @@ public:
+ 
+ private:
+ #if USE(INSPECTOR_SOCKET_SERVER)
+-    void sendResponse(Response&&);
+-    void reset();
++    void sendResponse(ConnectionID, Response&&);
+     String packHTTPMessage(Response&&) const;
+ 
+     void didReceive(RemoteInspectorSocketEndpoint&, ConnectionID, Vector<uint8_t>&&) final;
+     void didClose(RemoteInspectorSocketEndpoint&, ConnectionID) final;
+ 
+-    std::optional<ConnectionID> m_client;
+-    HTTPParser m_parser;
++    // One parser per connection, used only on the socket thread. Requests run on the main
++    // run loop and each answer goes back on the connection its request came in on.
++    HashMap<ConnectionID, HTTPParser> m_parsers;
+ #endif
+ };
+ 
 diff --git a/Source/WebDriver/PlatformHaiku.cmake b/Source/WebDriver/PlatformHaiku.cmake
 new file mode 100644
 index 0000000000000000000000000000000000000000..f32a1c303300b70614a2b227d27dc96edf89f51a
@@ -112361,41 +113412,112 @@ index 0000000000000000000000000000000000000000..a76bf51c195cde1e861efeaad8c358cf
 +
 +} // namespace WebDriver
 diff --git a/Source/WebDriver/socket/HTTPServerSocket.cpp b/Source/WebDriver/socket/HTTPServerSocket.cpp
-index 72eb32d94bbde5141f4fa532ddd9dd10762c3f3a..a6dd2b11d95161205e5e1772bda761a46687dcd4 100644
+index 72eb32d94bbde5141f4fa532ddd9dd10762c3f3a..d8dd85e8c3cfd5418e2b33922b4198082df913d9 100644
 --- a/Source/WebDriver/socket/HTTPServerSocket.cpp
 +++ b/Source/WebDriver/socket/HTTPServerSocket.cpp
-@@ -106,8 +106,15 @@ void HTTPRequestHandler::didReceive(RemoteInspectorSocketEndpoint&, ConnectionID
+@@ -25,6 +25,7 @@
  
- void HTTPRequestHandler::sendResponse(HTTPRequestHandler::Response&& response)
- {
-+    // The client may have closed its connection before the answer was ready
-+    // (a harness that gave up on a command): drop the answer instead of
-+    // aborting on the empty optional, which took the whole driver down.
-+    if (!m_client) {
-+        reset();
-+        return;
-+    }
-     auto& endpoint = RemoteInspectorSocketEndpoint::singleton();
--    endpoint.send(m_client.value(), byteCast<uint8_t>(packHTTPMessage(WTF::move(response)).utf8().span()));
-+    endpoint.send(*m_client, byteCast<uint8_t>(packHTTPMessage(WTF::move(response)).utf8().span()));
-     reset();
+ #include "config.h"
+ #include "HTTPServer.h"
++#include <wtf/RunLoop.h>
+ #include <wtf/text/StringBuilder.h>
+ 
+ namespace WebDriver {
+@@ -62,41 +63,45 @@ void HTTPServer::didChangeStatus(RemoteInspectorSocketEndpoint&, ConnectionID, R
+         m_server = std::nullopt;
  }
  
-@@ -132,8 +139,13 @@ String HTTPRequestHandler::packHTTPMessage(HTTPRequestHandler::Response&& respon
++// The socket endpoint calls connect(), didReceive() and didClose() on its own thread, while
++// WebDriverService works on the main run loop (where the browser's answers arrive). A single
++// shared client and parser let one connection's answer or parser reset hit another
++// connection's request (#274). Now each connection has its own parser on the socket thread,
++// and the request runs on the main run loop with its connection's id.
+ void HTTPRequestHandler::connect(ConnectionID id)
+ {
+-    m_client = id;
+-    reset();
++    m_parsers.set(id, HTTPParser { });
+ }
+ 
+-void HTTPRequestHandler::reset()
++void HTTPRequestHandler::didReceive(RemoteInspectorSocketEndpoint&, ConnectionID id, Vector<uint8_t>&& data)
+ {
+-    m_parser = { };
+-}
+-
+-void HTTPRequestHandler::didReceive(RemoteInspectorSocketEndpoint&, ConnectionID, Vector<uint8_t>&& data)
+-{
+-    switch (m_parser.parse(WTF::move(data))) {
++    auto& parser = m_parsers.ensure(id, [] { return HTTPParser { }; }).iterator->value;
++    switch (parser.parse(WTF::move(data))) {
+     case HTTPParser::Phase::Complete: {
+-        auto message = m_parser.pullMessage();
+-        HTTPRequestHandler::Request request {
+-            message.method,
+-            message.path,
+-            reinterpret_cast<const char*>(message.requestBody.span().data()),
+-            static_cast<size_t>(message.requestBody.size())
+-        };
+-
+-        handleRequest(WTF::move(request), [this](HTTPRequestHandler::Response&& response) {
+-            sendResponse(WTF::move(response));
++        auto message = parser.pullMessage();
++        parser = { };
++        RunLoop::mainSingleton().dispatch([this, id, method = message.method.isolatedCopy(), path = message.path.isolatedCopy(), body = WTF::move(message.requestBody)]() mutable {
++            HTTPRequestHandler::Request request {
++                WTF::move(method),
++                WTF::move(path),
++                reinterpret_cast<const char*>(body.span().data()),
++                static_cast<size_t>(body.size())
++            };
++            // The body stays alive in this lambda while handleRequest() reads it.
++            handleRequest(WTF::move(request), [this, id](HTTPRequestHandler::Response&& response) {
++                sendResponse(id, WTF::move(response));
++            });
+         });
+         break;
+     }
+     case HTTPParser::Phase::Error: {
++        parser = { };
+         HTTPRequestHandler::Response response {
+             400,
+             "text/html; charset=utf-8"_s,
+             "<h1>Bad client</h1> Invalid HTML format"_s,
+         };
+-        sendResponse(WTF::move(response));
++        sendResponse(id, WTF::move(response));
+         return;
+     }
+     default:
+@@ -104,11 +109,12 @@ void HTTPRequestHandler::didReceive(RemoteInspectorSocketEndpoint&, ConnectionID
+     }
+ }
+ 
+-void HTTPRequestHandler::sendResponse(HTTPRequestHandler::Response&& response)
++void HTTPRequestHandler::sendResponse(ConnectionID id, HTTPRequestHandler::Response&& response)
+ {
++    // A connection the client closed before the answer was ready (a harness that gave up on a
++    // command) is gone from the endpoint, which then drops the data.
+     auto& endpoint = RemoteInspectorSocketEndpoint::singleton();
+-    endpoint.send(m_client.value(), byteCast<uint8_t>(packHTTPMessage(WTF::move(response)).utf8().span()));
+-    reset();
++    endpoint.send(id, byteCast<uint8_t>(packHTTPMessage(WTF::move(response)).utf8().span()));
+ }
+ 
+ String HTTPRequestHandler::packHTTPMessage(HTTPRequestHandler::Response&& response) const
+@@ -132,10 +138,9 @@ String HTTPRequestHandler::packHTTPMessage(HTTPRequestHandler::Response&& respon
      return builder.toString();
  }
  
 -void HTTPRequestHandler::didClose(RemoteInspectorSocketEndpoint&, ConnectionID)
 +void HTTPRequestHandler::didClose(RemoteInspectorSocketEndpoint&, ConnectionID id)
  {
-+    // Each answer closes its connection (HTTP/1.0), and that close can come
-+    // in after the next request's connection was accepted: only forget the
-+    // client the close is about, or the next answer has nowhere to go.
-+    if (m_client != id)
-+        return;
-     m_client = std::nullopt;
-     reset();
+-    m_client = std::nullopt;
+-    reset();
++    m_parsers.remove(id);
  }
+ 
+ } // namespace WebDriver
 diff --git a/Source/WebDriver/socket/SessionHostSocket.cpp b/Source/WebDriver/socket/SessionHostSocket.cpp
 index 169e503e5d426ce24125f743d85f104ae345341f..32d973315891708e55acebd1f9f9d3e12c21befe 100644
 --- a/Source/WebDriver/socket/SessionHostSocket.cpp
