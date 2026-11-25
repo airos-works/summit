@@ -14081,3 +14081,40 @@ into the removed tree, emptying a container whose children are held, adoption
 into another document and removal there, a removed iframe's document with a
 node kept, MutationObserver records, and 2,000 detached trees with a retained
 descendant every 100) gave identical results.
+
+### #295: one status byte per bucket in WTF::HashTable
+
+Backport of upstream 53bedf6 (325806@main): HashTable keeps a byte per
+bucket that says empty, deleted or full plus hash bits, and probes compare
+those before reading keys; translators construct into the raw bucket
+(`translate(T* location, …)`). It applied except for three hunks that the
+`NODELETE` → `LEGACY_NODELETE` rename moved (JITThunks, AtomStringImpl, an
+allowlist), which were applied by hand. The whole engine compiled without
+other changes, so no Summit-only translator used the old signature.
+RobinHoodHashTable keeps its own representation. Later upstream HashTable
+commits are cleanups (key validation, annotations); the weak-table fix
+244229e corrects 326785@main, a change not taken, so it is not needed.
+
+Upstream's WTF tests, built for the Linux host (JSCOnly port, TestWTF): the
+new HashTable tests and HashMap, HashSet, ListHashSet, WeakHashSet,
+WeakHashMap, WeakPtr and AtomString pass, 2,085 tests in all; the two
+StackTrace failures also fail on the baseline (2,071 pass there).
+
+| Host micro (GCC, ns per operation, best of 7) | Baseline | Status bytes |
+|---|---|---|
+| 8 entries, pointer key hit / miss | 2.5 / 2.2 | 3.2 / 2.7 |
+| 8 entries, integer key hit / miss | 2.6 / 3.2 | 3.8 / 3.7 |
+| 64 entries, pointer hit / miss | 2.8 / 2.8 | 3.6 / 3.3 |
+| 4,096 entries, pointer hit / miss | 4.6 / 4.5 | 4.7 / 3.5 |
+| add, remove half, add, clear (4,096) | 34.8 | 30.4 |
+| 32 AtomStrings, hit / miss | 2.1 / 2.5 | 2.4 / 2.7 |
+
+A tight loop over a small table hits a little slower (the status byte is
+another load); misses in large tables and churn with deletions are faster.
+Speedometer 3.1 on the X399: no extensions 12.23 (12.1, 12.0, 12.6) → 12.33
+(12.0, 12.5, 12.5); signed-out 1Password, six rounds each, 9.64 → 9.70 (the
+first three rounds favored the baseline, the next three the candidate).
+Peak web process resident memory over NewsSite, Stockcharts, TipTap and
+Plot (4 iterations, sampled every 3 s, 3 runs each): 326 → 328 MiB. Upstream
+measured +0.94 % and +1.36 % on Speedometer 3; on Summit the effect is within
+run-to-run spread, with no regression in time or memory.
