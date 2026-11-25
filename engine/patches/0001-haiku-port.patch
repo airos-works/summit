@@ -29475,6 +29475,38 @@ index f47d4ad1de38e7aa5a64ec81eadadaecc90c6e47..232498ae83930cdcf0020bcf02a0ffcd
      uint64_t beforeScriptExecutionCount = ScriptController::scriptExecutionCount();
  
      NodeVector targets;
+diff --git a/Source/WebCore/dom/ContainerNodeAlgorithms.cpp b/Source/WebCore/dom/ContainerNodeAlgorithms.cpp
+index 8c10b61491a9a7812f549c6749166f73b62a2fc6..56eb73cb2f9e2e050287abf8f20166ba7124ea21 100644
+--- a/Source/WebCore/dom/ContainerNodeAlgorithms.cpp
++++ b/Source/WebCore/dom/ContainerNodeAlgorithms.cpp
+@@ -163,6 +163,15 @@ RemovedSubtreeResult notifyChildNodeRemoved(ContainerNode& oldParentOfRemovedTre
+ 
+ void removeDetachedChildrenInContainer(ContainerNode& container)
+ {
++#if PLATFORM(HAIKU)
++    // Most containers that are destroyed are leaves (an <input>, a <b> with
++    // only text is not one): nothing to unlink, no links to write (#294).
++    if (!container.firstChild())
++        return;
++    // Every child moves to the container's document: protect it once, not
++    // once per child.
++    Ref document = container.document();
++#endif
+     container.setLastChild(nullptr);
+ 
+     RefPtr<Node> next;
+@@ -177,7 +186,11 @@ void removeDetachedChildrenInContainer(ContainerNode& container)
+         if (next)
+             next->setPreviousSibling(nullptr);
+ 
++#if PLATFORM(HAIKU)
++        node->setTreeScopeRecursively(document);
++#else
+         node->setTreeScopeRecursively(Ref<Document> { container.document() });
++#endif
+         if (node->isInTreeScope())
+             notifyChildNodeRemoved(container, *node);
+         else if (node->refCount() > 1)
 diff --git a/Source/WebCore/dom/DataTransfer.cpp b/Source/WebCore/dom/DataTransfer.cpp
 index a7339e182f59f517e27c3c754bb13a0fd9d64576..4260356cb468093d4bb496f1b8df012db96c286c 100644
 --- a/Source/WebCore/dom/DataTransfer.cpp

@@ -14058,3 +14058,26 @@ navigated cross-origin and back with the old window kept, about:blank,
 `contentDocument` and `frameElement`, cross-origin writes, defineProperty,
 getOwnPropertyNames and getPrototypeOf) gave identical values and exception
 messages, and the console logged the same "Blocked a frame" message.
+
+### #294: destroying detached subtrees
+
+An instrumented build counted `removeDetachedChildrenInContainer` over one
+TodoMVC-jQuery run: 1.35 million calls, 54 % of them for containers without
+children (an `<input>`, a `<button>`), 4.3 children per nonempty container
+(at most 20), 0.16 % of children in another tree scope (shadow trees), 15
+children retained from outside. So the loop now returns at once for an empty
+container (its last-child link is already null, so nothing is written) and
+protects the owner document once per container instead of once per child.
+Unlink order, tree-scope moves, `notifyChildNodeRemoved` for children still
+in a scope and the subtree update for retained children are unchanged.
+
+Removing 2,000 template-cloned rows (14,000 nodes, no JS wrappers) went from
+109 to 105 ns per node (−3.3 %, 4 ABBA launches). TodoMVC-jQuery without
+extensions (5 rounds): 3.53 → 3.59 (+1.7 %), CompletingAllItems Sync 132 →
+126 ms, DeletingAllItems unchanged. A differential page (`destroycheck.html`:
+live HTMLCollections and childNodes, a retained row and a retained grandchild
+after the list is dropped, a shadow root's node, a Range and a NodeIterator
+into the removed tree, emptying a container whose children are held, adoption
+into another document and removal there, a removed iframe's document with a
+node kept, MutationObserver records, and 2,000 detached trees with a retained
+descendant every 100) gave identical results.
