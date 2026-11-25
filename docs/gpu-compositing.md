@@ -197,6 +197,17 @@ shows its new state at once. Page overlays (the inspector's highlight) get no
 layer factory and their view layer is ignored instead of asserting; they do
 not draw there. Find in page draws no overlay on Haiku.
 
+Scrolling without compositing runs on the main thread (no scrolling tree):
+wheel notches, Page Up/Down, Space, Home/End and `scroll-behavior: smooth`
+animate there as they do composited (one notch: 100 px over 16 frames). Arrow
+keys did not scroll at all (#303): Summit scrolls them with WebCore's
+`KeyboardScrollingAnimator` (the "keyscroll" preference, #181), whose held-key
+scroll only a scrolling tree could start (`requestStartKeyboardScrollAnimation`).
+`ScrollableArea::beginKeyboardScroll()` now animates it on the area's own
+`ScrollAnimator` when no tree takes it, and `endKeyboardScroll()` finishes it
+there: a tapped arrow scrolls a 40 px line over about 40 frames, as composited.
+That also covers an area with no scrolling node on a composited page.
+
 ## What the compositor leaves out or keeps (Haiku)
 
 The sections above describe the first, main-thread design. Today the web

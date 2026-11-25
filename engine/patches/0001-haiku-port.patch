@@ -41438,6 +41438,76 @@ index a0f25d5825b8fbbb83d2d034c5e10ba79d619d22..79c4c6a62ef7efcd0bfb286aad73b54a
      Seconds m_duration;
  
      FloatPoint m_startOffset;
+diff --git a/Source/WebCore/platform/ScrollAnimator.cpp b/Source/WebCore/platform/ScrollAnimator.cpp
+index 1eca37053aef5dcbc96c1083b82de85e8630bef5..09670f7f43f756b344dcecfa946b6915aab16992 100644
+--- a/Source/WebCore/platform/ScrollAnimator.cpp
++++ b/Source/WebCore/platform/ScrollAnimator.cpp
+@@ -236,6 +236,18 @@ bool ScrollAnimator::handleSteppedScrolling(const PlatformWheelEvent& wheelEvent
+     return handled;
+ }
+ 
++#if PLATFORM(HAIKU)
++void ScrollAnimator::startKeyboardScrollHaiku(const KeyboardScroll& scrollData)
++{
++    m_scrollController.startKeyboardScroll(scrollData);
++}
++
++void ScrollAnimator::finishKeyboardScrollHaiku(bool immediate)
++{
++    m_scrollController.finishKeyboardScroll(immediate);
++}
++#endif
++
+ void ScrollAnimator::stopKeyboardScrollAnimation()
+ {
+     m_scrollController.stopKeyboardScrolling();
+diff --git a/Source/WebCore/platform/ScrollAnimator.h b/Source/WebCore/platform/ScrollAnimator.h
+index 742702cec57c0bfed1a003bb4ab891470447fb62..0b8449df01a9a3391ac7a9fd375dcfb8c2b52a26 100644
+--- a/Source/WebCore/platform/ScrollAnimator.h
++++ b/Source/WebCore/platform/ScrollAnimator.h
+@@ -88,6 +88,12 @@ public:
+     virtual bool processWheelEventForScrollSnap(const PlatformWheelEvent&) { return false; }
+ 
+     void stopKeyboardScrollAnimation();
++#if PLATFORM(HAIKU)
++    // A keyboard scroll animated on this thread, for areas that no scrolling
++    // tree scrolls (ScrollableArea::beginKeyboardScroll()).
++    void startKeyboardScrollHaiku(const KeyboardScroll&);
++    void finishKeyboardScrollHaiku(bool immediate);
++#endif
+     
+ #if PLATFORM(COCOA)
+     virtual void handleWheelEventPhase(PlatformWheelEventPhase) { }
+diff --git a/Source/WebCore/platform/ScrollableArea.cpp b/Source/WebCore/platform/ScrollableArea.cpp
+index 1b9e76991f603d5e536c060750bfaa6e0c2720fe..c6d763f6816caf2b942c42d7fc27347dab8c10ae 100644
+--- a/Source/WebCore/platform/ScrollableArea.cpp
++++ b/Source/WebCore/platform/ScrollableArea.cpp
+@@ -173,6 +173,14 @@ void ScrollableArea::beginKeyboardScroll(const KeyboardScroll& scrollData)
+ 
+     if (startedAnimation)
+         setScrollAnimationStatus(ScrollAnimationStatus::Animating);
++#if PLATFORM(HAIKU)
++    // Only a scrolling tree takes a keyboard scroll. Without one (a page
++    // painted without compositing, as on softpipe, or an area that has no
++    // scrolling node) the held arrow key scrolled nothing at all: animate it
++    // here instead, as wheel and smooth scrolls are (#303).
++    else
++        scrollAnimator().startKeyboardScrollHaiku(scrollData);
++#endif
+ }
+ 
+ void ScrollableArea::endKeyboardScroll(bool immediate)
+@@ -181,6 +189,10 @@ void ScrollableArea::endKeyboardScroll(bool immediate)
+ 
+     if (finishedAnimation)
+         setScrollAnimationStatus(ScrollAnimationStatus::NotAnimating);
++#if PLATFORM(HAIKU)
++    else if (existingScrollAnimator())
++        scrollAnimator().finishKeyboardScrollHaiku(immediate);
++#endif
+ }
+ 
+ bool ScrollableArea::scrollToPositionWithoutAnimation(const FloatPoint& position, ScrollClamping clamping)
 diff --git a/Source/WebCore/platform/ScrollbarsController.cpp b/Source/WebCore/platform/ScrollbarsController.cpp
 index a160424a2cbed2d1562892b8500407c8f2d342e1..4d8c15c1c51fa90a6c143eacebc77883ad50eae2 100644
 --- a/Source/WebCore/platform/ScrollbarsController.cpp
