@@ -74367,7 +74367,7 @@ index a322e5f3f28177dbb62613a726a819d673e0927f..81a0797f3563a7523abbcd304bc8725d
  
      return builder.make();
 diff --git a/Source/WebCore/platform/graphics/skia/GraphicsContextSkia.cpp b/Source/WebCore/platform/graphics/skia/GraphicsContextSkia.cpp
-index a3cb981bd76fc7f7946862f8f7be53fe133bae79..6fc74815608850f78219c76d0e9c0cff5721a7f9 100644
+index a3cb981bd76fc7f7946862f8f7be53fe133bae79..aa1eae9e35f6b4a5433e53224f048f1fde67bcb9 100644
 --- a/Source/WebCore/platform/graphics/skia/GraphicsContextSkia.cpp
 +++ b/Source/WebCore/platform/graphics/skia/GraphicsContextSkia.cpp
 @@ -47,9 +47,20 @@
@@ -74413,7 +74413,27 @@ index a3cb981bd76fc7f7946862f8f7be53fe133bae79..6fc74815608850f78219c76d0e9c0cff
              m_canvas.drawOval(oval, paint);
          else
              m_canvas.drawArc(oval, startDegrees, sweepDegrees, false, paint);
-@@ -575,15 +590,63 @@ sk_sp<SkImageFilter> GraphicsContextSkia::createDropShadowFilterIfNeeded(ShadowS
+@@ -496,8 +511,7 @@ void GraphicsContextSkia::fillPath(const Path& path)
+     if (!makeGLContextCurrentIfNeeded())
+         return;
+ 
+-    SkPaint paint = createFillPaint();
+-    setupFillSource(paint);
++    SkPaint paint = fillPaintForCurrentState();
+ 
+     if (drawPathAsSingleElement(path, paint))
+         return;
+@@ -522,8 +536,7 @@ void GraphicsContextSkia::strokePath(const Path& path)
+     if (!makeGLContextCurrentIfNeeded())
+         return;
+ 
+-    SkPaint strokePaint = createStrokePaint();
+-    setupStrokeSource(strokePaint);
++    SkPaint strokePaint = strokePaintForCurrentState();
+ 
+     if (drawPathAsSingleElement(path, strokePaint))
+         return;
+@@ -575,15 +588,63 @@ sk_sp<SkImageFilter> GraphicsContextSkia::createDropShadowFilterIfNeeded(ShadowS
      return nullptr;
  }
  
@@ -74433,7 +74453,10 @@ index a3cb981bd76fc7f7946862f8f7be53fe133bae79..6fc74815608850f78219c76d0e9c0cff
 +    const auto& shadowColor = shadow->color;
 +    if (!shadowColor.isVisible() || (!offset.width() && !offset.height() && !shadow->radius))
 +        return false;
-+
+ 
+-    paint.setImageFilter(shadow);
+-    drawFunction(paint);
+-    paint.setImageFilter(nullptr);
 +    // As with DropShadowOnly: the shape's coverage times its opacity, in the
 +    // shadow's colour, blurred with sigma radius / 2, offset, and composited
 +    // with the paint's blend mode.
@@ -74471,10 +74494,7 @@ index a3cb981bd76fc7f7946862f8f7be53fe133bae79..6fc74815608850f78219c76d0e9c0cff
 +        auto shadow = createDropShadowFilterIfNeeded(ShadowStyle::Outset);
 +        if (!shadow)
 +            return false;
- 
--    paint.setImageFilter(shadow);
--    drawFunction(paint);
--    paint.setImageFilter(nullptr);
++
 +        paint.setImageFilter(shadow);
 +        drawFunction(paint);
 +        paint.setImageFilter(nullptr);
@@ -74482,7 +74502,71 @@ index a3cb981bd76fc7f7946862f8f7be53fe133bae79..6fc74815608850f78219c76d0e9c0cff
  
      auto reversed = m_skiaStateStack | std::views::reverse;
      auto it = std::ranges::find(reversed, true, &SkiaState::isLayer);
-@@ -650,7 +713,7 @@ void GraphicsContextSkia::drawSkiaRect(const SkRect& boundaries, SkPaint& paint)
+@@ -644,13 +705,71 @@ void GraphicsContextSkia::setupStrokeSource(SkPaint& paint)
+         setPaintColor(paint, strokeBrush().color().colorWithAlphaMultipliedBy(alpha()));
+ }
+ 
++SkPaint GraphicsContextSkia::fillPaintForCurrentState()
++{
++    if (fillBrush().pattern() || fillBrush().gradient()) {
++        SkPaint paint = createFillPaint();
++        setupFillSource(paint);
++        return paint;
++    }
++
++    auto& cache = m_solidFillPaint;
++    bool antialias = shouldAntialias();
++    auto blendMode = SkiaUtilities::toSkiaBlendMode(this->blendMode(), compositeMode().operation);
++    float alpha = this->alpha();
++    const auto& color = fillColor();
++    if (!cache.valid || cache.antialias != antialias || cache.blendMode != blendMode || cache.alpha != alpha || cache.color != color) {
++        cache.paint = createFillPaint();
++        setupFillSource(cache.paint);
++        cache.antialias = antialias;
++        cache.blendMode = blendMode;
++        cache.alpha = alpha;
++        cache.color = color;
++        cache.valid = true;
++    }
++    return cache.paint;
++}
++
++SkPaint GraphicsContextSkia::strokePaintForCurrentState()
++{
++    if (strokeBrush().pattern() || strokeBrush().gradient()) {
++        SkPaint paint = createStrokePaint();
++        setupStrokeSource(paint);
++        return paint;
++    }
++
++    auto& cache = m_solidStrokePaint;
++    bool antialias = shouldAntialias();
++    auto blendMode = SkiaUtilities::toSkiaBlendMode(this->blendMode(), compositeMode().operation);
++    float alpha = this->alpha();
++    const auto& color = strokeBrush().color();
++    auto width = SkFloatToScalar(strokeThickness());
++    const auto& stroke = m_skiaState.stroke;
++    if (!cache.valid || cache.antialias != antialias || cache.blendMode != blendMode || cache.alpha != alpha || cache.color != color
++        || cache.width != width || cache.miter != stroke.miter || cache.cap != stroke.cap || cache.join != stroke.join || cache.dash != stroke.dash) {
++        cache.paint = createStrokePaint();
++        setupStrokeSource(cache.paint);
++        cache.antialias = antialias;
++        cache.blendMode = blendMode;
++        cache.alpha = alpha;
++        cache.color = color;
++        cache.width = width;
++        cache.miter = stroke.miter;
++        cache.cap = stroke.cap;
++        cache.join = stroke.join;
++        cache.dash = stroke.dash;
++        cache.valid = true;
++    }
++    return cache.paint;
++}
++
+ void GraphicsContextSkia::drawSkiaRect(const SkRect& boundaries, SkPaint& paint)
+ {
+     bool inExtraTransparencyLayer = false;
      if (hasDropShadow()) {
          inExtraTransparencyLayer = drawOutsetShadow(paint, [&](const SkPaint& paint) {
              m_canvas.drawRect(boundaries, paint);
@@ -74491,7 +74575,17 @@ index a3cb981bd76fc7f7946862f8f7be53fe133bae79..6fc74815608850f78219c76d0e9c0cff
      }
      m_canvas.drawRect(boundaries, paint);
      if (inExtraTransparencyLayer)
-@@ -1092,7 +1155,7 @@ void GraphicsContextSkia::fillRoundedRectImpl(const FloatRoundedRect& rect, cons
+@@ -662,8 +781,7 @@ void GraphicsContextSkia::fillRect(const FloatRect& boundaries, RequiresClipToRe
+     if (!makeGLContextCurrentIfNeeded())
+         return;
+ 
+-    SkPaint paint = createFillPaint();
+-    setupFillSource(paint);
++    SkPaint paint = fillPaintForCurrentState();
+     drawSkiaRect(boundaries, paint);
+ }
+ 
+@@ -1092,7 +1210,7 @@ void GraphicsContextSkia::fillRoundedRectImpl(const FloatRoundedRect& rect, cons
      if (hasDropShadow()) {
          inExtraTransparencyLayer = drawOutsetShadow(paint, [&](const SkPaint& paint) {
              m_canvas.drawRRect(rect, paint);
@@ -74500,7 +74594,7 @@ index a3cb981bd76fc7f7946862f8f7be53fe133bae79..6fc74815608850f78219c76d0e9c0cff
      }
      m_canvas.drawRRect(rect, paint);
      if (inExtraTransparencyLayer)
-@@ -1132,6 +1195,121 @@ static sk_sp<SkSurface> createAcceleratedSurface(const IntSize& size)
+@@ -1132,6 +1250,121 @@ static sk_sp<SkSurface> createAcceleratedSurface(const IntSize& size)
      return surface;
  }
  
@@ -74622,7 +74716,7 @@ index a3cb981bd76fc7f7946862f8f7be53fe133bae79..6fc74815608850f78219c76d0e9c0cff
  void GraphicsContextSkia::drawPattern(const NativeImage& nativeImage, const FloatRect& destRect, const FloatRect& tileRect, const AffineTransform& patternTransform, const FloatPoint& phase, const FloatSize& spacing, ImagePaintingOptions options)
  {
      if (!patternTransform.isInvertible())
-@@ -1180,6 +1358,51 @@ void GraphicsContextSkia::drawPattern(const NativeImage& nativeImage, const Floa
+@@ -1180,6 +1413,51 @@ void GraphicsContextSkia::drawPattern(const NativeImage& nativeImage, const Floa
  #endif
          paint.setShader(image->makeShader(repeatX ? SkTileMode::kRepeat : SkTileMode::kClamp, repeatY ? SkTileMode::kRepeat : SkTileMode::kClamp, samplingOptions, &shaderMatrix));
      } else {
@@ -74674,7 +74768,7 @@ index a3cb981bd76fc7f7946862f8f7be53fe133bae79..6fc74815608850f78219c76d0e9c0cff
          auto tileFloatRectWithSpacing = FloatRect(0, 0, tileRect.width() + spacing.width() / patternTransform.a(), tileRect.height() + spacing.height() / patternTransform.d());
          if (image->isTextureBacked()) {
              auto enclosingTileIntRect = enclosingIntRect(tileRect);
-@@ -1199,14 +1422,23 @@ void GraphicsContextSkia::drawPattern(const NativeImage& nativeImage, const Floa
+@@ -1199,14 +1477,23 @@ void GraphicsContextSkia::drawPattern(const NativeImage& nativeImage, const Floa
                  paint.setShader(tileImage->makeShader(SkTileMode::kRepeat, SkTileMode::kRepeat, samplingOptions, &shaderMatrix));
              }
          } else {
@@ -74706,7 +74800,7 @@ index a3cb981bd76fc7f7946862f8f7be53fe133bae79..6fc74815608850f78219c76d0e9c0cff
              paint.setShader(picture->makeShader(SkTileMode::kRepeat, SkTileMode::kRepeat, samplingOptions.filter, &shaderMatrix, nullptr));
          }
      }
-@@ -1322,8 +1554,18 @@ void GraphicsContextSkia::trackAcceleratedRenderingFenceIfNeeded(const sk_sp<SkI
+@@ -1322,8 +1609,18 @@ void GraphicsContextSkia::trackAcceleratedRenderingFenceIfNeeded(const sk_sp<SkI
      if (!image || !image->isTextureBacked())
          return;
  
@@ -74725,7 +74819,7 @@ index a3cb981bd76fc7f7946862f8f7be53fe133bae79..6fc74815608850f78219c76d0e9c0cff
  }
  
  void GraphicsContextSkia::trackAcceleratedRenderingFenceIfNeeded(Pattern& pattern)
-@@ -1359,7 +1601,7 @@ void GraphicsContextSkia::drawSkiaText(const sk_sp<SkTextBlob>& blob, SkScalar x
+@@ -1359,7 +1656,7 @@ void GraphicsContextSkia::drawSkiaText(const sk_sp<SkTextBlob>& blob, SkScalar x
          if (hasDropShadow()) {
              inExtraTransparencyLayer = drawOutsetShadow(paint, [&](const SkPaint& paint) {
                  m_canvas.drawTextBlob(blob, x, y, paint);
@@ -74735,10 +74829,10 @@ index a3cb981bd76fc7f7946862f8f7be53fe133bae79..6fc74815608850f78219c76d0e9c0cff
          m_canvas.drawTextBlob(blob, x, y, paint);
          if (inExtraTransparencyLayer)
 diff --git a/Source/WebCore/platform/graphics/skia/GraphicsContextSkia.h b/Source/WebCore/platform/graphics/skia/GraphicsContextSkia.h
-index 7d7af08f80f3e7d1db03ba61f39ab4efa335e49d..dd0ac461ce16ae42a3fdbb5373885bba33906512 100644
+index 7d7af08f80f3e7d1db03ba61f39ab4efa335e49d..fb9dec19309ce4ca74e0c2cbd39c6cd628d9a2b1 100644
 --- a/Source/WebCore/platform/graphics/skia/GraphicsContextSkia.h
 +++ b/Source/WebCore/platform/graphics/skia/GraphicsContextSkia.h
-@@ -146,7 +146,14 @@ private:
+@@ -146,11 +146,23 @@ private:
  
      enum class ShadowStyle : uint8_t { Outset, Inset };
      sk_sp<SkImageFilter> createDropShadowFilterIfNeeded(ShadowStyle) const;
@@ -74754,6 +74848,39 @@ index 7d7af08f80f3e7d1db03ba61f39ab4efa335e49d..dd0ac461ce16ae42a3fdbb5373885bba
  
      void pushSkiaState();
      void popSkiaState();
+ 
++    // Summit (#285): fill and stroke paints for a solid color, reused while the state they
++    // are built from is unchanged. Patterns and gradients are built per draw as before.
++    SkPaint fillPaintForCurrentState();
++    SkPaint strokePaintForCurrentState();
++
+     void drawSkiaRect(const SkRect&, SkPaint&);
+     void drawSkiaPath(const SkPath&, SkPaint&);
+     bool drawPathAsSingleElement(const Path&, SkPaint&);
+@@ -201,6 +213,23 @@ private:
+     CompletionHandler<void()> m_destroyNotify;
+     SkiaState m_skiaState;
+     Vector<SkiaState, 1> m_skiaStateStack;
++
++    struct SolidPaintCache {
++        SkPaint paint;
++        Color color;
++        float alpha { 0 };
++        SkBlendMode blendMode { SkBlendMode::kSrcOver };
++        bool antialias { false };
++        bool valid { false };
++        // Stroke only.
++        SkScalar width { 0 };
++        SkScalar miter { 0 };
++        SkPaint::Cap cap { SkPaint::kButt_Cap };
++        SkPaint::Join join { SkPaint::kMiter_Join };
++        sk_sp<SkPathEffect> dash;
++    };
++    SolidPaintCache m_solidFillPaint;
++    SolidPaintCache m_solidStrokePaint;
+     sk_sp<GrContextThreadSafeProxy> m_threadSafeGrContext;
+ #if USE(TEXTURE_MAPPER)
+     SkiaImageToFenceMap m_imageToFenceMap;
 diff --git a/Source/WebCore/platform/graphics/skia/ImageBufferSkiaAcceleratedBackend.cpp b/Source/WebCore/platform/graphics/skia/ImageBufferSkiaAcceleratedBackend.cpp
 index 5dcd4c4cf71a233f2b4700549d9fe16d640c1605..fa22aed9cbea2067c238123fdf2bb430f7bc9987 100644
 --- a/Source/WebCore/platform/graphics/skia/ImageBufferSkiaAcceleratedBackend.cpp

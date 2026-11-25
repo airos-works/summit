@@ -13757,3 +13757,24 @@ app was 52–64 ms on both builds, so this is within its spread); full score
 12.23 against 12.07, one candidate run slow in every suite. WPT
 html/syntax/parsing, domparsing, dom/nodes, custom-elements and shadow-dom: no
 regressions.
+
+### #285: solid fill and stroke paints kept between canvas draws
+
+GraphicsContextSkia keeps a prepared SkPaint for a solid fill and one for a
+solid stroke, keyed on everything createFillPaint/createStrokePaint and the
+color setup read: color, global alpha, antialiasing, blend and composite mode,
+and for strokes the width, miter limit, cap, join and dash effect. fillPath,
+strokePath and fillRect copy the cached paint when the key matches and rebuild
+it otherwise. Patterns and gradients are built per draw as before; shadows
+still work on the per-draw copy, and every shape is still drawn in order.
+Building a paint resolved the color into Skia's color space each time.
+
+A page drawing overlapping translucent arcs and rectangles with save/restore,
+global alpha, line width, dashes, caps, joins, miter limit, `multiply`
+compositing and a Display P3 color hashed to the same pixels on both builds.
+2,000 arcs filled and stroked plus 2,000 rectangles, 20 times: 251 → 217 ms
+(−13.4 %).
+Speedometer 3.1: Charts-chartjs 101.2 → 99.4 ms; Perf-Dashboard 143.5 →
+148.3 ms on two candidate runs, one of them slow in every suite (the other,
+141.2 ms, is inside the baseline's 139–150 ms); score within spread. WPT
+html/canvas/element (2,000 files): no regressions.
