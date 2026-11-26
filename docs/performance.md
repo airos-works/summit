@@ -14119,7 +14119,7 @@ Plot (4 iterations, sampled every 3 s, 3 runs each): 326 → 328 MiB. Upstream
 measured +0.94 % and +1.36 % on Speedometer 3; on Summit the effect is within
 run-to-run spread, with no regression in time or memory.
 
-### #296: JSON.parse's loop for keys in JSONCache's name table (not landed)
+### #296: JSON.parse's loop for keys in JSONCache's name table
 
 Upstream 6f5f583 applies to the pin once its `LEGACY_NODELETE` spellings are
 renamed back (the pinned LiteralParser and JSONCache are otherwise identical
@@ -14142,9 +14142,13 @@ profile; with the CI profile the candidate's parser loses its profile (its
 functions changed) and was 6–14 % slower. The parser is 74 % of samples in
 that loop, and the name table is filled as before, so the new loop runs; its
 gain upstream came from keeping the cursor in a register under Clang, and
-GCC's code for the old loop evidently does not spill the same way. The port
-is kept as `~/summit-test/k25/e30/notlanded/296-json-parse-cached-name-loop.diff`
-for a Clang build or the next engine update, which brings it anyway.
+GCC's code for the old loop evidently does not spill the same way.
+
+It was first left out for that reason, then landed at the owner's request:
+it is upstream's code (the next engine update brings it anyway), its tests
+pass, and the TodoMVC parse benchmarks are unchanged. Single-object parsing
+was 6.8 % slower in that comparison and pretty-printed input 4.3 %; the
+parser's PGO profile catches up at the next retrain.
 
 ### #298: SVG rectangle corner radii made on demand
 
