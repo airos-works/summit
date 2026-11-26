@@ -35723,7 +35723,7 @@ index f3dc9ebcfcff29852bb63e4283c9eace10927b9d..d8d781392155f4490d66444fa2a5f0af
  
      // Temporary holder for both ImageBuffer and NativeImage requests.
 diff --git a/Source/WebCore/html/parser/HTMLDocumentParserFastPath.cpp b/Source/WebCore/html/parser/HTMLDocumentParserFastPath.cpp
-index 2406086829634555a791e83531f465fb2b81be60..8b8e8f21d9f2d8c2eb7c07a989fd986fcb065f82 100644
+index 2406086829634555a791e83531f465fb2b81be60..a586a650eac37b71d56bea28a544ad6258b0819a 100644
 --- a/Source/WebCore/html/parser/HTMLDocumentParserFastPath.cpp
 +++ b/Source/WebCore/html/parser/HTMLDocumentParserFastPath.cpp
 @@ -46,6 +46,8 @@
@@ -35991,15 +35991,54 @@ index 2406086829634555a791e83531f465fb2b81be60..8b8e8f21d9f2d8c2eb7c07a989fd986f
              }
  
              if (m_parsingBuffer.atEnd())
-@@ -941,6 +1112,7 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
+@@ -941,8 +1112,34 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
              if (parsingFailed())
                  return;
              ASSERT(child);
 +            recordChildEnd(parent, true);
++        }
++    }
++
++#if PLATFORM(HAIKU)
++    // Whether a start tag repeats an attribute (the first one wins). Nearly
++    // every tag has zero to three, so compare with the names kept so far, as
++    // pointers (local names are atoms, lowercased by the scanner); a sorted
++    // side vector, kept for every name, only pays from a few dozen. Past the
++    // cutoff, fill it once from the kept names and go on with it (#299).
++    static constexpr size_t attributeCountForSortedNames = 8;
++    bool isDuplicateAttribute(AtomStringImpl* name)
++    {
++        if (m_attributeBuffer.size() < attributeCountForSortedNames) {
++            for (auto& attribute : m_attributeBuffer) {
++                if (attribute.localName().impl() == name)
++                    return true;
++            }
++            return false;
++        }
++        if (m_attributeNames.isEmpty()) {
++            for (auto& attribute : m_attributeBuffer)
++                m_attributeNames.append(attribute.localName().impl());
++            std::ranges::sort(m_attributeNames);
          }
++        return !insertInUniquedSortedVector(m_attributeNames, name);
      }
++#endif
  
-@@ -1136,14 +1308,30 @@ static bool canUseFastPath(Element& contextElement, OptionSet<ParserContentPolic
+     void parseAttributes(HTMLElement& parent)
+     {
+@@ -975,7 +1172,11 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
+                 skipWhile<isASCIIWhitespace>(m_parsingBuffer);
+             } else
+                 attributeValue = emptyAtom();
++#if PLATFORM(HAIKU)
++            if (isDuplicateAttribute(attributeName.localName().impl())) [[unlikely]] {
++#else
+             if (!insertInUniquedSortedVector(m_attributeNames, attributeName.localName().impl())) [[unlikely]] {
++#endif
+                 hasDuplicateAttributes = true;
+                 continue;
+             }
+@@ -1136,14 +1337,30 @@ static bool canUseFastPath(Element& contextElement, OptionSet<ParserContentPolic
  template<typename CharacterType>
  static bool tryFastParsingHTMLFragmentImpl(std::span<const CharacterType> source, Document& document, ContainerNode& destinationParent, Element& contextElement)
  {

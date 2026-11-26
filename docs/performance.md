@@ -14168,3 +14168,28 @@ write without an attribute, attribute removal, a single radius, a removal
 that never set one, negative and invalid values, clones, a `baseVal` kept
 across an attribute change, and the rendered pixels of square and rounded
 corners) gave identical results.
+
+### #299: duplicate attributes on short start tags
+
+The fast fragment parser kept a sorted vector of the names seen on each start
+tag, inserting every name by binary search, to drop repeated attributes.
+TodoMVC-jQuery's rows have 0–3 attributes per tag. A new name is now
+compared, as an atom pointer, with the names already kept in the attribute
+buffer; from the eighth attribute on, the sorted vector is filled once from
+the buffer and used as before. The first occurrence still wins, duplicates
+are still dropped and reported to the element, names are already lowercased
+by the scanner, and parserSetAttributes still runs for tags without
+attributes.
+
+Fragment parsing into an emptied element (`parse299.html`, 200 items per
+parse, 4 ABBA launches): jQuery rows 1.167 → 1.117 ms (−4.3 %), 13-attribute
+tags 0.719 → 0.698 ms; tags without attributes, which this does not touch,
+moved −3.4 %, so the effect is within a few percent of drift.
+TodoMVC-jQuery without extensions (5 rounds): 3.52 → 3.60, Completing and
+Deleting Sync −2.2 % and −2.6 %. A differential page (`parsecheck.html`: the
+jQuery row, repeated `id`/`class` in mixed case, boolean attributes, 26 and
+40 attributes with repeats before and after the eighth, repeats at the 8th
+and 9th position, `href` three times, quotes, an attribute named `=`,
+missing whitespace, a stray `/`, `img`, SVG `viewBox`/`viewbox`, `option`,
+`textarea`, and template parsing for comparison) gave identical markup and
+attribute lists.
