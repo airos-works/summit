@@ -14193,3 +14193,26 @@ and 9th position, `href` three times, quotes, an attribute named `=`,
 missing whitespace, a stray `/`, `img`, SVG `viewBox`/`viewbox`, `option`,
 `textarea`, and template parsing for comparison) gave identical markup and
 attribute lists.
+
+### #300: a style flag for all-zero padding (not landed)
+
+The padding half of upstream 7c30bd2 was ported: a `hasZeroPadding`
+non-inherited flag kept by the padding setters (the CSS property generator
+gained `computed-style-setter-did-set-function` for the four physical
+longhands; logical ones call them), set in the default style and copied with
+the other non-inherited flags, and checked first by the eight
+`computedCSSPadding*` getters. ComputedStyle did not grow (its static
+asserts). A differential page (`padcheck.html`: no padding, zeros, pixels,
+percentages, calc, logical edges in both writing modes and rtl, em, zoom,
+table cells, inline-block, flex and grid, then the same box toggled between
+zero and nonzero through shorthand, longhand and logical setters, a class
+with a percentage, a Web Animation and a transition, and logical padding
+inherited across writing modes) gave identical layouts.
+
+It is not faster on Summit: relayout of 3,000 rows (90 % without padding)
+70.5 → 71.2 ms (+1.0 %), NewsSite-Next 142.3 → 144.3 ms and NewsSite-Nuxt
+129.5 → 130.4 ms (4 ABBA rounds, within spread). Upstream's gain was the
+UsedStyle that its getters build for every edge; the pinned getters never
+build one: they read the edge, and a zero length is cheap to evaluate.
+The diff is kept as
+`~/summit-test/k25/e30/notlanded/300-zero-padding-flag.diff`.
