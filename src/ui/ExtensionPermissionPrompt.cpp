@@ -66,6 +66,7 @@ const char* PermissionDescription(const char* permission)
         { "clipboardWrite", "Write to the clipboard" },
         { "notifications", "Show notifications" },
         { "nativeMessaging", "Communicate with installed applications" },
+        { "debugger", "Control pages in tabs: read and change them, click and type in them" },
         { "webRequest", "Observe requests to permitted sites" },
         { "scripting", "Run scripts on permitted sites" },
         { "userScripts", "Run user scripts you add on permitted sites" },

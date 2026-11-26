@@ -35,3 +35,14 @@ Verified on the X399 (24 Oct, id106 build): the script redirect answered
 `…chromiumapp.org/cb?code=42`, the httpbin.org server redirect `?code=7`,
 `interactive: false` and a window closed by the extension were refused, and
 the sign-in windows closed.
+
+## The extension's own address (27 Nov 2026)
+
+Chrome also ends a sign-in at a page of the extension itself: Claude in Chrome
+redirects to `chrome-extension://ID/oauth_callback.html`, a page it does not
+have. `interceptAuthFlowNavigationHaiku` now hands any non-HTTP main-frame
+navigation of a sign-in window to the contexts, and `completeAuthFlowHaiku`
+accepts `https://ID.chromiumapp.org/` or an address of that extension
+(`isURLForThisExtension`). Checked on the laptop with the debugger fixture's
+`checks.signIn()`: the flow answered `...ID/oauth_callback.html?code=42` and its
+window closed. See `docs/webextensions-debugger.md`.

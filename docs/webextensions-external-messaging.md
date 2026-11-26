@@ -64,3 +64,14 @@ reply reached the sender; the closed receiver and the missing ID rejected with
 `onMessage`, because the web process treated only web pages as external
 senders; a sender with another extension ID now counts too. The userScripts
 fixture's messages to its own extension still reach `onMessage`.
+
+## chrome on externally connectable pages (27 Nov 2026)
+
+Web pages had Safari's `browser.runtime` only, and sites written for Chrome
+call `chrome.runtime.sendMessage(id, ...)`: claude.ai gives Claude in Chrome
+its sign-in that way. A page that a loaded extension lists in
+`externally_connectable.matches` now also gets `chrome`, the same object
+(`WebExtensionControllerProxy::addBindingsToWebPageFrameIfNecessary`). Other
+pages still have no `window.chrome`, which sites take for Chrome itself.
+Checked on the laptop: claude.ai's page messaged Claude in Chrome and got its
+answer; example.com has no `chrome`.
