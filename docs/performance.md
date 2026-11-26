@@ -14240,3 +14240,32 @@ AddListener and RemoveListener messages stay balanced: removal still sends
 the removed count. A counting build saw no duplicate registrations from
 1Password and uBlock Origin over TodoMVC-jQuery and NewsSite-Next (600+
 registrations), so this changes nothing measurable for them.
+
+### #297: FTL tier-up thresholds on four-core arm64 (default not changed)
+
+Measured on the lab Raspberry Pi 4 (4× Cortex-A72 at 1.8 GHz, air/OS
+hrev60207+2758, Summit 0.1.0~git20261116.1923) by setting the thresholds per
+launch: `JSC_*` options from the environment do reach Haiku web processes
+(`JSC_dumpOptions=2`). The Pi's defaults are
+`thresholdForFTLOptimizeAfterWarmUp=64000` and
+`thresholdForFTLOptimizeSoon=1000`, with 3 FTL compiler threads.
+Upstream 7e32508 raises both fourfold on Linux arm64 with four or fewer cores
+(+5.2 % Speedometer 3.1, +2.8 % JetStream 2 on a Pi 4).
+
+| JetStream 2.2 (ABBA) | Default | 4× (256000 / 4000) |
+|---|---|---|
+| score | 38.36, 35.90 (mean 37.1) | 36.79, 36.18 (mean 36.5) |
+| FTL compiles | 3,920 / 4,121 | 2,297 / 2,247 |
+| FTL compile CPU | 134 / 153 s | 71 / 67 s |
+
+Fourfold thresholds halve FTL compile work, but the score is 1.8 % lower,
+within spread: upstream's JetStream gain does not reproduce. Speedometer 3.1
+could not be measured: on this board every run's web process stops on a
+release assert in MemoryCache (an `isMainThread()` check, reached from a JIT
+worklist thread), on that build and again after the Pi was updated to
+hrev60207+2968 with Summit 20261126.0040; filed as #304. Runs that got far
+had 915–931 FTL compiles (15.5–16.5 s) by default, 772 (9.8 s) at 2× and
+336–343 (2.3–2.4 s) at 4×. Without a measured gain the default stays; the
+Speedometer half is worth repeating once #304 is fixed. The A/B driver is
+`~/summit-test/p297/piab.py` (environment-only configurations, scores
+through Summit's MCP, FTL compiles counted from `JSC_reportFTLCompileTimes`).
