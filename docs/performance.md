@@ -14216,3 +14216,27 @@ UsedStyle that its getters build for every edge; the pinned getters never
 build one: they read the edge, and a zero length is cheap to evaluate.
 The diff is kept as
 `~/summit-test/k25/e30/notlanded/300-zero-padding-flag.diff`.
+
+### #301: a listener added twice to one extension event
+
+The non-Cocoa `WebExtensionAPIEvent::addListener` appended the callback and
+sent AddListener even when the same function was already registered, so it
+ran twice per event; upstream fixed the Cocoa copy. It now returns when
+`hasListener` finds the function, as in other browsers. The filtered event
+types (webRequest, webNavigation, windows) keep their own addListener, since
+each registration carries its own filter. A fixture extension
+(`~/summit-test/k25/fix301`, loaded through a developer-mode profile seed)
+adds one function twice and another once to `storage.onChanged`, then
+removes and re-adds it, and registers its `runtime.onMessage` handler twice:
+
+| | Before | After |
+|---|---|---|
+| calls of the twice-added function per change | 2 | 1 |
+| after removeListener / re-adding | 0 / 1 per change | 0 / 1 per change |
+| `storage.onChanged` and `storage.local.onChanged` (separate objects) | 2 | 2 |
+| onMessage calls for two messages | 2, 4 | 1, 2 |
+
+AddListener and RemoveListener messages stay balanced: removal still sends
+the removed count. A counting build saw no duplicate registrations from
+1Password and uBlock Origin over TodoMVC-jQuery and NewsSite-Next (600+
+registrations), so this changes nothing measurable for them.
