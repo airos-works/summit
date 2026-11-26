@@ -116296,6 +116296,209 @@ index 7b28ddeda6932b4b15b3b0cef2e6536966746537..895bd0fcc920013c3876806ec8e24c9f
      auto parserContext = CSSParserContext { SVGAttributeMode };
      auto parserState = CSS::PropertyParserState {
          .context = parserContext
+diff --git a/Source/WebCore/svg/SVGRectElement.cpp b/Source/WebCore/svg/SVGRectElement.cpp
+index 9ab08eb11db4ca186ba398bf9f3c2d79ac994032..3116844c59c7025b03599376d2c598b65e6105f7 100644
+--- a/Source/WebCore/svg/SVGRectElement.cpp
++++ b/Source/WebCore/svg/SVGRectElement.cpp
+@@ -39,6 +39,66 @@ namespace WebCore {
+ 
+ WTF_MAKE_TZONE_ALLOCATED_IMPL(SVGRectElement);
+ 
++#if PLATFORM(HAIKU)
++// The registry's accessor for rx or ry, which may not exist yet: nothing to
++// detach, synchronize or match until it does; animating it makes it.
++class SVGRectRadiusAccessor final : public SVGMemberAccessor<SVGRectElement> {
++public:
++    using Member = RefPtr<SVGAnimatedLength> SVGRectElement::*;
++    SVGRectRadiusAccessor(Member member, SVGLengthMode lengthMode)
++        : m_member(member)
++        , m_lengthMode(lengthMode)
++    {
++    }
++
++private:
++    SVGAnimatedLength* existing(const SVGRectElement& owner) const { return (owner.*m_member).get(); }
++    SVGAnimatedLength& ensure(SVGRectElement& owner) const { return owner.ensureRadius(owner.*m_member, m_lengthMode); }
++
++    void detach(const SVGRectElement& owner) const final
++    {
++        if (RefPtr property = existing(owner))
++            property->detach();
++    }
++    bool isAnimatedProperty() const final { return true; }
++    bool isAnimatedLength() const final { return true; }
++    bool matches(const SVGRectElement& owner, const SVGAnimatedPropertyBase& animatedProperty) const final { return existing(owner) == &animatedProperty; }
++    std::optional<String> synchronize(const SVGRectElement& owner) const final
++    {
++        if (RefPtr property = existing(owner))
++            return property->synchronize();
++        return std::nullopt;
++    }
++    RefPtr<SVGAttributeAnimator> createAnimator(SVGRectElement& owner, const QualifiedName& attributeName, AnimationMode animationMode, CalcMode calcMode, bool isAccumulated, bool isAdditive) const final
++    {
++        Ref property = ensure(owner);
++        SVGLengthMode lengthMode = property->baseVal()->value().lengthMode();
++        return SVGAnimatedLengthAnimator::create(attributeName, property, animationMode, calcMode, isAccumulated, isAdditive, lengthMode);
++    }
++    void appendAnimatedInstance(SVGRectElement& owner, SVGAttributeAnimator& animator) const final
++    {
++        downcast<SVGAnimatedLengthAnimator>(animator).appendAnimatedInstance(ensure(owner));
++    }
++
++    Member m_member;
++    SVGLengthMode m_lengthMode;
++};
++
++const SVGLengthValue& SVGRectElement::defaultRadius(SVGLengthMode lengthMode)
++{
++    static NeverDestroyed<SVGLengthValue> width { SVGLengthMode::Width };
++    static NeverDestroyed<SVGLengthValue> height { SVGLengthMode::Height };
++    return lengthMode == SVGLengthMode::Width ? width.get() : height.get();
++}
++
++SVGAnimatedLength& SVGRectElement::ensureRadius(RefPtr<SVGAnimatedLength>& radius, SVGLengthMode lengthMode)
++{
++    if (!radius)
++        radius = SVGAnimatedLength::create(this, lengthMode);
++    return *radius;
++}
++#endif
++
+ inline SVGRectElement::SVGRectElement(const QualifiedName& tagName, Document& document)
+     : SVGGeometryElement(tagName, document, PropertyRegistry::singleton())
+ {
+@@ -51,8 +111,15 @@ inline SVGRectElement::SVGRectElement(const QualifiedName& tagName, Document& do
+         PropertyRegistry::registerProperty<SVGNames::yAttr, &SVGRectElement::m_y>();
+         PropertyRegistry::registerProperty<SVGNames::widthAttr, &SVGRectElement::m_width>();
+         PropertyRegistry::registerProperty<SVGNames::heightAttr, &SVGRectElement::m_height>();
++#if PLATFORM(HAIKU)
++        static NeverDestroyed<SVGRectRadiusAccessor> rxAccessor { &SVGRectElement::m_rx, SVGLengthMode::Width };
++        static NeverDestroyed<SVGRectRadiusAccessor> ryAccessor { &SVGRectElement::m_ry, SVGLengthMode::Height };
++        PropertyRegistry::registerPropertyAccessor(SVGNames::rxAttr, rxAccessor.get());
++        PropertyRegistry::registerPropertyAccessor(SVGNames::ryAttr, ryAccessor.get());
++#else
+         PropertyRegistry::registerProperty<SVGNames::rxAttr, &SVGRectElement::m_rx>();
+         PropertyRegistry::registerProperty<SVGNames::ryAttr, &SVGRectElement::m_ry>();
++#endif
+     }
+ }
+ 
+@@ -71,10 +138,18 @@ SVGAnimatedPropertyBase* SVGRectElement::propertyForAttribute(const QualifiedNam
+         return m_width.ptr();
+     if (name == SVGNames::heightAttr)
+         return m_height.ptr();
++#if PLATFORM(HAIKU)
++    // Null for a radius not made yet: the registry then asks its accessor.
++    if (name == SVGNames::rxAttr)
++        return m_rx.get();
++    if (name == SVGNames::ryAttr)
++        return m_ry.get();
++#else
+     if (name == SVGNames::rxAttr)
+         return m_rx.ptr();
+     if (name == SVGNames::ryAttr)
+         return m_ry.ptr();
++#endif
+     return nullptr;
+ }
+ 
+@@ -89,12 +164,24 @@ void SVGRectElement::attributeChanged(const QualifiedName& name, const AtomStrin
+     case AttributeNames::yAttr:
+         Ref { m_y }->setBaseValInternal(SVGLengthValue::construct(SVGLengthMode::Height, newValue, parseError));
+         break;
++#if PLATFORM(HAIKU)
++    // Removing an attribute that never made the radius leaves it the default.
++    case AttributeNames::rxAttr:
++        if (m_rx || !newValue.isNull())
++            Ref { rxAnimated() }->setBaseValInternal(SVGLengthValue::construct(SVGLengthMode::Width, newValue, parseError, SVGLengthNegativeValuesMode::Forbid));
++        break;
++    case AttributeNames::ryAttr:
++        if (m_ry || !newValue.isNull())
++            Ref { ryAnimated() }->setBaseValInternal(SVGLengthValue::construct(SVGLengthMode::Height, newValue, parseError, SVGLengthNegativeValuesMode::Forbid));
++        break;
++#else
+     case AttributeNames::rxAttr:
+         Ref { m_rx }->setBaseValInternal(SVGLengthValue::construct(SVGLengthMode::Width, newValue, parseError, SVGLengthNegativeValuesMode::Forbid));
+         break;
+     case AttributeNames::ryAttr:
+         Ref { m_ry }->setBaseValInternal(SVGLengthValue::construct(SVGLengthMode::Height, newValue, parseError, SVGLengthNegativeValuesMode::Forbid));
+         break;
++#endif
+     case AttributeNames::widthAttr:
+         Ref { m_width }->setBaseValInternal(SVGLengthValue::construct(SVGLengthMode::Width, newValue, parseError, SVGLengthNegativeValuesMode::Forbid));
+         break;
+diff --git a/Source/WebCore/svg/SVGRectElement.h b/Source/WebCore/svg/SVGRectElement.h
+index 2a20603e54b74fc8c63a250c3b57bf14fe4568a4..559c33a9453e2aeda37661fae1ebe00887b3ffc1 100644
+--- a/Source/WebCore/svg/SVGRectElement.h
++++ b/Source/WebCore/svg/SVGRectElement.h
+@@ -37,15 +37,25 @@ public:
+     const SVGLengthValue& y() const LIFETIME_BOUND { return m_y->currentValue(); }
+     const SVGLengthValue& width() const LIFETIME_BOUND { return m_width->currentValue(); }
+     const SVGLengthValue& height() const LIFETIME_BOUND { return m_height->currentValue(); }
++#if PLATFORM(HAIKU)
++    const SVGLengthValue& rx() const LIFETIME_BOUND { return m_rx ? m_rx->currentValue() : defaultRadius(SVGLengthMode::Width); }
++    const SVGLengthValue& ry() const LIFETIME_BOUND { return m_ry ? m_ry->currentValue() : defaultRadius(SVGLengthMode::Height); }
++#else
+     const SVGLengthValue& rx() const LIFETIME_BOUND { return m_rx->currentValue(); }
+     const SVGLengthValue& ry() const LIFETIME_BOUND { return m_ry->currentValue(); }
++#endif
+ 
+     SVGAnimatedLength& xAnimated() { return m_x; }
+     SVGAnimatedLength& yAnimated() { return m_y; }
+     SVGAnimatedLength& widthAnimated() { return m_width; }
+     SVGAnimatedLength& heightAnimated() { return m_height; }
++#if PLATFORM(HAIKU)
++    SVGAnimatedLength& rxAnimated() { return ensureRadius(m_rx, SVGLengthMode::Width); }
++    SVGAnimatedLength& ryAnimated() { return ensureRadius(m_ry, SVGLengthMode::Height); }
++#else
+     SVGAnimatedLength& rxAnimated() { return m_rx; }
+     SVGAnimatedLength& ryAnimated() { return m_ry; }
++#endif
+ 
+     using PropertyRegistry = SVGPropertyOwnerRegistry<SVGRectElement, SVGGeometryElement>;
+ 
+@@ -66,8 +76,21 @@ private:
+     const Ref<SVGAnimatedLength> m_y { SVGAnimatedLength::create(this, SVGLengthMode::Height) };
+     const Ref<SVGAnimatedLength> m_width { SVGAnimatedLength::create(this, SVGLengthMode::Width) };
+     const Ref<SVGAnimatedLength> m_height { SVGAnimatedLength::create(this, SVGLengthMode::Height) };
++#if PLATFORM(HAIKU)
++    // The corner radii are made when something needs them as properties: an
++    // rx/ry attribute, script (rect.rx), an animation. Most rectangles have
++    // neither, and these were 4 of the 12 allocations of every <rect> (#298).
++    // An untouched radius reads as the default value without making it.
++    friend class SVGRectRadiusAccessor;
++    static const SVGLengthValue& defaultRadius(SVGLengthMode);
++    SVGAnimatedLength& ensureRadius(RefPtr<SVGAnimatedLength>&, SVGLengthMode);
++
++    RefPtr<SVGAnimatedLength> m_rx;
++    RefPtr<SVGAnimatedLength> m_ry;
++#else
+     const Ref<SVGAnimatedLength> m_rx { SVGAnimatedLength::create(this, SVGLengthMode::Width) };
+     const Ref<SVGAnimatedLength> m_ry { SVGAnimatedLength::create(this, SVGLengthMode::Height) };
++#endif
+ };
+ 
+ } // namespace WebCore
+diff --git a/Source/WebCore/svg/properties/SVGPropertyOwnerRegistry.h b/Source/WebCore/svg/properties/SVGPropertyOwnerRegistry.h
+index df0804df8b896e35a58a1c82ba6acebfdb0d5600..5c53e35a6b473b01c652116a4fc537e2bd77a81a 100644
+--- a/Source/WebCore/svg/properties/SVGPropertyOwnerRegistry.h
++++ b/Source/WebCore/svg/properties/SVGPropertyOwnerRegistry.h
+@@ -197,6 +197,15 @@ public:
+     }
+ 
+     // Returns true if OwnerType owns a property whose name is attributeName.
++#if PLATFORM(HAIKU)
++    // For an accessor that is not one of the member-pointer kinds above (an
++    // element's lazily created property, SVGRectElement's radii: #298).
++    static void registerPropertyAccessor(const QualifiedName& attributeName, const SVGMemberAccessor<OwnerType>& propertyAccessor)
++    {
++        registerProperty(attributeName, propertyAccessor);
++    }
++#endif
++
+     static bool isKnownAttribute(const QualifiedName& attributeName)
+     {
+         return findAccessor(attributeName);
 diff --git a/Source/WebCore/testing/Internals.idl b/Source/WebCore/testing/Internals.idl
 index 004110288068340109f3dd98a57123c0779675aa..e468ceb71c006aaf5a037d127c3d66695f7af617 100644
 --- a/Source/WebCore/testing/Internals.idl

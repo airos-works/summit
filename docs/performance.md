@@ -14145,3 +14145,26 @@ gain upstream came from keeping the cursor in a register under Clang, and
 GCC's code for the old loop evidently does not spill the same way. The port
 is kept as `~/summit-test/k25/e30/notlanded/296-json-parse-cached-name-loop.diff`
 for a Clang build or the next engine update, which brings it anyway.
+
+### #298: SVG rectangle corner radii made on demand
+
+Every `<rect>` made six SVGAnimatedLengths, each with its base value object:
+12 allocations, 4 of them for `rx` and `ry`, which most rectangles never
+use (rendering reads the radii from style). The radii are now made when
+something needs them as properties: an `rx`/`ry` attribute, script
+(`rect.rx`), or an animation (the registry's accessor for them makes them in
+createAnimator and appendAnimatedInstance). Until then `rx()`/`ry()` return
+the default length, the registry's detach, synchronize and identity checks
+skip them, and removing an attribute that never made one changes nothing.
+
+10,000 plain rects (4 ABBA launches): created 37.3 → 31.3 ms (−16 %), laid
+out 50.3 → 45.5 ms, removed 5.3 → 5.0 ms, parsed from SVG markup 37.8 →
+34.5 ms; with `rx` set (only `rx` made) 41.0 → 36.8 ms. Charts-observable-plot
+(4 rounds) 108.2 → 105.6 ms, every step faster; React-Stockcharts-SVG, which
+draws mostly paths, 169.6 → 169.8 ms. A differential page (`svgcheck298.html`:
+plain, `rx` only, percentage `ry`, both radii, SMIL animation of `rx`,
+`baseVal`/`animVal` values and computed style, object identity, a script
+write without an attribute, attribute removal, a single radius, a removal
+that never set one, negative and invalid values, clones, a `baseVal` kept
+across an attribute change, and the rendered pixels of square and rounded
+corners) gave identical results.
