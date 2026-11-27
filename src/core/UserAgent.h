@@ -12,4 +12,8 @@ struct UserAgentPreset {
 const std::array<UserAgentPreset, 9>& UserAgentPresets();
 // Unknown or obsolete profile values safely return the Summit default.
 const UserAgentPreset& FindUserAgentPreset(std::string_view id);
+// The agent of touch layouts (air/OS Mobile, Android): Chrome on Android, so
+// sites send their phone layouts and media that plays through Media Source
+// (an iPhone's agent gets HLS, which the engine lacks).
+const char* MobileUserAgent();
 }

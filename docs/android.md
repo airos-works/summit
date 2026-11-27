@@ -1,0 +1,135 @@
+# Summit for Android
+
+Summit builds as a native Android app (`android/`) from the same sources as
+Summit for air/OS. This page describes how the two builds share code, how to
+build the APK, and what is still to do.
+
+## What is shared, and how
+
+| Layer | air/OS | Android | Shared |
+| --- | --- | --- | --- |
+| Engine | WebKit, upstream pin + `engine/patches/0001-haiku-port.patch`, `PORT=Haiku` | The same tree, `PORT=WPE` with `ANDROID` | Everything outside the platform directories: WebCore, JavaScriptCore, the WebKit process model, the WebExtensions implementation |
+| Engine embedding | `Source/WebKit/UIProcess/API/haiku` (BWebKitView) | WPE's GLib API, through `android/wpeview` (Igalia's WPE Android view, vendored) | — |
+| Browser logic | `src/core` | `src/core`, compiled into `libsummit.so` | All of it: profile.json (session, bookmarks, history, reading list, settings), address resolution and bookmark keywords, search engines, type-ahead, user agents |
+| Interface | `src/ui` (BeAPI) | `android/app` (Kotlin, Jetpack Compose) | — |
+
+The rule that keeps the two in step:
+
+- **Engine changes go into the one engine tree** (`.cache/WebKit`, saved as the
+  one patch by `tools/update-engine-patch.py`). A fix in shared engine code
+  reaches both builds with no extra work. Android-only engine code lives under
+  WPE/Android directories or `#if OS(ANDROID)`.
+- **Browser logic goes into `src/core`**. The Android build compiles every
+  file in `src/core` (a glob, like air/OS's Makefile), so new core code is
+  built for Android automatically. Only its JNI surface
+  (`android/app/src/main/cpp/SummitCoreJni.cpp`) needs a function when the
+  Android interface should call something new.
+- Interface code is per platform. Keep decisions (what an address means, what
+  to suggest, what the profile holds) in `src/core`, not in either interface.
+
+Examples already shared: the touch layouts' user agent (`summit::MobileUserAgent`,
+used by air/OS Mobile and by Android), search engines and bookmark keywords
+in the address field, history type-ahead, and profile.json, which has the same
+format on both systems.
+
+## Building
+
+Everything large lives under `SUMMIT_ANDROID_ROOT` (default
+`/data3/airos/summit-android`): cerbero, its toolchain and dependency
+prefixes, and the engine build directories. The Android SDK and NDK are set
+up as described in `~/android/README.md` (`. ~/android/env.sh`).
+
+```sh
+tools/android/build-deps.sh x86_64        # once (~1-2 h): GLib, libsoup, GStreamer, ICU, ... via cerbero
+tools/android/build-engine.sh x86_64      # the engine (incremental); installs into the cerbero prefix
+tools/android/stage-engine.py x86_64      # copies what the engine loads into android/wpeview
+cd android && ./gradlew :app:assembleDebug   # app/build/outputs/apk/debug/app-x86_64-debug.apk
+```
+
+Use `arm64` for phones and tablets and `x86_64` for the emulator. The Gradle
+build produces one APK per staged ABI.
+
+- `build-deps.sh` uses [wpe-android-cerbero](https://github.com/Igalia/wpe-android-cerbero)
+  at a pinned revision. The dependencies are built with cerbero's NDK (r29)
+  for API 31; the engine and the app target API 33 (minSdk).
+- `build-engine.sh` builds `SUMMIT_ENGINE_SOURCE` (default `.cache/WebKit`)
+  out of tree, with ccache. Options follow cerbero's `wpewebkit` recipe, with
+  OpenSSL as the crypto backend (as on air/OS) and WebXR off.
+  `SUMMIT_ENGINE_CMAKE_EXTRA` adds CMake options.
+- `stage-engine.py` copies only the libraries the engine needs (the NEEDED
+  closure of the engine, the injected bundle, the GIO TLS module and the
+  GStreamer plugins Summit uses), not everything cerbero built. It renames
+  versioned sonames (`libfoo.so.1` → `libfoo_1.so`), as Android installs only
+  `lib*.so` files. `--sysroot` stages from a WPE Android prebuilt package
+  instead, which helps when working on the app without an engine build.
+
+## The app
+
+- **Package** `works.airos.summit`, minSdk 33 (Android 13), targetSdk 36
+  (Google Play's requirement since 31 August 2026), compileSdk 37.1. Native
+  code is built for 16 KB pages, which Google Play requires.
+- **Processes**: the engine's web content and network processes are services
+  of the app (`:WPEWebProcessN`, `:WPENetworkProcessN`), started by
+  wpeview's process manager. Android ranks and ends them like the app's own
+  processes.
+- **Window sizes**: phones get the address field at the top and Back,
+  Forward, Share, Bookmarks and Tabs at the bottom (as on air/OS Mobile).
+  Windows 600 dp and wider (tablets, unfolded foldables, desktop mode) get one
+  toolbar with a row of tabs under it. The activity handles size, density
+  and posture changes itself, so folding, rotating and resizing keep the
+  pages.
+- **Tabs**: a grid switcher with Tabs | Private segments, swipe or ✕ to close,
+  Close All, and pictures of the pages. Private tabs use an ephemeral engine
+  context that is destroyed with the last private tab.
+- **Resource use**: see *Tabs and memory* below.
+
+### Tabs and memory
+
+Summit keeps at most a few pages loaded: 2 on low-memory devices and under
+3 GB, then 3, 4, 6, and 8 at 11 GB and more. Showing another tab discards the
+page that was shown least recently. The tab keeps its address, title and a
+picture, and loads again when it is shown. Only the shown page has a surface;
+the engine treats the others as hidden, so they stop painting and their
+timers and animation frames are throttled. Android's memory pressure
+(`onTrimMemory`) discards every page but the shown one. After five minutes
+in the background, Summit discards that one too, so an idle Summit holds no
+page processes.
+
+## Status and plan
+
+Done:
+
+- [x] The engine's dependencies cross-built for Android with cerbero (x86_64).
+- [x] Summit's engine tree configured and building as WPE for Android.
+- [x] The app: tabs, private tabs, the address field with shared resolution
+      and type-ahead, bookmarks, reading list, history, settings, sharing,
+      links from other apps, phone and tablet layouts, and the tab memory
+      policy. It has been checked on the API 36 emulator with WPE 2.55.0.3
+      prebuilt libraries.
+
+Next, in order:
+
+1. Run the app on Summit's own engine build (x86_64, then arm64) and fix the
+   compile breaks that only the WPE/Clang build exposes.
+2. wpeview additions the browser needs: new-window requests (tabs from
+   `target=_blank` and `window.open`), downloads, permission prompts
+   (camera, microphone, location, notifications), file choosers, fullscreen
+   video, context menus, favicons, find in page, and a per-tab user agent.
+3. Media: hardware decoding through GStreamer's `androidmedia` (MediaCodec)
+   with zero-copy AHardwareBuffer frames; MSE playback on YouTube; WebRTC.
+4. WebExtensions: enable `ENABLE_WK_WEB_EXTENSIONS` for WPE and compile the
+   Haiku port's extension implementation (`UIProcess/Extensions/haiku`,
+   mostly platform-neutral C++) for WPE as well. The few BeAPI-bound files
+   (tab commands, action popups, downloads) need an embedder interface with
+   a Haiku and an Android implementation. The goal is the same extension
+   support as on air/OS: Firefox (XPI, MV2 and MV3), Chrome (CRX, MV2 and
+   MV3) and Safari web extensions, on phones and in desktop mode.
+5. Performance: browserbench.org (Speedometer 3.1, JetStream, MotionMark)
+   on a phone against Chrome and Firefox, with the same harness as air/OS
+   (`tools/bench`); PGO and LTO for the engine; battery and CPU use when
+   idle and while scrolling.
+6. Interop 2024, 2025 and 2026 through WPE WebDriver on Android
+   (`android/wpeview` has the WebDriver service), compared with the air/OS
+   scores (`tools/interop2026`).
+7. CI: build the APK in airos-ci next to the air/OS packages, with a release
+   signing key kept outside the repository.

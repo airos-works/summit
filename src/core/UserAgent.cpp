@@ -27,4 +27,10 @@ const UserAgentPreset& FindUserAgentPreset(std::string_view id)
         if (preset.id == id) return preset;
     return UserAgentPresets().front();
 }
+
+const char* MobileUserAgent()
+{
+    return "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/140.0.0.0 Mobile Safari/537.36";
+}
 }

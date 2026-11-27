@@ -89,10 +89,6 @@ enum Panel : int32 { kPagePanel, kTabsPanel, kListPanel, kEditorPanel, kSettings
 enum Section : int32 { kBookmarksSection, kReadingListSection, kHistorySection };
 enum RowKind : int32 { kFolderRow, kBookmarkRow, kReadingRow, kHistoryRow };
 
-// Chrome on Android: sites send it their phone layouts and media that plays
-// through Media Source (an iPhone's agent gets HLS, which the engine lacks).
-constexpr const char* kMobileUserAgent = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/140.0.0.0 Mobile Safari/537.36";
 
 // Pictures in the tab switcher are at most this wide (in device pixels).
 constexpr float kPictureWidth = 480;
@@ -197,7 +193,7 @@ BView* Glue() { return nullptr; }
 
 const char* BrowserWindow::NormalUserAgent(const Tab& tab) const
 {
-    if (fMobile && !tab.desktopSite) return kMobileUserAgent;
+    if (fMobile && !tab.desktopSite) return summit::MobileUserAgent();
     return fShared->Read([](const Profile& profile) { return FindUserAgentPreset(profile.userAgent).agent; });
 }
 
