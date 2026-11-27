@@ -31,7 +31,7 @@ itself (File › Check for Updates…). `summit_webkitlegacy` is optional: it
 runs WebPositive and other `BWebView` programs on Summit's engine
 ([BWebView on Summit's engine](docs/legacy-webview.md)).
 
-![Summit running WebKit natively](docs/screenshots/current-webkit.png)
+![Summit on air/OS, showing tabs, the bookmarks bar and a Wikipedia page](docs/screenshots/summit.png)
 
 <!-- airos-ci:latest-builds:start -->
 ## Latest builds
