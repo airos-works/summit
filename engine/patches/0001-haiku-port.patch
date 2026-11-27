@@ -43265,6 +43265,25 @@ index 6439263a69ce3e3d744c166c8e38b2993bd00944..241b19d1678889fc9d45e3519eeab98b
  if (USE_JPEGXL)
      list(APPEND WebCore_LIBRARIES JPEGXL::jxl)
  endif ()
+diff --git a/Source/WebCore/platform/LayoutUnit.h b/Source/WebCore/platform/LayoutUnit.h
+index 58ebb85d5a22fe72a6f6ea5e274adff67739881c..cf34b15062b92b1cab818e4ac6829ea2450aabb4 100644
+--- a/Source/WebCore/platform/LayoutUnit.h
++++ b/Source/WebCore/platform/LayoutUnit.h
+@@ -645,8 +645,12 @@ inline float roundToDevicePixel(LayoutUnit value, float pixelSnappingFactor, boo
+     // This adjusts directional rounding on negative halfway values. It produces the same direction for both negative and positive values.
+     // Instead of rounding negative halfway cases away from zero, we translate them to positive values before rounding.
+     // It helps snapping relative negative coordinates to the same position as if they were positive absolute coordinates.
+-    unsigned translateOrigin = WTF::negate(value.rawValue());
+-    return (round((valueToRound + translateOrigin) * pixelSnappingFactor) / pixelSnappingFactor) - translateOrigin;
++    // The translation is a whole number of device pixels, so the result stays on the device pixel grid at a fractional
++    // pixelSnappingFactor too (translating by whole CSS pixels left negative values off the grid at 1.25x, 1.5x, 1.75x...).
++    // At an integer factor this gives the same result as before.
++    double devicePixels = valueToRound * pixelSnappingFactor;
++    double translateOrigin = std::ceil(-devicePixels);
++    return (round(devicePixels + translateOrigin) - translateOrigin) / pixelSnappingFactor;
+ }
+ 
+ inline float floorToDevicePixel(LayoutUnit value, float pixelSnappingFactor)
 diff --git a/Source/WebCore/platform/LocalizedStrings.cpp b/Source/WebCore/platform/LocalizedStrings.cpp
 index 442763db5c9e0be957a635d4f0da0b16aa156dec..e7526dfc8b3c15b0d405d621072a3882595ecb1e 100644
 --- a/Source/WebCore/platform/LocalizedStrings.cpp
@@ -108981,6 +109000,193 @@ index f5ee0f9e3eb648511c17a30fd82846e3fb0fb96d..a6c82425dd49b4d865c5e52bf51d5d5e
 +    static LayoutUnit synthesizedBaseline(LayoutUnit boxSize, FontBaseline, WritingMode, LineDirection);
      static LayoutUnit synthesizedBaseline(const RenderBox&, FontBaseline baselineType, WritingMode writingModeForSynthesis, LineDirection, BaselineSynthesisEdge);
  };
+ 
+diff --git a/Source/WebCore/rendering/BorderPainter.cpp b/Source/WebCore/rendering/BorderPainter.cpp
+index cb4eb051204b7b3202265ceadbe29dc328be15bc..b5e811233cf7772d312ffdb7d5cf6f335e6c9476 100644
+--- a/Source/WebCore/rendering/BorderPainter.cpp
++++ b/Source/WebCore/rendering/BorderPainter.cpp
+@@ -155,27 +155,33 @@ std::optional<Path> BorderPainter::pathForBorderArea(const LayoutRect& rect, con
+     return borderShape.pathForBorderArea(deviceScaleFactor);
+ }
+ 
+-static LayoutRect calculateSideRect(const LayoutRect& outerBorderRect, const BorderEdges& edges, BoxSide side)
++// The rect of one border side, for painting. It sits on the snapped outer edge and is a whole number
++// of device pixels thick, so both of its edges are device pixels: snapping the edges of the unsnapped
++// rect one by one could round a one device pixel border to nothing at a fractional device scale,
++// where its width is not a whole number of layout units (1px at 175% is 36/64 = 0.5625 layout px,
++// 0.984 device px, so an edge within 0.016 px of a half pixel lost the whole side).
++static LayoutRect calculateSideRect(const LayoutRect& outerBorderRect, float width, BoxSide side, float deviceScaleFactor)
+ {
+-    auto sideRect = outerBorderRect;
+-    float width = edges.at(side).widthForPainting();
++    auto sideRect = snapRectToDevicePixels(outerBorderRect, deviceScaleFactor);
++    float thickness = std::min(std::round(width * deviceScaleFactor) / deviceScaleFactor,
++        (side == BoxSide::Top || side == BoxSide::Bottom) ? sideRect.height() : sideRect.width());
+ 
+     switch (side) {
+     case BoxSide::Top:
+-        sideRect.setHeight(width);
++        sideRect.setHeight(thickness);
+         break;
+     case BoxSide::Right:
+-        sideRect.shiftXEdgeTo(sideRect.maxX() - width);
++        sideRect.shiftXEdgeTo(sideRect.maxX() - thickness);
+         break;
+     case BoxSide::Bottom:
+-        sideRect.shiftYEdgeTo(sideRect.maxY() - width);
++        sideRect.shiftYEdgeTo(sideRect.maxY() - thickness);
+         break;
+     case BoxSide::Left:
+-        sideRect.setWidth(width);
++        sideRect.setWidth(thickness);
+         break;
+     }
+ 
+-    return sideRect;
++    return LayoutRect(sideRect);
+ }
+ 
+ static LayoutSize sizeForDevicePixel(const GraphicsContext& context, float devicePixelRatio)
+@@ -402,7 +408,7 @@ void BorderPainter::paintSides(const BorderShape& borderShape, const Sides& side
+             Path path;
+             for (auto side : allBoxSides) {
+                 if (sides.edges.at(side).shouldRender())
+-                    path.addRect(snapRectToDevicePixels(calculateSideRect(outerBorderRect, sides.edges, side), deviceScaleFactor));
++                    path.addRect(snapRectToDevicePixels(calculateSideRect(outerBorderRect, sides.edges.at(side).widthForPainting(), side, deviceScaleFactor), deviceScaleFactor));
+             }
+ 
+             graphicsContext.setFillRule(WindRule::NonZero);
+@@ -633,11 +639,10 @@ static bool joinRequiresMitre(BoxSide side, BoxSide adjacentSide, const BorderEd
+ 
+ void BorderPainter::paintBorderSides(const BorderShape& borderShape, const Sides& sides, BoxSideSet edgeSet, bool antialias, const Color* overrideColor) const
+ {
++    float deviceScaleFactor = protect(document())->deviceScaleFactor();
+     Path roundedPath;
+-    if (!sides.outerEdgeIsRectangular) {
+-        float deviceScaleFactor = protect(document())->deviceScaleFactor();
++    if (!sides.outerEdgeIsRectangular)
+         roundedPath = borderShape.pathForOuterShape(deviceScaleFactor);
+-    }
+ 
+     auto innerEdgeRadii = borderShape.innerEdgeRadii();
+ 
+@@ -651,28 +656,24 @@ void BorderPainter::paintBorderSides(const BorderShape& borderShape, const Sides
+         if (!edge.shouldRender() || !edgeSet.contains(side))
+             return;
+ 
+-        LayoutRect sideRect = borderShape.borderRect();
++        auto sideRect = calculateSideRect(borderShape.borderRect(), borderShape.borderWidths().at(side).toFloat(), side, deviceScaleFactor);
+         LayoutSize firstRadius;
+         LayoutSize secondRadius;
+ 
+         switch (side) {
+         case BoxSide::Top:
+-            sideRect.setHeight(borderShape.borderWidths().top());
+             firstRadius = innerEdgeRadii.topLeft();
+             secondRadius = innerEdgeRadii.topRight();
+             break;
+         case BoxSide::Right:
+-            sideRect.shiftXEdgeTo(sideRect.maxX() - borderShape.borderWidths().right());
+             firstRadius = innerEdgeRadii.bottomRight();
+             secondRadius = innerEdgeRadii.topRight();
+             break;
+         case BoxSide::Bottom:
+-            sideRect.shiftYEdgeTo(sideRect.maxY() - borderShape.borderWidths().bottom());
+             firstRadius = innerEdgeRadii.bottomLeft();
+             secondRadius = innerEdgeRadii.bottomRight();
+             break;
+         case BoxSide::Left:
+-            sideRect.setWidth(borderShape.borderWidths().left());
+             firstRadius = innerEdgeRadii.bottomLeft();
+             secondRadius = innerEdgeRadii.topLeft();
+             break;
+diff --git a/Source/WebCore/rendering/BorderShape.cpp b/Source/WebCore/rendering/BorderShape.cpp
+index dfbdf56fcc4b8b8c358c426a366e9e4eaf15ec56..67aee911d0d7d0b114cd5eaed5c27dfc510b5c8f 100644
+--- a/Source/WebCore/rendering/BorderShape.cpp
++++ b/Source/WebCore/rendering/BorderShape.cpp
+@@ -216,7 +216,7 @@ FloatRoundedRect BorderShape::deprecatedPixelSnappedRoundedRect(float deviceScal
+ 
+ FloatRoundedRect BorderShape::deprecatedPixelSnappedInnerRoundedRect(float deviceScaleFactor) const
+ {
+-    return m_innerEdgeRect.pixelSnappedRoundedRectForPainting(deviceScaleFactor);
++    return snappedInnerEdgeRectForPainting(deviceScaleFactor);
+ }
+ 
+ FloatRect BorderShape::snappedOuterRect(float deviceScaleFactor) const
+@@ -226,7 +226,7 @@ FloatRect BorderShape::snappedOuterRect(float deviceScaleFactor) const
+ 
+ FloatRect BorderShape::snappedInnerRect(float deviceScaleFactor) const
+ {
+-    return snapRectToDevicePixels(innerEdgeRect(), deviceScaleFactor);
++    return snappedInnerEdgeRectForPainting(deviceScaleFactor).rect();
+ }
+ 
+ bool BorderShape::innerShapeContains(const LayoutRect& rect) const
+@@ -576,7 +576,7 @@ Path BorderShape::pathForOuterShape(float deviceScaleFactor) const
+ Path BorderShape::pathForInnerShape(float deviceScaleFactor) const
+ {
+     auto outerSnapped = m_borderRect.pixelSnappedRoundedRectForPainting(deviceScaleFactor);
+-    auto innerSnapped = m_innerEdgeRect.pixelSnappedRoundedRectForPainting(deviceScaleFactor);
++    auto innerSnapped = snappedInnerEdgeRectForPainting(deviceScaleFactor);
+     if (hasNonRoundCornerShape())
+         return pathForInnerCornerShape(outerSnapped, innerSnapped, snappedOffsetReferenceRect(deviceScaleFactor));
+ 
+@@ -596,7 +596,7 @@ void BorderShape::addOuterShapeToPath(Path& path, float deviceScaleFactor) const
+ void BorderShape::addInnerShapeToPath(Path& path, float deviceScaleFactor) const
+ {
+     auto outerSnapped = m_borderRect.pixelSnappedRoundedRectForPainting(deviceScaleFactor);
+-    auto innerSnapped = m_innerEdgeRect.pixelSnappedRoundedRectForPainting(deviceScaleFactor);
++    auto innerSnapped = snappedInnerEdgeRectForPainting(deviceScaleFactor);
+     if (hasNonRoundCornerShape()) {
+         path.addPath(pathForInnerCornerShape(outerSnapped, innerSnapped, snappedOffsetReferenceRect(deviceScaleFactor)), AffineTransform());
+         return;
+@@ -615,7 +615,7 @@ Path BorderShape::pathForBorderArea(float deviceScaleFactor) const
+     }
+ 
+     auto outerSnapped = m_borderRect.pixelSnappedRoundedRectForPainting(deviceScaleFactor);
+-    auto innerSnapped = m_innerEdgeRect.pixelSnappedRoundedRectForPainting(deviceScaleFactor);
++    auto innerSnapped = snappedInnerEdgeRectForPainting(deviceScaleFactor);
+ 
+     ASSERT(innerSnapped.isRenderable());
+ 
+@@ -642,7 +642,7 @@ void BorderShape::clipToOuterShape(GraphicsContext& context, float deviceScaleFa
+ void BorderShape::clipToInnerShape(GraphicsContext& context, float deviceScaleFactor) const
+ {
+     auto outerSnapped = m_borderRect.pixelSnappedRoundedRectForPainting(deviceScaleFactor);
+-    auto innerSnapped = m_innerEdgeRect.pixelSnappedRoundedRectForPainting(deviceScaleFactor);
++    auto innerSnapped = snappedInnerEdgeRectForPainting(deviceScaleFactor);
+     if (hasNonRoundCornerShape()) {
+         context.clipPath(pathForInnerCornerShape(outerSnapped, innerSnapped, snappedOffsetReferenceRect(deviceScaleFactor)));
+         return;
+@@ -675,7 +675,7 @@ void BorderShape::clipOutOuterShape(GraphicsContext& context, float deviceScaleF
+ void BorderShape::clipOutInnerShape(GraphicsContext& context, float deviceScaleFactor) const
+ {
+     auto outerSnapped = m_borderRect.pixelSnappedRoundedRectForPainting(deviceScaleFactor);
+-    auto innerSnapped = m_innerEdgeRect.pixelSnappedRoundedRectForPainting(deviceScaleFactor);
++    auto innerSnapped = snappedInnerEdgeRectForPainting(deviceScaleFactor);
+     if (innerSnapped.isEmpty())
+         return;
+ 
+@@ -708,7 +708,7 @@ void BorderShape::fillOuterShape(GraphicsContext& context, const Color& color, f
+ void BorderShape::fillInnerShape(GraphicsContext& context, const Color& color, float deviceScaleFactor) const
+ {
+     auto outerSnapped = m_borderRect.pixelSnappedRoundedRectForPainting(deviceScaleFactor);
+-    auto innerSnapped = m_innerEdgeRect.pixelSnappedRoundedRectForPainting(deviceScaleFactor);
++    auto innerSnapped = snappedInnerEdgeRectForPainting(deviceScaleFactor);
+     if (hasNonRoundCornerShape()) {
+         context.setFillColor(color);
+         context.fillPath(pathForInnerCornerShape(outerSnapped, innerSnapped, snappedOffsetReferenceRect(deviceScaleFactor)));
+@@ -746,6 +746,11 @@ FloatRoundedRect BorderShape::snappedInnerEdgeRectForPainting(float deviceScaleF
+     // Derive the inner rect from the already-snapped outer rect, insetting each side by the width
+     // rounded to whole device pixels, so the gap (border/spread thickness) is equal on every side
+     // regardless of sub-pixel position.
++    // Every inner edge used for painting and clipping comes from here. Snapping the inner rect on
++    // its own can collapse a side at a fractional device scale: a border width of whole device
++    // pixels is not always a whole number of layout units (1px at 175% is 36/64 = 0.5625 layout
++    // px, 0.984 device px), so outer and inner edges near a half pixel round to the same pixel and
++    // the even-odd border fill loses that side.
+     auto outerSnapped = m_borderRect.pixelSnappedRoundedRectForPainting(deviceScaleFactor);
+     auto outerRect = outerSnapped.rect();
  
 diff --git a/Source/WebCore/rendering/Grid.h b/Source/WebCore/rendering/Grid.h
 index 676352c7333beee25fb33f911905946e92907cef..d2c58cdea7300b822aeb3b019928da22998a7f54 100644
