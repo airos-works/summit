@@ -49037,7 +49037,7 @@ index ca354c1055ee4465976d2f7046ed16a6c457aee3..9cd622e52c033ad61ae48127123d8c0a
  
      // FIXME: This frame may not be destroyed. It can be reused for sync image decoding.
 diff --git a/Source/WebCore/platform/graphics/BitmapImageSource.cpp b/Source/WebCore/platform/graphics/BitmapImageSource.cpp
-index 67d32560260172fa51f5b535bed034165a14b0a7..1ef0ce47173917441f460c41aa43f6eae79a98b7 100644
+index 67d32560260172fa51f5b535bed034165a14b0a7..6e21b7c3b9d7ada6f3c1403933b67d81a8c102d0 100644
 --- a/Source/WebCore/platform/graphics/BitmapImageSource.cpp
 +++ b/Source/WebCore/platform/graphics/BitmapImageSource.cpp
 @@ -35,8 +35,43 @@
@@ -49190,6 +49190,29 @@ index 67d32560260172fa51f5b535bed034165a14b0a7..1ef0ce47173917441f460c41aa43f6ea
          if (!result)
              return makeUnexpected(DecodingStatus::Invalid);
  
+@@ -669,6 +770,22 @@ std::expected<Ref<NativeImage>, DecodingStatus> BitmapImageSource::nativeImageAt
+ 
+ std::expected<Ref<NativeImage>, DecodingStatus> BitmapImageSource::currentNativeImageForDrawing(SubsamplingLevel subsamplingLevel, const DecodingOptions& options)
+ {
++#if PLATFORM(HAIKU)
++    // startAnimation() times the current frame by its duration, and the
++    // image decoders here (GIF, APNG, WebP...) only know a frame's duration
++    // once they have decoded it: a frame that was not decoded yet reported
++    // 0 s, so the timer fired at once. Frames that are drawn synchronously
++    // (any animated picture not large enough for asynchronous decoding)
++    // became current undecoded, and every frame of the first loop lasted
++    // one paint: GIFs ran fast until each frame had been seen once.
++    // The draw below decodes this frame synchronously anyway, so decoding
++    // it first costs nothing.
++    if (m_frameAnimator && isAnimated()) {
++        auto index = currentFrameIndex();
++        if (index < m_frames.size() && !m_frames[index].isComplete() && !isPendingDecodingAtIndex(index, subsamplingLevel, options))
++            std::ignore = nativeImageAtIndexCacheIfNeeded(index, subsamplingLevel, { DecodingMode::Synchronous, options.decodingDestination(), options.sizeForDrawing() });
++    }
++#endif
+     startAnimation(subsamplingLevel, options);
+ 
+     auto effectiveOptions = options;
 diff --git a/Source/WebCore/platform/graphics/Color.h b/Source/WebCore/platform/graphics/Color.h
 index bf14e8de2903394a5f02ec82668006f221c2fc6c..80b99d7eacb1a7a060058808e9ccf43724003a67 100644
 --- a/Source/WebCore/platform/graphics/Color.h
@@ -68402,10 +68425,10 @@ index 0000000000000000000000000000000000000000..976621f9ad3fa0e29c170d78ca6b7ee0
 +#endif
 diff --git a/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.cpp b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..3211da0853dee0a1d7db80b4af1bbbb82e1c8d57
+index 0000000000000000000000000000000000000000..a29fe4fc535e273f5c5c0b5962e63948ed20a91f
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/haiku/MediaPlayerPrivateHaikuMSE.cpp
-@@ -0,0 +1,3547 @@
+@@ -0,0 +1,3582 @@
 +/*
 + * Copyright (C) 2026 Summit contributors.
 + *
@@ -70092,6 +70115,33 @@ index 0000000000000000000000000000000000000000..3211da0853dee0a1d7db80b4af1bbbb8
 +        }
 +    }
 +
++    // Main thread: the output's state for the browser's debugging tools
++    // (engineDescription()).
++    Ref<JSON::Object> diagnostics()
++    {
++        auto object = JSON::Object::create();
++        object->setBoolean("output"_s, !!m_soundPlayer);
++        object->setBoolean("outputStarted"_s, m_outputStarted);
++        object->setBoolean("playing"_s, m_playing);
++        object->setBoolean("muted"_s, m_muted);
++        object->setDouble("volume"_s, m_volume);
++        object->setBoolean("formatKnown"_s, m_formatKnown);
++        object->setDouble("latencyMs"_s, m_latency / 1000.0);
++        {
++            Locker locker { m_pcmLock };
++            object->setDouble("sampleRate"_s, m_format.frame_rate);
++            object->setInteger("channels"_s, m_format.channel_count);
++            object->setDouble("queuedMs"_s, m_format.frame_rate > 0 ? m_pcmFrames * 1000.0 / m_format.frame_rate : 0);
++            object->setBoolean("outputFormatReady"_s, m_outputFormatReady);
++            if (!m_pcm.isEmpty())
++                object->setDouble("queuedStart"_s, m_pcm.first().pts / 1000000.0);
++        }
++        object->setDouble("clock"_s, m_clock.now() / 1000000.0);
++        object->setInteger("fills"_s, m_fills.load());
++        object->setInteger("playedFrames"_s, m_playedFrames.load());
++        return object;
++    }
++
 +    void outputFormatChanged()
 +    {
 +        if (m_formatChanged.exchange(false))
@@ -70366,6 +70416,7 @@ index 0000000000000000000000000000000000000000..3211da0853dee0a1d7db80b4af1bbbb8
 +
 +    void fill(uint8_t* buffer, size_t size)
 +    {
++        ++m_fills;
 +        size_t written = 0;
 +        if (m_clock.isRunning()) {
 +            Locker locker { m_pcmLock };
@@ -70401,6 +70452,7 @@ index 0000000000000000000000000000000000000000..3211da0853dee0a1d7db80b4af1bbbb8
 +                        block.offset += count;
 +                        written += count;
 +                        m_pcmFrames -= count / m_frameSize;
++                        m_playedFrames += count / m_frameSize;
 +                    }
 +                    if (block.offset >= block.bytes.size())
 +                        m_pcm.removeFirst();
@@ -70427,6 +70479,8 @@ index 0000000000000000000000000000000000000000..3211da0853dee0a1d7db80b4af1bbbb8
 +    std::atomic<bool> m_formatKnown { false };
 +    std::atomic<bool> m_formatChanged { false };
 +    std::atomic<int64_t> m_latency { 0 };
++    std::atomic<unsigned> m_fills { 0 };
++    std::atomic<uint64_t> m_playedFrames { 0 };
 +    BSoundPlayer* m_soundPlayer { nullptr };
 +    bool m_outputStarted { false };
 +    bool m_playing { false };
@@ -71510,6 +71564,10 @@ index 0000000000000000000000000000000000000000..3211da0853dee0a1d7db80b4af1bbbb8
 +        object->setObject("video"_s, WTF::move(video));
 +    }
 +    object->setBoolean("audio"_s, !!m_audioRenderer);
++    object->setBoolean("muted"_s, m_muted);
++    object->setDouble("volume"_s, m_volume);
++    if (m_audioRenderer)
++        object->setObject("audioOutput"_s, m_audioRenderer->diagnostics());
 +    if (m_dash)
 +        object->setDouble("dashSelectedBandwidth"_s, m_dash->selectedBandwidth());
 +    return object->toJSONString();
