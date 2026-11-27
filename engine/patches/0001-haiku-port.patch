@@ -137658,10 +137658,10 @@ index 0000000000000000000000000000000000000000..d39ae74acfadd72b9517497ffdaa16af
 +}
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitContext.h b/Source/WebKit/UIProcess/API/haiku/WebKitContext.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..bb1430a480b7c60f9d5d91f3f988cc6841c59b49
+index 0000000000000000000000000000000000000000..e58b3d37b4f4db8a48da92a05573f845e39c7a6a
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitContext.h
-@@ -0,0 +1,758 @@
+@@ -0,0 +1,764 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -137858,6 +137858,11 @@ index 0000000000000000000000000000000000000000..bb1430a480b7c60f9d5d91f3f988cc68
 +//                  (absent: the newest) and answers with its Session;
 +//                  "forget" {sessionId, window (bool)} answers with null.
 +//                  Report changes to the list with NotifySessionsChanged.
++//   FAVICON        page_url, size (pixels): the icon the browser shows for
++//                  that page, for an extension with Chrome's favicon
++//                  permission (chrome-extension://ID/_favicon/?pageUrl=);
++//                  answer {"dataURL": "data:image/png;base64,..."}, or "" when
++//                  the browser has none.
 +// Answer every command exactly once with RespondToBrowserCommand, after the
 +// change is visible through SetBrowserWindowTabs. CANCELLED (identifier only)
 +// tells the host the engine stopped waiting: the deadline passed, the extension
@@ -137894,7 +137899,8 @@ index 0000000000000000000000000000000000000000..bb1430a480b7c60f9d5d91f3f988cc68
 +    B_WEBKIT_BROWSER_SIDEBAR,
 +    B_WEBKIT_BROWSER_DOWNLOADS_UI,
 +    B_WEBKIT_BROWSER_DEVTOOLS,
-+    B_WEBKIT_BROWSER_TAB_GROUPS
++    B_WEBKIT_BROWSER_TAB_GROUPS,
++    B_WEBKIT_BROWSER_FAVICON
 +};
 +
 +// Site permissions: what pages may ask the user for, and the services that
@@ -139278,10 +139284,10 @@ index 0000000000000000000000000000000000000000..d28a6cad6339adf79b155cf974e85bfd
 +
 diff --git a/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp b/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..7f8691614975c22bbcaf3d7c8aaad37cc2ced8e7
+index 0000000000000000000000000000000000000000..a010e93316b2dcb08ddf33171b65d712d3d13cc2
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/API/haiku/WebKitView.cpp
-@@ -0,0 +1,1588 @@
+@@ -0,0 +1,1601 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -140757,6 +140763,19 @@ index 0000000000000000000000000000000000000000..7f8691614975c22bbcaf3d7c8aaad37c
 +        if (m_dialogHost)
 +            m_dialogHost->cancelAll();
 +        return;
++    case javaScriptDialogAnswerHaiku: {
++        // chrome.debugger answered a dialog of this view's page.
++        uint64 identifier;
++        if (message->FindUInt64("identifier", &identifier) != B_OK)
++            return;
++        bool accept = message->GetBool("accept", false);
++        std::string value = message->GetString("value", "");
++        if (m_dialogHost)
++            m_dialogHost->answer(identifier, accept, std::move(value), Window(), BMessenger(this), Window() && !Window()->IsHidden() && !IsHidden());
++        else
++            m_state->dialogs->complete(identifier, accept, std::move(value));
++        return;
++    }
 +    case B_CUT: case B_COPY: case B_PASTE: case B_SELECT_ALL: case B_UNDO: case B_REDO:
 +        ExecuteEditCommand(message->what);
 +        return;
@@ -147438,7 +147457,7 @@ index 713a395f6fda1c50c694eef6181a23349c9b5fb2..d6419587d5402f01e573eb5f7335695a
  } // namespace WebExtensionDynamicScripts
  
 diff --git a/Source/WebKit/UIProcess/Extensions/WebExtension.cpp b/Source/WebKit/UIProcess/Extensions/WebExtension.cpp
-index 5ee894425eae1d1ba27e29aba5928af432d98095..541d24e4184ec483a3351660cc6ef175e39548f3 100644
+index 5ee894425eae1d1ba27e29aba5928af432d98095..18ae68fa8b2605919195bfc4c77910700986514d 100644
 --- a/Source/WebKit/UIProcess/Extensions/WebExtension.cpp
 +++ b/Source/WebKit/UIProcess/Extensions/WebExtension.cpp
 @@ -48,6 +48,10 @@
@@ -147539,7 +147558,7 @@ index 5ee894425eae1d1ba27e29aba5928af432d98095..541d24e4184ec483a3351660cc6ef175
          if (mimeTypePosition != notFound)
              return path.substring(dataPrefix.length(), mimeTypePosition - dataPrefix.length());
          return defaultMIMEType();
-@@ -1642,6 +1674,36 @@ const WebExtension::PermissionsSet& WebExtension::supportedPermissions()
+@@ -1642,6 +1674,38 @@ const WebExtension::PermissionsSet& WebExtension::supportedPermissions()
          WebExtensionPermission::contextMenus(), WebExtensionPermission::cookies(), WebExtensionPermission::declarativeNetRequest(), WebExtensionPermission::declarativeNetRequestFeedback(),
          WebExtensionPermission::declarativeNetRequestWithHostAccess(), WebExtensionPermission::menus(), WebExtensionPermission::nativeMessaging(), WebExtensionPermission::notifications(), WebExtensionPermission::scripting(),
          WebExtensionPermission::storage(), WebExtensionPermission::tabs(), WebExtensionPermission::unlimitedStorage(), WebExtensionPermission::webNavigation(), WebExtensionPermission::webRequest(),
@@ -147565,6 +147584,8 @@ index 5ee894425eae1d1ba27e29aba5928af432d98095..541d24e4184ec483a3351660cc6ef175
 +        "tabGroups"_s,
 +        // chrome.debugger: the Chrome DevTools Protocol for tabs, translated (WebExtensionContextAPIDebuggerHaiku.cpp).
 +        "debugger"_s,
++        // Chrome's favicon: chrome-extension://ID/_favicon/?pageUrl= (WebExtensionURLSchemeHandlerHaiku.cpp).
++        "favicon"_s,
 +        // identity.launchWebAuthFlow and getRedirectURL.
 +        "identity"_s,
 +        // downloads.open, as in Chrome and Firefox; downloads.ui for setUiOptions.
@@ -147576,7 +147597,7 @@ index 5ee894425eae1d1ba27e29aba5928af432d98095..541d24e4184ec483a3351660cc6ef175
  #if ENABLE(WK_WEB_EXTENSIONS_SIDEBAR)
          WebExtensionPermission::sidePanel(),
  #endif
-@@ -1679,6 +1741,16 @@ const WebExtension::MatchPatternSet& WebExtension::optionalPermissionMatchPatter
+@@ -1679,6 +1743,16 @@ const WebExtension::MatchPatternSet& WebExtension::optionalPermissionMatchPatter
      return m_optionalPermissionMatchPatterns;
  }
  
@@ -147593,7 +147614,7 @@ index 5ee894425eae1d1ba27e29aba5928af432d98095..541d24e4184ec483a3351660cc6ef175
  const WebExtension::MatchPatternSet& WebExtension::externallyConnectableMatchPatterns()
  {
      populateExternallyConnectableIfNeeded();
-@@ -1723,6 +1795,9 @@ void WebExtension::populateExternallyConnectableIfNeeded()
+@@ -1723,6 +1797,9 @@ void WebExtension::populateExternallyConnectableIfNeeded()
      RefPtr externallyConnectableObject = manifestObject->getObject(externallyConnectableManifestKey);
      if (!externallyConnectableObject)
          return;
@@ -147603,7 +147624,7 @@ index 5ee894425eae1d1ba27e29aba5928af432d98095..541d24e4184ec483a3351660cc6ef175
  
      if (!externallyConnectableObject->size()) {
          recordError(createError(Error::InvalidExternallyConnectable));
-@@ -1756,6 +1831,10 @@ void WebExtension::populateExternallyConnectableIfNeeded()
+@@ -1756,6 +1833,10 @@ void WebExtension::populateExternallyConnectableIfNeeded()
          extensionIDs = filterObjects(*extensionIDs, [](auto& value) {
              return !value.asString().isEmpty();
          });
@@ -147614,7 +147635,7 @@ index 5ee894425eae1d1ba27e29aba5928af432d98095..541d24e4184ec483a3351660cc6ef175
      }
  
      if (shouldReportError || (m_externallyConnectableMatchPatterns.isEmpty() && (!extensionIDs || (extensionIDs && !extensionIDs->length()))))
-@@ -2216,6 +2295,12 @@ using ModifierFlags = WebExtension::ModifierFlags;
+@@ -2216,6 +2297,12 @@ using ModifierFlags = WebExtension::ModifierFlags;
  
  static bool parseCommandShortcut(const String& shortcut, OptionSet<ModifierFlags>& modifierFlags, String& key)
  {
@@ -147627,7 +147648,7 @@ index 5ee894425eae1d1ba27e29aba5928af432d98095..541d24e4184ec483a3351660cc6ef175
      modifierFlags = { };
      key = emptyString();
  
-@@ -2300,6 +2385,7 @@ static bool parseCommandShortcut(const String& shortcut, OptionSet<ModifierFlags
+@@ -2300,6 +2387,7 @@ static bool parseCommandShortcut(const String& shortcut, OptionSet<ModifierFlags
          return false;
  
      return true;
@@ -147635,7 +147656,7 @@ index 5ee894425eae1d1ba27e29aba5928af432d98095..541d24e4184ec483a3351660cc6ef175
  }
  
  void WebExtension::populateCommandsIfNeeded()
-@@ -2355,6 +2441,13 @@ void WebExtension::populateCommandsIfNeeded()
+@@ -2355,6 +2443,13 @@ void WebExtension::populateCommandsIfNeeded()
  
              // Descriptions are required for standard commands, but are optional for action commands.
              auto description = commandObject->getString(commandsDescriptionKeyManifestKey);
@@ -147649,7 +147670,7 @@ index 5ee894425eae1d1ba27e29aba5928af432d98095..541d24e4184ec483a3351660cc6ef175
              if (description.isEmpty() && !isActionCommand) {
                  error = WEB_UI_STRING("Empty or invalid `description` in the `commands` manifest entry.", "WKWebExtensionErrorInvalidManifestEntry description for invalid command description");
                  continue;
-@@ -2368,11 +2461,30 @@ void WebExtension::populateCommandsIfNeeded()
+@@ -2368,11 +2463,30 @@ void WebExtension::populateCommandsIfNeeded()
  
              commandData.description = description;
  
@@ -147681,7 +147702,7 @@ index 5ee894425eae1d1ba27e29aba5928af432d98095..541d24e4184ec483a3351660cc6ef175
                  const auto linuxPlatform = "linux"_s;
  #endif
                  const auto defaultPlatform = "default"_s;
-@@ -2382,7 +2494,7 @@ void WebExtension::populateCommandsIfNeeded()
+@@ -2382,7 +2496,7 @@ void WebExtension::populateCommandsIfNeeded()
                  platformShortcut = !suggestedKeyObject->getString(macPlatform).isEmpty() ? suggestedKeyObject->getString(macPlatform) : suggestedKeyObject->getString(iosPlatform);
  #elif PLATFORM(IOS_FAMILY)
                  platformShortcut = !suggestedKeyObject->getString(iosPlatform).isEmpty() ? suggestedKeyObject->getString(iosPlatform) : suggestedKeyObject->getString(macPlatform);
@@ -154973,10 +154994,10 @@ index 0000000000000000000000000000000000000000..c76f340e86d451206d76bd7bbe5a7b93
 +#endif
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPIDebuggerHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPIDebuggerHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..282d4d92fe11b6a9abbafb0a60e0da6c047da42f
+index 0000000000000000000000000000000000000000..58188e284be75e000aa359be544d19a9d0fc38a2
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPIDebuggerHaiku.cpp
-@@ -0,0 +1,1752 @@
+@@ -0,0 +1,1917 @@
 +/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +// chrome.debugger and runtime.getContexts.
@@ -155008,6 +155029,7 @@ index 0000000000000000000000000000000000000000..282d4d92fe11b6a9abbafb0a60e0da6c
 +#include "NativeWebWheelEvent.h"
 +#include "PageLoadState.h"
 +#include "WebExtensionContextProxyMessages.h"
++#include "WebExtensionDebuggerHaiku.h"
 +#include "WebExtensionController.h"
 +#include "WebExtensionTab.h"
 +#include "WebExtensionUtilities.h"
@@ -155033,6 +155055,7 @@ index 0000000000000000000000000000000000000000..282d4d92fe11b6a9abbafb0a60e0da6c
 +#include <wtf/WorkQueue.h>
 +#include <wtf/text/Base64.h>
 +#include <wtf/text/MakeString.h>
++#include <wtf/text/StringBuilder.h>
 +#include <wtf/text/StringToIntegerConversion.h>
 +#include <skia/codec/SkCodec.h>
 +#include <skia/codec/SkPngDecoder.h>
@@ -155148,6 +155171,9 @@ index 0000000000000000000000000000000000000000..282d4d92fe11b6a9abbafb0a60e0da6c
 +    // The mouse buttons the extension's events hold down (CDP's mask, which
 +    // is Haiku's: left 1, right 2, middle 4, back 8, forward 16).
 +    uint32_t buttons { 0 };
++    // The page's JavaScript dialogs waiting for an answer, oldest first:
++    // the dialog's identifier and how to answer it (Page.handleJavaScriptDialog).
++    Vector<std::pair<uint64_t, Function<void(bool, const String&)>>> dialogs;
 +
 +private:
 +    WebExtensionDebuggerSessionHaiku(WebExtensionContext& context, WebExtensionTabIdentifier tab, WebPageProxy& page)
@@ -155837,45 +155863,123 @@ index 0000000000000000000000000000000000000000..282d4d92fe11b6a9abbafb0a60e0da6c
 +    return statements;
 +}
 +
-+// Where `return ` goes: the start of the statement whose value is the
-+// code's completion value, as an offset into the code.
-+static std::optional<unsigned> replReturnOffsetHaiku(StringView code, const Vector<ReplTokenHaiku>& tokens, size_t begin, size_t end, unsigned nesting = 0)
++// The expression statements whose value can be the code's completion value:
++// at any depth of blocks, labels, if/else, loops and try (not inside
++// functions), as token indices. Each assigns to a variable the async body
++// returns, so the last one run gives the value, as in a REPL.
++static void replCompletionStartsHaiku(StringView, const Vector<ReplTokenHaiku>&, size_t begin, size_t end, Vector<size_t>& starts, unsigned nesting);
++
++static void replStatementCompletionHaiku(StringView code, const Vector<ReplTokenHaiku>& tokens, size_t first, size_t last, Vector<size_t>& starts, unsigned nesting)
 +{
-+    if (nesting > 16)
-+        return std::nullopt;
-+    static constexpr auto declarations = std::to_array<ASCIILiteral>({ "var"_s, "let"_s, "const"_s, "function"_s, "class"_s, "if"_s, "for"_s, "while"_s,
-+        "do"_s, "switch"_s, "try"_s, "throw"_s, "return"_s, "import"_s, "export"_s, "debugger"_s, "with"_s });
-+    auto statements = replStatementsHaiku(code, tokens, begin, end);
-+    for (size_t index = statements.size(); index--;) {
-+        auto [first, last] = statements[index];
-+        // A label's statement.
-+        while (first + 1 < last && tokens[first].kind == ReplTokenHaiku::Kind::Word && tokens[first + 1].kind == ReplTokenHaiku::Kind::Punctuator
-+            && tokens[first + 1].character == ':')
-+            first += 2;
-+        if (first >= last)
-+            continue;
-+        auto& token = tokens[first];
-+        if (replWordIsHaiku(code, token, "break"_s) || replWordIsHaiku(code, token, "continue"_s))
-+            continue;
-+        if (token.kind == ReplTokenHaiku::Kind::Punctuator && token.character == '{') {
-+            auto close = replMatchingHaiku(tokens, first, last);
-+            if (!close || *close != last)
-+                return std::nullopt;
-+            return replReturnOffsetHaiku(code, tokens, first + 1, last - 1, nesting + 1);
++    if (nesting > 32)
++        return;
++    auto punctuator = [&](size_t index, char16_t character) {
++        return index < last && tokens[index].kind == ReplTokenHaiku::Kind::Punctuator && tokens[index].character == character;
++    };
++    auto word = [&](size_t index, ASCIILiteral name) {
++        return index < last && replWordIsHaiku(code, tokens[index], name);
++    };
++    // A label's statement.
++    while (first + 1 < last && tokens[first].kind == ReplTokenHaiku::Kind::Word && punctuator(first + 1, ':'))
++        first += 2;
++    if (first >= last)
++        return;
++    // A loop's or if's body: a block or one statement; the index after it.
++    auto body = [&](size_t at) -> size_t {
++        if (at >= last)
++            return last;
++        if (punctuator(at, '{')) {
++            auto close = replMatchingHaiku(tokens, at, last);
++            if (!close)
++                return last;
++            replCompletionStartsHaiku(code, tokens, at + 1, *close - 1, starts, nesting + 1);
++            return *close;
 +        }
-+        if (replWordIsHaiku(code, token, "async"_s) && first + 1 < last && replWordIsHaiku(code, tokens[first + 1], "function"_s))
++        size_t stop = at;
++        int depth = 0;
++        for (; stop < last; ++stop) {
++            if (tokens[stop].kind == ReplTokenHaiku::Kind::Punctuator) {
++                char16_t c = tokens[stop].character;
++                if (c == '{' || c == '(' || c == '[')
++                    ++depth;
++                else if (c == '}' || c == ')' || c == ']')
++                    --depth;
++                else if (c == ';' && !depth)
++                    break;
++            } else if (!depth && stop > at && word(stop, "else"_s))
++                break;
++        }
++        replStatementCompletionHaiku(code, tokens, at, stop, starts, nesting + 1);
++        return punctuator(stop, ';') ? stop + 1 : stop;
++    };
++    // The parenthesized head of if, for, while and with; the index after it.
++    auto head = [&](size_t at) -> std::optional<size_t> {
++        while (at < last && !punctuator(at, '('))
++            ++at; // for await (
++        if (at >= last)
 +            return std::nullopt;
-+        for (auto keyword : declarations) {
-+            if (replWordIsHaiku(code, token, keyword))
-+                return std::nullopt;
-+        }
-+        return token.start;
++        return replMatchingHaiku(tokens, at, last);
++    };
++    if (punctuator(first, '{')) {
++        if (auto close = replMatchingHaiku(tokens, first, last))
++            replCompletionStartsHaiku(code, tokens, first + 1, *close - 1, starts, nesting + 1);
++        return;
 +    }
-+    return std::nullopt;
++    if (word(first, "else"_s)) {
++        // The else of the previous statement, split from it at a ';'.
++        replStatementCompletionHaiku(code, tokens, first + 1, last, starts, nesting + 1);
++        return;
++    }
++    if (word(first, "if"_s)) {
++        auto close = head(first + 1);
++        if (!close)
++            return;
++        size_t after = body(*close);
++        if (word(after, "else"_s))
++            replStatementCompletionHaiku(code, tokens, after + 1, last, starts, nesting + 1);
++        return;
++    }
++    if (word(first, "for"_s) || word(first, "while"_s) || word(first, "with"_s)) {
++        if (auto close = head(first + 1))
++            body(*close);
++        return;
++    }
++    if (word(first, "do"_s)) {
++        body(first + 1);
++        return;
++    }
++    if (word(first, "try"_s)) {
++        size_t at = body(first + 1);
++        if (word(at, "catch"_s)) {
++            ++at;
++            if (punctuator(at, '(')) {
++                auto close = replMatchingHaiku(tokens, at, last);
++                at = close ? *close : last;
++            }
++            body(at);
++        }
++        // A finally block's values are not the statement's.
++        return;
++    }
++    static constexpr auto declarations = std::to_array<ASCIILiteral>({ "var"_s, "let"_s, "const"_s, "function"_s, "class"_s, "switch"_s,
++        "throw"_s, "return"_s, "break"_s, "continue"_s, "import"_s, "export"_s, "debugger"_s });
++    for (auto keyword : declarations) {
++        if (word(first, keyword))
++            return;
++    }
++    if (word(first, "async"_s) && word(first + 1, "function"_s))
++        return;
++    starts.append(first);
 +}
 +
-+// The code as an async function's body, returning its completion value when
-+// that can be found; the second is the same without the return.
++static void replCompletionStartsHaiku(StringView code, const Vector<ReplTokenHaiku>& tokens, size_t begin, size_t end, Vector<size_t>& starts, unsigned nesting)
++{
++    for (auto [first, last] : replStatementsHaiku(code, tokens, begin, end))
++        replStatementCompletionHaiku(code, tokens, first, last, starts, nesting);
++}
++
++// The code as an async function's body that returns its completion value
++// when the statements could be found; the second is the code as it is.
 +static std::pair<String, String> replAsyncBodiesHaiku(const String& code)
 +{
 +    auto wrap = [](StringView body) {
@@ -155885,11 +155989,24 @@ index 0000000000000000000000000000000000000000..282d4d92fe11b6a9abbafb0a60e0da6c
 +    auto tokens = ReplTokenizerHaiku(code).tokenize();
 +    if (!tokens)
 +        return { plain, plain };
-+    auto offset = replReturnOffsetHaiku(code, *tokens, 0, tokens->size());
-+    if (!offset)
++    Vector<size_t> starts;
++    replCompletionStartsHaiku(code, *tokens, 0, tokens->size(), starts, 0);
++    if (starts.isEmpty())
 +        return { plain, plain };
++    static constexpr auto completion = "__summitReplCompletion"_s;
++    StringBuilder body;
++    body.append("let "_s, completion, ";\n"_s);
 +    StringView view { code };
-+    return { wrap(makeString(view.left(*offset), "return "_s, view.substring(*offset))), plain };
++    unsigned copied = 0;
++    for (auto index : starts) {
++        unsigned offset = (*tokens)[index].start;
++        if (offset < copied)
++            continue;
++        body.append(view.substring(copied, offset - copied), completion, " = "_s);
++        copied = offset;
++    }
++    body.append(view.substring(copied), "\n;return "_s, completion, ";"_s);
++    return { wrap(body.toString()), plain };
 +}
 +
 +// ---- Commands ----
@@ -156475,8 +156592,21 @@ index 0000000000000000000000000000000000000000..282d4d92fe11b6a9abbafb0a60e0da6c
 +        return;
 +    }
 +    if (method == "Page.handleJavaScriptDialog"_s) {
-+        // Summit's dialogs are its own windows, answered by the person.
-+        completion(makeUnexpected(protocolErrorHaiku("No dialog is showing"_s)));
++        // The oldest dialog the page is showing: its window closes with the answer.
++        if (session->dialogs.isEmpty()) {
++            completion(makeUnexpected(protocolErrorHaiku("No dialog is showing"_s)));
++            return;
++        }
++        auto answer = WTF::move(session->dialogs.first().second);
++        session->dialogs.removeAt(0);
++        auto accept = parameters->getBoolean("accept"_s);
++        if (!accept) {
++            completion(makeUnexpected(protocolErrorHaiku("Invalid parameters"_s, -32602)));
++            return;
++        }
++        if (answer)
++            answer(*accept, parameters->getString("promptText"_s));
++        emptyAnswerHaiku(WTF::move(completion));
 +        return;
 +    }
 +    if (method == "Browser.getVersion"_s) {
@@ -156632,6 +156762,62 @@ index 0000000000000000000000000000000000000000..282d4d92fe11b6a9abbafb0a60e0da6c
 +    }
 +    for (auto& session : mine)
 +        removeDebuggerSessionHaiku(session);
++}
++
++// ---- JavaScript dialogs ----
++
++static RefPtr<WebExtensionDebuggerSessionHaiku> debuggerSessionForPageHaiku(WebPageProxy& page)
++{
++    for (auto& session : debuggerSessionsHaiku()) {
++        if (session->page().get() == &page)
++            return session.ptr();
++    }
++    return nullptr;
++}
++
++void debuggerJavaScriptDialogOpeningHaiku(WebPageProxy& page, uint64_t dialog, const String& type, const String& message, const String& defaultPrompt,
++    const String& url, Function<void(bool, const String&)>&& answer)
++{
++    RefPtr session = debuggerSessionForPageHaiku(page);
++    if (!session)
++        return;
++    session->dialogs.append({ dialog, WTF::move(answer) });
++    RefPtr context = session->context();
++    if (!context || !session->pageEnabled)
++        return;
++    Ref parameters = JSON::Object::create();
++    parameters->setString("url"_s, url);
++    parameters->setString("frameId"_s, emptyString());
++    parameters->setString("message"_s, message);
++    parameters->setString("type"_s, type);
++    parameters->setBoolean("hasBrowserHandler"_s, true);
++    parameters->setString("defaultPrompt"_s, defaultPrompt);
++    Ref arguments = JSON::Array::create();
++    arguments->pushObject(debuggeeHaiku(session->tab()));
++    arguments->pushString("Page.javascriptDialogOpening"_s);
++    arguments->pushObject(WTF::move(parameters));
++    fireDebuggerEventHaiku(*context, WebExtensionEventListenerType::DebuggerOnEventHaiku, WTF::move(arguments));
++}
++
++void debuggerJavaScriptDialogClosedHaiku(WebPageProxy& page, uint64_t dialog, bool accepted, const String& userInput)
++{
++    RefPtr session = debuggerSessionForPageHaiku(page);
++    if (!session)
++        return;
++    bool known = session->dialogs.removeFirstMatching([&](auto& entry) { return entry.first == dialog; });
++    UNUSED_PARAM(known);
++    RefPtr context = session->context();
++    if (!context || !session->pageEnabled)
++        return;
++    Ref parameters = JSON::Object::create();
++    parameters->setBoolean("result"_s, accepted);
++    parameters->setString("userInput"_s, userInput);
++    parameters->setString("frameId"_s, emptyString());
++    Ref arguments = JSON::Array::create();
++    arguments->pushObject(debuggeeHaiku(session->tab()));
++    arguments->pushString("Page.javascriptDialogClosed"_s);
++    arguments->pushObject(WTF::move(parameters));
++    fireDebuggerEventHaiku(*context, WebExtensionEventListenerType::DebuggerOnEventHaiku, WTF::move(arguments));
 +}
 +
 +// ---- runtime.getContexts ----
@@ -171690,10 +171876,10 @@ index 0000000000000000000000000000000000000000..41c42fb6848b3ce5783ff3102c0f6afc
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionURLSchemeHandlerHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionURLSchemeHandlerHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..54bcf8e63c696f63148ce55e9a3fd7dfe6ff3ec4
+index 0000000000000000000000000000000000000000..f888013d605cb4b9097496da62c99c9827584419
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionURLSchemeHandlerHaiku.cpp
-@@ -0,0 +1,192 @@
+@@ -0,0 +1,246 @@
 +/*
 + * Copyright (C) 2022 Apple Inc. All rights reserved.
 + *
@@ -171735,6 +171921,12 @@ index 0000000000000000000000000000000000000000..54bcf8e63c696f63148ce55e9a3fd7df
 +#include "WebFrameProxy.h"
 +#include "WebPageProxy.h"
 +#include "WebURLSchemeTask.h"
++#include "WebKitContext.h"
++#include <Message.h>
++#include <wtf/JSONValues.h>
++#include <wtf/URLParser.h>
++#include <wtf/text/Base64.h>
++#include <wtf/text/StringToIntegerConversion.h>
 +#include <Errors.h>
 +#include <WebCore/HTTPHeaderNames.h>
 +#include <WebCore/MIMETypeRegistry.h>
@@ -171822,6 +172014,54 @@ index 0000000000000000000000000000000000000000..54bcf8e63c696f63148ce55e9a3fd7df
 +                denyAccess();
 +                return;
 +            }
++        }
++
++        // Chrome's favicon permission: chrome-extension://ID/_favicon/?pageUrl=URL&size=N
++        // is the icon the browser shows for that page (a FAVICON browser command).
++        if (requestURL.path() == "/_favicon/"_s || requestURL.path() == "/_favicon"_s) {
++            auto missing = [task, requestURL] {
++                task->didComplete(ResourceError("WebExtensionResourceError"_s, B_ENTRY_NOT_FOUND, requestURL, "The site has no icon."_s));
++            };
++            String pageURL;
++            String size = "16"_s;
++            for (auto& [name, value] : WTF::URLParser::parseURLEncodedForm(requestURL.query())) {
++                if (name == "pageUrl"_s)
++                    pageURL = value;
++                else if (name == "size"_s)
++                    size = value;
++            }
++            BMessage message(B_WEBKIT_BROWSER_COMMAND);
++            if (!context->hasPermission("favicon"_s) || pageURL.isEmpty() || message.AddUInt32("command", B_WEBKIT_BROWSER_FAVICON) != B_OK
++                || message.AddString("page_url", pageURL.utf8().legacyCStringPointer()) != B_OK
++                || message.AddInt32("size", std::clamp(parseInteger<int>(size).value_or(16), 1, 256)) != B_OK) {
++                missing();
++                return;
++            }
++            context->sendNativeBrowserQueryHaiku(WTF::move(message), "favicon"_s,
++                [this, protectedThis = Ref { *this }, task, requestURL, missing](std::expected<String, WebExtensionError>&& result) {
++                    if (!m_pendingTasks.contains(task))
++                        return;
++                    RefPtr value = result ? JSON::Value::parseJSON(*result) : nullptr;
++                    RefPtr object = value ? value->asObject() : nullptr;
++                    auto dataURL = object ? object->getString("dataURL"_s) : String();
++                    auto comma = dataURL.find(',');
++                    auto png = comma == notFound || !dataURL.startsWith("data:image/png;base64,"_s) ? std::nullopt
++                        : base64Decode(StringView { dataURL }.substring(comma + 1));
++                    if (!png || png->isEmpty()) {
++                        missing();
++                        return;
++                    }
++                    ResourceResponse response(URL { requestURL }, "image/png"_s, png->size(), { });
++                    response.setHTTPStatusCode(200);
++                    response.setHTTPHeaderField(HTTPHeaderName::ContentType, "image/png"_s);
++                    response.setHTTPHeaderField(HTTPHeaderName::ContentLength, String::number(png->size()));
++                    if (task->didReceiveResponse(WTF::move(response)) != WebURLSchemeTask::ExceptionType::None)
++                        return;
++                    if (task->didReceiveData(SharedBuffer::create(png->span())) != WebURLSchemeTask::ExceptionType::None)
++                        return;
++                    task->didComplete({ });
++                });
++            return;
 +        }
 +
 +        bool loadingExtensionMainFrame = false;
@@ -184127,10 +184367,10 @@ index 0000000000000000000000000000000000000000..1ba712e5edf664b57e3a086d452b59c5
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/JavaScriptDialogHaiku.h b/Source/WebKit/UIProcess/haiku/JavaScriptDialogHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..15401027888088266cf858cb7282d33ea2607e04
+index 0000000000000000000000000000000000000000..30f60a66f0e3074b1076202a0fc91ec293134b28
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/JavaScriptDialogHaiku.h
-@@ -0,0 +1,279 @@
+@@ -0,0 +1,299 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#pragma once
@@ -184155,6 +184395,8 @@ index 0000000000000000000000000000000000000000..15401027888088266cf858cb7282d33e
 +enum : uint32 {
 +    javaScriptDialogShowHaiku = 'jssh', javaScriptDialogClosedHaiku = 'jscl',
 +    javaScriptDialogDismissHaiku = 'jsdi', javaScriptDialogsCancelHaiku = 'jsca',
++    // A dialog answered from code (chrome.debugger): identifier, accept, value.
++    javaScriptDialogAnswerHaiku = 'jsan',
 +    javaScriptDialogAcceptHaiku = 'jsok', javaScriptDialogCancelHaiku = 'jsno'
 +};
 +
@@ -184371,6 +184613,24 @@ index 0000000000000000000000000000000000000000..15401027888088266cf858cb7282d33e
 +    {
 +        if (identifier != m_identifier)
 +            return;
++        m_active = BMessenger();
++        m_identifier = 0;
++        pump(parent, target, visible);
++    }
++
++    // Answered without the person (chrome.debugger's Page.handleJavaScriptDialog):
++    // a queued dialog is dropped, the shown one closes and the next is shown.
++    void answer(uint64_t identifier, bool accepted, std::string value, BWindow* parent, BMessenger target, bool visible)
++    {
++        std::erase_if(m_pending, [&](const BMessage& message) {
++            uint64 pending;
++            return message.FindUInt64("identifier", &pending) == B_OK && pending == identifier;
++        });
++        m_requests->complete(identifier, accepted, std::move(value));
++        if (identifier != m_identifier)
++            return;
++        BMessage dismiss(javaScriptDialogDismissHaiku);
++        m_active.SendMessage(&dismiss, static_cast<BHandler*>(nullptr), 0);
 +        m_active = BMessenger();
 +        m_identifier = 0;
 +        pump(parent, target, visible);
@@ -187934,6 +188194,38 @@ index 0000000000000000000000000000000000000000..a3929971f271d4d4e2c65d484c515b3e
 +    std::unique_ptr<NativeDateTimePickerHaiku> m_native;
 +};
 +}
+diff --git a/Source/WebKit/UIProcess/haiku/WebExtensionDebuggerHaiku.h b/Source/WebKit/UIProcess/haiku/WebExtensionDebuggerHaiku.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..d20c1ab236093199423373a60eba66d481296adc
+--- /dev/null
++++ b/Source/WebKit/UIProcess/haiku/WebExtensionDebuggerHaiku.h
+@@ -0,0 +1,26 @@
++/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
++#pragma once
++
++#if ENABLE(WK_WEB_EXTENSIONS)
++
++#include <wtf/Function.h>
++#include <wtf/text/WTFString.h>
++
++namespace WebKit {
++
++class WebPageProxy;
++
++// A page shows a JavaScript dialog (alert, confirm, prompt, beforeunload; the
++// view's own window): a chrome.debugger session on the page hears
++// Page.javascriptDialogOpening, and its Page.handleJavaScriptDialog calls
++// `answer`, which completes the dialog and closes its window
++// (UIProcess/Extensions/haiku/WebExtensionContextAPIDebuggerHaiku.cpp). The
++// main thread.
++void debuggerJavaScriptDialogOpeningHaiku(WebPageProxy&, uint64_t dialog, const String& type, const String& message, const String& defaultPrompt,
++    const String& url, Function<void(bool accept, const String& promptText)>&& answer);
++// The dialog was answered, by the person or by a session: Page.javascriptDialogClosed.
++void debuggerJavaScriptDialogClosedHaiku(WebPageProxy&, uint64_t dialog, bool accepted, const String& userInput);
++
++} // namespace WebKit
++
++#endif // ENABLE(WK_WEB_EXTENSIONS)
 diff --git a/Source/WebKit/UIProcess/haiku/WebExtensionTimingHaiku.h b/Source/WebKit/UIProcess/haiku/WebExtensionTimingHaiku.h
 new file mode 100644
 index 0000000000000000000000000000000000000000..9ee7bbd2503a50b1c2115e1cc826e86fb7b4386b
@@ -188623,10 +188915,10 @@ index 0000000000000000000000000000000000000000..c9a119d02f85b7c5ad8fe9153bfc9604
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebView.cpp b/Source/WebKit/UIProcess/haiku/WebView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..0a03fb1850c1e0ee4c02cd1a8de0fdcb918cad19
+index 0000000000000000000000000000000000000000..b240941014a2deb76c110fbb39277e75adbcf547
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebView.cpp
-@@ -0,0 +1,3966 @@
+@@ -0,0 +1,4000 @@
 +/*
 + * Copyright (C) 2013 Intel Corporation. All rights reserved.
 + *
@@ -188690,6 +188982,7 @@ index 0000000000000000000000000000000000000000..0a03fb1850c1e0ee4c02cd1a8de0fdcb
 +#endif
 +#include "FrameInfoData.h"
 +#include "JavaScriptDialogHaiku.h"
++#include "WebExtensionDebuggerHaiku.h"
 +#include "NativeWebKeyboardEvent.h"
 +#include "NativeWebMouseEvent.h"
 +#include "NativeWebWheelEvent.h"
@@ -190221,21 +190514,21 @@ index 0000000000000000000000000000000000000000..0a03fb1850c1e0ee4c02cd1a8de0fdcb
 +        sendToHostHaiku(state, message);
 +    }
 +
-+    void runJavaScriptAlert(WebPageProxy&, const String& message, WebFrameProxy*, FrameInfoData&& frame, Function<void()>&& completion) override
++    void runJavaScriptAlert(WebPageProxy& page, const String& message, WebFrameProxy*, FrameInfoData&& frame, Function<void()>&& completion) override
 +    {
-+        show(JavaScriptDialogKindHaiku::Alert, message, { }, frame, dialogCompletionOnMainHaiku(
++        show(page, JavaScriptDialogKindHaiku::Alert, message, { }, frame, dialogCompletionOnMainHaiku(
 +            [completion = WTF::move(completion)](bool, const std::string&) { completion(); }));
 +    }
 +
-+    void runJavaScriptConfirm(WebPageProxy&, const String& message, WebFrameProxy*, FrameInfoData&& frame, Function<void(bool)>&& completion) override
++    void runJavaScriptConfirm(WebPageProxy& page, const String& message, WebFrameProxy*, FrameInfoData&& frame, Function<void(bool)>&& completion) override
 +    {
-+        show(JavaScriptDialogKindHaiku::Confirm, message, { }, frame, dialogCompletionOnMainHaiku(
++        show(page, JavaScriptDialogKindHaiku::Confirm, message, { }, frame, dialogCompletionOnMainHaiku(
 +            [completion = WTF::move(completion)](bool accepted, const std::string&) { completion(accepted); }));
 +    }
 +
-+    void runJavaScriptPrompt(WebPageProxy&, const String& message, const String& defaultValue, WebFrameProxy*, FrameInfoData&& frame, Function<void(const String&)>&& completion) override
++    void runJavaScriptPrompt(WebPageProxy& page, const String& message, const String& defaultValue, WebFrameProxy*, FrameInfoData&& frame, Function<void(const String&)>&& completion) override
 +    {
-+        show(JavaScriptDialogKindHaiku::Prompt, message, defaultValue, frame, dialogCompletionOnMainHaiku(
++        show(page, JavaScriptDialogKindHaiku::Prompt, message, defaultValue, frame, dialogCompletionOnMainHaiku(
 +            [completion = WTF::move(completion)](bool accepted, const std::string& value) {
 +                completion(accepted ? String::fromUTF8WithLatin1Fallback(std::span<const char> { value.data(), value.size() }) : String());
 +            }));
@@ -190274,7 +190567,7 @@ index 0000000000000000000000000000000000000000..0a03fb1850c1e0ee4c02cd1a8de0fdcb
 +        // Hosts such as Electron's runtime can answer without asking.
 +        if (answerBeforeUnloadHaiku(page, completion))
 +            return;
-+        show(JavaScriptDialogKindHaiku::BeforeUnload, message, { }, frame, dialogCompletionOnMainHaiku(
++        show(page, JavaScriptDialogKindHaiku::BeforeUnload, message, { }, frame, dialogCompletionOnMainHaiku(
 +            [completion = WTF::move(completion)](bool accepted, const std::string&) { completion(accepted); }));
 +    }
 +
@@ -190286,7 +190579,7 @@ index 0000000000000000000000000000000000000000..0a03fb1850c1e0ee4c02cd1a8de0fdcb
 +        return message.AddData(name, B_RAW_TYPE, utf8.data() ? reinterpret_cast<const char*>(utf8.data()) : "", utf8.length() + 1);
 +    }
 +
-+    void show(JavaScriptDialogKindHaiku kind, const String& text, const String& defaultValue,
++    void show(WebPageProxy& page, JavaScriptDialogKindHaiku kind, const String& text, const String& defaultValue,
 +        const FrameInfoData& frame, JavaScriptDialogRequestsHaiku::Completion completion)
 +    {
 +        auto state = m_state.lock();
@@ -190294,9 +190587,42 @@ index 0000000000000000000000000000000000000000..0a03fb1850c1e0ee4c02cd1a8de0fdcb
 +            completion(false, { });
 +            return;
 +        }
++#if ENABLE(WK_WEB_EXTENSIONS)
++        // A chrome.debugger session on the page hears the dialog open and
++        // close, and may answer it (WebExtensionDebuggerHaiku.h).
++        auto dialog = std::make_shared<uint64_t>(0);
++        completion = [completion = std::move(completion), pageIdentifier = page.identifier(), dialog](bool accepted, std::string value) {
++            RunLoop::mainSingleton().dispatch([pageIdentifier, dialog = *dialog, accepted, value] {
++                if (RefPtr page = WebProcessProxy::webPage(pageIdentifier))
++                    debuggerJavaScriptDialogClosedHaiku(*page, dialog, accepted, String::fromUTF8WithLatin1Fallback(std::span<const char> { value.data(), value.size() }));
++            });
++            completion(accepted, std::move(value));
++        };
++#endif
 +        uint64 identifier = state->dialogs->add(std::move(completion));
 +        if (!identifier)
 +            return;
++#if ENABLE(WK_WEB_EXTENSIONS)
++        *dialog = identifier;
++        static constexpr std::array types { "alert"_s, "confirm"_s, "prompt"_s, "beforeunload"_s };
++        debuggerJavaScriptDialogOpeningHaiku(page, identifier, types[static_cast<size_t>(kind)], text, defaultValue, frame.request.url().string(),
++            [weakState = std::weak_ptr { state }, identifier](bool accept, const String& promptText) {
++                auto state = weakState.lock();
++                if (!state)
++                    return;
++                BMessage answer(javaScriptDialogAnswerHaiku);
++                answer.AddUInt64("identifier", identifier);
++                answer.AddBool("accept", accept);
++                answer.AddString("value", promptText.utf8().legacyCStringPointer());
++                BMessenger view;
++                {
++                    std::lock_guard guard(state->mutex);
++                    view = state->view;
++                }
++                if (view.SendMessage(&answer, static_cast<BHandler*>(nullptr), 0) != B_OK)
++                    state->dialogs->complete(identifier, accept, std::string(promptText.utf8().legacyCStringPointer()));
++            });
++#endif
 +        BMessage message(javaScriptDialogShowHaiku);
 +        BMessenger view;
 +        {

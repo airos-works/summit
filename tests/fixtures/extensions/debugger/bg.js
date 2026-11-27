@@ -54,5 +54,28 @@ globalThis.checks = {
     // to its ?redirect= with ?code=42.
     signIn: (authPage) => call(chrome.identity.launchWebAuthFlow({
         url: `${authPage}?redirect=${encodeURIComponent(chrome.runtime.getURL("oauth_callback.html"))}`, interactive: true })),
+    // Chrome's favicon permission: the icon the browser shows for a page.
+    favicon: async (pageUrl) => {
+        const response = await fetch(chrome.runtime.getURL(`/_favicon/?pageUrl=${encodeURIComponent(pageUrl)}&size=32`)).catch((error) => error);
+        if (!(response instanceof Response))
+            return "error: " + response;
+        if (!response.ok)
+            return response.status;
+        const image = await createImageBitmap(await response.blob());
+        return { type: response.headers.get("content-type"), width: image.width, height: image.height };
+    },
+    // A dialog the page opens, answered with Page.handleJavaScriptDialog.
+    dialog: async (tabId, kind, accept, promptText) => {
+        events.length = 0;
+        await send(tabId, "Runtime.evaluate", { expression: `setTimeout(() => { window.dialogResult = ${kind}("dialog from the fixture", "default"); }, 50); 0` });
+        for (let i = 0; i < 50 && !events.some((event) => event.method === "Page.javascriptDialogOpening"); ++i)
+            await new Promise((resolve) => setTimeout(resolve, 100));
+        const opening = events.find((event) => event.method === "Page.javascriptDialogOpening");
+        const handled = await send(tabId, "Page.handleJavaScriptDialog", { accept, promptText });
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        const closed = events.find((event) => event.method === "Page.javascriptDialogClosed");
+        const result = await send(tabId, "Runtime.evaluate", { expression: "window.dialogResult", returnByValue: true });
+        return { opening: opening && opening.params, handled, closed: closed && closed.params, result: result.result };
+    },
     clear: () => { events.length = 0; detached.length = 0; return "ok"; },
 };

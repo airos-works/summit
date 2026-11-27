@@ -3134,6 +3134,12 @@ void BrowserWindow::BrowserCommand(const BMessage& message)
         case B_WEBKIT_BROWSER_SESSIONS: SessionsCommand(message, identifier); return;
         case B_WEBKIT_BROWSER_SIDEBAR: SidebarCommand(message, identifier); return;
         case B_WEBKIT_BROWSER_TAB_GROUPS: TabGroupsCommand(message, identifier); return;
+        case B_WEBKIT_BROWSER_FAVICON: {
+            // Chrome's favicon permission (chrome-extension://ID/_favicon/?pageUrl=): the icon tabs show.
+            const std::string dataURL = fFavicons ? fFavicons->DataURL(message.GetString("page_url", "")) : std::string();
+            fWebKitContext->RespondToBrowserCommandWithData(identifier, B_OK, nlohmann::json{{"dataURL", dataURL}}.dump().c_str());
+            return;
+        }
         case B_WEBKIT_BROWSER_DEVTOOLS:
             // An extension's devtools page: its tab's tools answer.
             if (BMessage forward(message); tab && tab->devTools.IsValid() && tab->devTools.SendMessage(&forward) == B_OK) return;

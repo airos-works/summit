@@ -21,7 +21,8 @@ came the rest of what the extension uses and Summit lacked:
 | `dom.openOrClosedShadowRoot` | reading pages with closed shadow roots | implemented for content scripts |
 | `chrome` on claude.ai | claude.ai hands the extension its sign-in with `chrome.runtime.sendMessage(id, {type: "oauth_redirect"})` | `chrome` = `browser` on pages an extension lists in `externally_connectable` |
 | `identity.launchWebAuthFlow` ending at `chrome-extension://ID/...` | its silent re-sign-in redirects to `chrome-extension://ID/oauth_callback.html` | accepted as Chrome accepts it, beside `https://ID.chromiumapp.org/` |
-| `favicon` permission (`/_favicon/?pageUrl=`) | icons in its tab list | not done (it falls back to a globe) |
+| `favicon` permission (`/_favicon/?pageUrl=`) | icons in its tab list | the icon the browser shows (FAVICON browser command) |
+| `Page.handleJavaScriptDialog` | answering alert/confirm/prompt/beforeunload while it drives a page | implemented (below) |
 
 Its tool list (`navigate`, `computer` with click/type/key/scroll/screenshot,
 `read_page`, `find`, `form_input`, `javascript_tool`, `read_console_messages`,
@@ -52,9 +53,11 @@ WebKit has no equivalent for natively, and sends the page's events back as
     `Runtime.callFunctionOn(awaitPromise)` and `wasThrown` as
     `exceptionDetails`. `replMode` (Claude's `javascript_tool`): code with
     top-level `await` or `return` is a syntax error in a script, so it runs
-    again as an async function whose last expression statement is returned (a
-    small tokenizer finds it, descending into blocks and labelled blocks).
-    A value produced inside an `if` or loop body is not found (`undefined`).
+    again as the body of an async function in which every expression
+    statement (in blocks, labels, if/else, loops and try, not in functions)
+    assigns to a variable that the body returns: the value of the last one
+    run, as in a REPL (a small tokenizer finds the statements). Code the
+    rewrite breaks runs once more as written.
   - `Page.captureScreenshot` (`png`/`jpeg`, `quality`, `clip`): the frame the
     tab's view shows, in device pixels, as `tabs.captureVisibleTab` takes it;
     a hidden tab is painted by the page (`Page.snapshotRect`).
@@ -74,9 +77,15 @@ WebKit has no equivalent for natively, and sends the page's events back as
   - Anything else goes to the page unchanged, which works for the many
     commands both protocols share (`Page.reload`, `DOM.*`,
     `Runtime.getProperties`...).
-  - `Page.handleJavaScriptDialog` fails with "No dialog is showing": Summit's
-    alert/confirm/beforeunload dialogs are its own windows, answered by the
-    person (not reported as `Page.javascriptDialogOpening` either).
+  - `Page.handleJavaScriptDialog {accept, promptText}`: answers the oldest
+    dialog the page shows; its window closes (the view's dialog host,
+    `javaScriptDialogAnswerHaiku`) and the next queued one shows. Every
+    dialog (the person's too) is reported as `Page.javascriptDialogOpening`
+    `{url, message, type, defaultPrompt, hasBrowserHandler}` and
+    `Page.javascriptDialogClosed {result, userInput}` while `Page` is
+    enabled; without one showing the answer is "No dialog is showing".
+    `WebView`'s UI client calls `debuggerJavaScriptDialogOpeningHaiku` and
+    `...ClosedHaiku` (`UIProcess/haiku/WebExtensionDebuggerHaiku.h`).
 - Events forwarded: `Page.frameNavigated` (with `type`), `loadEventFired`,
   `domContentEventFired`, `frameStartedLoading`, `frameStoppedLoading`;
   `Network.requestWillBeSent` (`walltime` as `wallTime`), `responseReceived`,
@@ -98,6 +107,15 @@ as `tabGroups` does, so no IPC message was added. Extensions installed before
 this get the `debugger` permission at their next start (the browser passes
 every manifest permission the engine supports); the install prompt describes
 it as "Control pages in tabs: read and change them, click and type in them".
+
+## favicon
+
+`chrome-extension://ID/_favicon/?pageUrl=URL&size=N`, for an extension with
+the `favicon` permission (it is not a web-accessible resource, so only the
+extension's own pages load it): the scheme handler asks the browser with a
+FAVICON browser command (`page_url`, `size`), which answers with the PNG its
+tabs show (`FaviconCache::DataURL`); a page without one fails to load, which
+extensions answer with their own icon (Claude shows a globe).
 
 ## runtime.getContexts
 
@@ -121,7 +139,12 @@ of a hidden one; Network/Page/console events across a reload; a navigation to
 another site and back with the session kept (events and input still work);
 `onDetach` `target_closed` when the tab closed; `getTargets`; the content
 script read the page's closed shadow root; `checks.signIn(auth.html)` ended at
-`oauth_callback.html?code=42` of the fixture and closed its window. Claude in Chrome: its service worker
+`oauth_callback.html?code=42` of the fixture and closed its window;
+`checks.dialog()` for confirm (accepted and dismissed), prompt (with text) and
+alert gave the opening and closed events, the page got the answer and no dialog
+window stayed; REPL values from if/else, try, loops and labelled loops;
+`checks.favicon()` gave claude.ai's icon (32x32 PNG) and failed for a site
+without one. Claude in Chrome: its service worker
 starts (no TypeError, offscreen document created), the toolbar button opens its
 side panel ("Log in") and puts the tab in an orange "Claude" group, Log in
 opens claude.ai's sign-in, claude.ai sees `chrome.runtime.sendMessage` and the
