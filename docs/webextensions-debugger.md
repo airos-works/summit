@@ -151,3 +151,34 @@ opens claude.ai's sign-in, claude.ai sees `chrome.runtime.sendMessage` and the
 extension answers its `oauth_redirect` message, and `getContexts` lists the side
 panel. Not checked: signing in and running the agent (needs the owner's
 claude.ai account).
+
+## Claude's tools run through its own code (27 Nov 2026, later)
+
+Without signing in, the extension's tool implementations
+(`assets/ShortcutExecutionService-*.js` exports them: `computer`, `read_page`,
+`get_page_text`, `form_input`, `javascript_tool`, `read_console_messages`,
+`read_network_requests`, `tabs_context`, `tabs_create`, `resize_window`...)
+were imported into one of its pages in the laptop test copy and run against a
+tab in its group with a permission manager that allows everything. That found
+two more gaps, now fixed:
+
+- `scripting.executeScript({func})` never worked in Summit: the function went
+  through `toString()`, which converts only string values, so the page got
+  `().apply(null, [])` ("SyntaxError: Unexpected token ')'"). The source now
+  comes from `JSValueToStringCopy`, and a frame's `error` is an Error (with
+  `message`, as Firefox gives it) rather than a string. `read_page`,
+  `get_page_text`, `form_input` and the click-by-reference path all use it.
+- `tabs.create({url: "chrome://newtab"})` was refused; `chrome://newtab`,
+  `edge://newtab` and `about:newtab` now open the browser's new tab.
+
+Then every tool above answered correctly: the accessibility tree with refs,
+page text, clicks by coordinate and by ref (trusted, counted by the page),
+typing, Backspace and Return, scrolling (with its screenshot), `form_input`,
+`javascript_tool` with `await` and a value from an `if` block, the console
+message the script logged, the `fetch` it made, a new tab, a window resize and
+screenshots. `navigate` and `find` call Anthropic's API (a site-safety lookup,
+a small model), so they need the extension signed in.
+
+A tab restored but never shown since start has a 320x200 view, so tools acting
+on it see that viewport until the tab is selected once.
+

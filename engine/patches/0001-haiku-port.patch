@@ -160740,10 +160740,10 @@ index 0000000000000000000000000000000000000000..67b9a564d1a9d9f3b74e28476295e1d2
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPITabCommandsHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPITabCommandsHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..9189ac4228e11df0314ee85d085db10cb751683a
+index 0000000000000000000000000000000000000000..2a25c77258e34f6aea718844bb08dd6c9a4cf974
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPITabCommandsHaiku.cpp
-@@ -0,0 +1,800 @@
+@@ -0,0 +1,813 @@
 +/*
 + * Copyright (C) 2023-2024 Apple Inc. All rights reserved.
 + *
@@ -160822,8 +160822,21 @@ index 0000000000000000000000000000000000000000..9189ac4228e11df0314ee85d085db10c
 +    return commands && commands->hasListener();
 +}
 +
-+void WebExtensionContext::tabsCreate(std::optional<WebPageProxyIdentifier> webPageProxyIdentifier, const WebExtensionTabParameters& parameters, CompletionHandler<void(std::expected<std::optional<WebExtensionTabParameters>, WebExtensionError>&&)>&& completionHandler)
++// Chrome's own new tab page (Claude in Chrome opens chrome://newtab): the
++// browser's new tab, which tabs.create() opens when given no address.
++static bool isNewTabPageURLHaiku(const URL& url)
 +{
++    if (!url.protocolIs("chrome"_s) && !url.protocolIs("edge"_s) && !url.protocolIs("about"_s))
++        return false;
++    auto host = url.protocolIs("about"_s) ? url.path() : url.host();
++    return equalLettersIgnoringASCIICase(host, "newtab"_s) && (url.protocolIs("about"_s) || url.path().isEmpty() || url.path() == "/"_s);
++}
++
++void WebExtensionContext::tabsCreate(std::optional<WebPageProxyIdentifier> webPageProxyIdentifier, const WebExtensionTabParameters& requestedParameters, CompletionHandler<void(std::expected<std::optional<WebExtensionTabParameters>, WebExtensionError>&&)>&& completionHandler)
++{
++    auto parameters = requestedParameters;
++    if (parameters.url && isNewTabPageURLHaiku(*parameters.url))
++        parameters.url = std::nullopt;
 +    ASSERT(!parameters.audible);
 +    ASSERT(!parameters.loading);
 +    ASSERT(!parameters.privateBrowsing);
@@ -209954,10 +209967,10 @@ index 9ea340d60b7060923cd5b05ed26da12ac9d6f68a..042216b146836028c177a29414662f81
  class WebExtensionAPIWebPageRuntime : public WebExtensionAPIObject, public WebExtensionAPIRuntimeBase {
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIScripting.cpp b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIScripting.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..3f6b00231a029fcc22f11c4095d664cae8e3c162
+index 0000000000000000000000000000000000000000..89952f190a823dbcb218df6a67074c0142abd5a8
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIScripting.cpp
-@@ -0,0 +1,542 @@
+@@ -0,0 +1,551 @@
 +/*
 + * Copyright (C) 2022-2024 Apple Inc. All rights reserved.
 + *
@@ -209987,6 +210000,7 @@ index 0000000000000000000000000000000000000000..3f6b00231a029fcc22f11c4095d664ca
 +#include "config.h"
 +#include "WebExtensionAPIScripting.h"
 +#if ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(HAIKU)
++#include "JSWebExtensionString.h"
 +#include "MessageSenderInlines.h"
 +#include "WebExtensionConstants.h"
 +#include "WebExtensionContextMessages.h"
@@ -209999,6 +210013,7 @@ index 0000000000000000000000000000000000000000..3f6b00231a029fcc22f11c4095d664ca
 +#include "WebExtensionTabScriptFrameResult.h"
 +#include "WebExtensionUtilities.h"
 +#include "WebProcess.h"
++#include <JavaScriptCore/JSRetainPtr.h>
 +#include <WebCore/SerializedScriptValue.h>
 +#include <WebCore/UserGestureIndicator.h>
 +#include <cmath>
@@ -210258,7 +210273,13 @@ index 0000000000000000000000000000000000000000..3f6b00231a029fcc22f11c4095d664ca
 +        }
 +        // A function cannot be transferred across processes, so it travels as
 +        // source text applied to its JSON-serialized arguments.
-+        auto source = toString(context, func);
++        // toString() converts only string values; a function's text is its source.
++        JSRetainPtr sourceString = adopt(JSValueToStringCopy(context, func, nullptr));
++        auto source = sourceString ? toString(sourceString.get()) : String();
++        if (source.isEmpty()) {
++            exception = toErrorString(nullString(), usedFunctionKey, "its source is not available"_s);
++            return;
++        }
 +        auto argumentsJSON = argumentArray ? argumentArray->toJSONString() : "[]"_s;
 +        parameters.code = makeString('(', source, ").apply(null, "_s, argumentsJSON, ')');
 +        if (parameters.code->length() > webExtensionMaxMessageLength) {
@@ -210287,10 +210308,11 @@ index 0000000000000000000000000000000000000000..3f6b00231a029fcc22f11c4095d664ca
 +                    value = nullptr;
 +                // Chrome and Firefox report a frame without a usable value as null.
 +                entry.set("result"_s, Protected<JSValueRef>(context, value ?: JSValueMakeNull(context)));
++                // An Error, as Firefox gives it (extensions read error.message).
 +                if (!frame.error.isNull())
-+                    entry.set("error"_s, Protected<JSValueRef>(context, toJSValueRef(context, frame.error)));
++                    entry.set("error"_s, Protected<JSValueRef>(context, toJSError(context, frame.error)));
 +                else if (cloneException)
-+                    entry.set("error"_s, Protected<JSValueRef>(context, toJSValueRef(context, "the script result could not be cloned into this extension"_s)));
++                    entry.set("error"_s, Protected<JSValueRef>(context, toJSError(context, "the script result could not be cloned into this extension"_s)));
 +                entries.append(Protected<JSValueRef>(context, fromObject(context, WTF::move(entry))));
 +            }
 +            Protected<JSValueRef> array(context, fromArray(context, WTF::move(entries)));
