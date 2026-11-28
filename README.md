@@ -36,16 +36,16 @@ runs WebPositive and other `BWebView` programs on Summit's engine
 <!-- airos-ci:latest-builds:start -->
 ## Latest builds
 
-Built automatically by air/OS CI from commit `5f888bc` on 2026-11-27 ([all files](https://github.com/airos-works/summit/releases/tag/latest)).
+Built automatically by air/OS CI from commit `38fa674` on 2026-11-28 ([all files](https://github.com/airos-works/summit/releases/tag/latest)).
 
 | Architecture | Package |
 |---|---|
-| arm64 | [summit-0.1.0.git20261127.0728-1-arm64.hpkg](https://github.com/airos-works/summit/releases/download/latest/summit-0.1.0.git20261127.0728-1-arm64.hpkg) |
-| arm64 | [summit_webkit-1.10.1.git20261127.0728-1-arm64.hpkg](https://github.com/airos-works/summit/releases/download/latest/summit_webkit-1.10.1.git20261127.0728-1-arm64.hpkg) |
-| arm64 | [summit_webkitlegacy-1.10.1.git20261127.0728-1-arm64.hpkg](https://github.com/airos-works/summit/releases/download/latest/summit_webkitlegacy-1.10.1.git20261127.0728-1-arm64.hpkg) |
-| x86_64 | [summit-0.1.0.git20261127.0728-1-x86_64.hpkg](https://github.com/airos-works/summit/releases/download/latest/summit-0.1.0.git20261127.0728-1-x86_64.hpkg) |
-| x86_64 | [summit_webkit-1.10.1.git20261127.0728-1-x86_64.hpkg](https://github.com/airos-works/summit/releases/download/latest/summit_webkit-1.10.1.git20261127.0728-1-x86_64.hpkg) |
-| x86_64 | [summit_webkitlegacy-1.10.1.git20261127.0728-1-x86_64.hpkg](https://github.com/airos-works/summit/releases/download/latest/summit_webkitlegacy-1.10.1.git20261127.0728-1-x86_64.hpkg) |
+| arm64 | [summit-0.1.0.git20261128.0131-1-arm64.hpkg](https://github.com/airos-works/summit/releases/download/latest/summit-0.1.0.git20261128.0131-1-arm64.hpkg) |
+| arm64 | [summit_webkit-1.10.1.git20261128.0131-1-arm64.hpkg](https://github.com/airos-works/summit/releases/download/latest/summit_webkit-1.10.1.git20261128.0131-1-arm64.hpkg) |
+| arm64 | [summit_webkitlegacy-1.10.1.git20261128.0131-1-arm64.hpkg](https://github.com/airos-works/summit/releases/download/latest/summit_webkitlegacy-1.10.1.git20261128.0131-1-arm64.hpkg) |
+| x86_64 | [summit-0.1.0.git20261128.0131-1-x86_64.hpkg](https://github.com/airos-works/summit/releases/download/latest/summit-0.1.0.git20261128.0131-1-x86_64.hpkg) |
+| x86_64 | [summit_webkit-1.10.1.git20261128.0131-1-x86_64.hpkg](https://github.com/airos-works/summit/releases/download/latest/summit_webkit-1.10.1.git20261128.0131-1-x86_64.hpkg) |
+| x86_64 | [summit_webkitlegacy-1.10.1.git20261128.0131-1-x86_64.hpkg](https://github.com/airos-works/summit/releases/download/latest/summit_webkitlegacy-1.10.1.git20261128.0131-1-x86_64.hpkg) |
 
 Install with `pkgman install <file>`, or copy the file into `/boot/system/packages`. Haiku SDK: x86_64 hrev60207-3019-gbdaa35bd50, arm64 hrev60207-3019-gbdaa35bd50.
 <!-- airos-ci:latest-builds:end -->
@@ -53,12 +53,12 @@ Install with `pkgman install <file>`, or copy the file into `/boot/system/packag
 <!-- airos-ci:haiku-builds:start -->
 ## Latest Haiku builds
 
-Built automatically by air/OS CI from commit `5f888bc` on 2026-11-27 ([all files](https://github.com/airos-works/summit/releases/tag/latest-haiku)).
+Built automatically by air/OS CI from commit `38fa674` on 2026-11-28 ([all files](https://github.com/airos-works/summit/releases/tag/latest-haiku)).
 
 | Architecture | Package |
 |---|---|
-| x86_64 | [summit-0.1.0.git20261127.0728-1-x86_64.hpkg](https://github.com/airos-works/summit/releases/download/latest-haiku/summit-0.1.0.git20261127.0728-1-x86_64.hpkg) |
-| x86_64 | [summit_webkit-1.10.1.git20261127.0728-1-x86_64.hpkg](https://github.com/airos-works/summit/releases/download/latest-haiku/summit_webkit-1.10.1.git20261127.0728-1-x86_64.hpkg) |
+| x86_64 | [summit-0.1.0.git20261128.0131-1-x86_64.hpkg](https://github.com/airos-works/summit/releases/download/latest-haiku/summit-0.1.0.git20261128.0131-1-x86_64.hpkg) |
+| x86_64 | [summit_webkit-1.10.1.git20261128.0131-1-x86_64.hpkg](https://github.com/airos-works/summit/releases/download/latest-haiku/summit_webkit-1.10.1.git20261128.0131-1-x86_64.hpkg) |
 
 For a stock Haiku installation, not air/OS. Install the packages together with `pkgman install ./<file>...`, which also installs what they need from HaikuPorts. Haiku SDK: the R1/beta6 release (r1~beta6_hrev59866_79), not air/OS.
 <!-- airos-ci:haiku-builds:end -->
