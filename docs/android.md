@@ -112,6 +112,44 @@ timers and animation frames are throttled. Android's memory pressure
 in the background, Summit discards that one too, so an idle Summit holds no
 page processes.
 
+## WebExtensions on Android
+
+Summit's WebExtensions implementation (Firefox, Chrome and Safari web
+extensions; see `docs/webextensions-*.md`) is engine code that air/OS and
+Android share. It is compiled where `USE(SUMMIT_EXTENSIONS)` is set: on Haiku
+whenever WebExtensions are on, on WPE for Android with
+`-DENABLE_WK_WEB_EXTENSIONS=ON`.
+
+- `Source/WebKit/SummitExtensions.cmake` lists its sources and IDL bindings;
+  `PlatformHaiku.cmake` and `PlatformWPE.cmake` include it.
+- Its guards are `USE(SUMMIT_EXTENSIONS)`, and IDL members only Summit
+  implements are `Platform=SUMMIT` (the bindings generator turns that into the
+  same condition). `PLATFORM(HAIKU)` is left for code that needs Haiku itself.
+- Browser commands (the engine asking the browser to open, close, move or
+  navigate tabs and windows; the protocol is documented in
+  `UIProcess/API/haiku/WebKitContext.h`) are `NativeBrowserCommand`: a
+  `BMessage` on Haiku, and on WPE a class with the same `Add*` methods that
+  reaches the app as JSON. The command codes are generated for WPE from
+  WebKitContext.h, so there is one list.
+
+Still to do, in order:
+
+1. The Haiku embedder layer the shared code uses (`UIProcess/haiku`):
+   `BrowserTabRegistryHaiku`, `BrowserCommandBrokerHaiku`, `FrameInfoHaiku`,
+   `ExtensionPermissionPromptHaiku`, `DownloadRegistryHaiku`,
+   `ContextualIdentitiesHaiku`, `StoragePathsHaiku`, `WebViewStateHaiku`,
+   `WebExtensionTimingHaiku`, `WebExtensionDebuggerHaiku`. Most of each is
+   portable bookkeeping: move that into shared files and leave a Haiku shell
+   (BMessenger delivery, `find_directory`, `system_time`) and a WPE one.
+2. libzip for Android (XPI and CRX archives), a cerbero recipe.
+3. Extension pages (background pages, action popups, offscreen documents,
+   developer tools pages) on WPE: their `WebPageProxy` needs a WPE page client
+   instead of Haiku's `WebView`.
+4. A C API for the app (load, unload, actions, commands, permission prompts,
+   browser commands and their answers) and its JNI and Kotlin side: an
+   extensions manager, the stores' "Add to Summit" card (`core/StoreOffer`),
+   action popups as sheets, and toolbar and menu entries.
+
 ## Status and plan
 
 Done:
