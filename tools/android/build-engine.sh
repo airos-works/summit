@@ -82,6 +82,9 @@ if [ $RECONFIGURE = 1 ] || [ ! -f "$SUMMIT_ENGINE_BUILD/build.ninja" ]; then
         -DENABLE_WPE_PLATFORM_WAYLAND=OFF
         -DENABLE_WPE_PLATFORM_HEADLESS=ON
         -DENABLE_BACK_FORWARD_LIST_SWIFT=OFF
+        # Summit's WebExtensions implementation, shared with air/OS
+        # (Source/WebKit/SummitExtensions.cmake).
+        -DENABLE_WK_WEB_EXTENSIONS=ON
         -DICU_ROOT="$SUMMIT_DIST"
         -DZLIB_ROOT="$SUMMIT_DIST"
         -DFREETYPE_LIBRARY="$SUMMIT_DIST/lib/libfreetype.so"
