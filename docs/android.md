@@ -185,8 +185,18 @@ How it fits together on WPE:
   app; Android's trusted roots from the Conscrypt APEX) and checks it as
   air/OS's installer does (the item's identity; a CRX3 signature for the
   Chrome Web Store) before the approval dialog.
-- History and bookmarks for extensions are `core/ExtensionBrowserData`, which
-  air/OS's window uses too.
+- History, bookmarks, search and `i18n.detectLanguage` for extensions are
+  `core/ExtensionBrowserData`, which air/OS's window uses too
+  (`tests/ExtensionBrowserDataTests.cpp`).
+- Browser commands the app answers: tabs (open, close, activate, navigate,
+  reload, back, forward, move), `windows.create` (as tabs: the app has one
+  window), history, bookmarks, search, language, favicons. Engine events reach
+  the app after the sender finishes, as BMessenger delivery does.
+- Every tab is a tab to extensions: one without a live page (discarded, or
+  restored and not shown) keeps an empty placeholder page that never loads and
+  costs no web process, reported with its address and title as air/OS's
+  `SetBrowserTabDiscarded` does. The page budget leaves a page made in the
+  last 30 s alone.
 
 Working on the emulator with uBlock Origin 1.77.4: installing from its XPI
 (approval dialog), loading at startup, blocking (webRequest, surrogates,
