@@ -357,6 +357,16 @@ class Browser private constructor(private val appContext: Context) {
         if (permissionPrompt?.request === request) permissionPrompt = null
       }
 
+      override fun onShowFileChooser(page: WebPage, fileChooserParams: FileChooserParams,
+        filePathCallback: org.wpewebkit.wpeview.WPECallback<Array<String>>): Boolean {
+        val picker = filePicker ?: return false
+        val multiple = fileChooserParams.mode == FileChooserParams.MODE_OPEN_MULTIPLE
+        picker.pick(fileChooserParams.acceptTypes.toList(), multiple) { uris ->
+          filePathCallback.onResult(if (uris.isNullOrEmpty()) null else Uploads.copy(appContext, uris).toTypedArray())
+        }
+        return true
+      }
+
       override fun onShowNotification(page: WebPage, notification: WPENotification) {
         notifications.show(tab, notification)
       }
@@ -459,6 +469,49 @@ class Browser private constructor(private val appContext: Context) {
       if (bitmap != null) tab.picture = bitmap.asImageBitmap()
     }
   }
+
+  // ---------------------------------------------------------------- find in page
+
+  /** The find bar: null when closed, else the matches of [findText] ("" until typed). */
+  var findMatches by mutableStateOf<Int?>(null)
+    private set
+  var findMore by mutableStateOf(false)
+    private set
+
+  fun startFind() {
+    findMatches = 0
+    findMore = false
+  }
+
+  fun find(text: String) {
+    val page = selected?.page ?: return
+    if (text.isEmpty()) {
+      page.clearMatches()
+      findMatches = 0
+      return
+    }
+    page.findAllAsync(text, 0) { _, count, more ->
+      findMatches = count
+      findMore = more
+    }
+  }
+
+  fun findNext(forward: Boolean) {
+    selected?.page?.findNext(forward)
+  }
+
+  fun endFind() {
+    selected?.page?.clearMatches()
+    findMatches = null
+  }
+
+  // ---------------------------------------------------------------- files
+
+  /** Lets the person pick documents for a file field (the activity's document picker). */
+  fun interface FilePicker {
+    fun pick(mimeTypes: List<String>, multiple: Boolean, done: (List<android.net.Uri>?) -> Unit)
+  }
+  var filePicker: FilePicker? = null
 
   // ---------------------------------------------------------------- permissions
 

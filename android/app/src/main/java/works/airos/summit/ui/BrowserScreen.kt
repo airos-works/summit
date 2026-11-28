@@ -49,6 +49,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
@@ -91,6 +92,7 @@ fun BrowserScreen(browser: Browser, onExit: () -> Unit, onFullscreen: (Boolean) 
     when {
       fullscreen -> browser.exitFullscreen()
       menuOpen -> menuOpen = false
+      browser.findMatches != null -> browser.endFind()
       panel != Panel.Page -> panel = Panel.Page
       tab?.canGoBack == true -> tab.page?.goBack()
       tab != null && browser.closeToOpener(tab) -> Unit
@@ -128,7 +130,8 @@ fun BrowserScreen(browser: Browser, onExit: () -> Unit, onFullscreen: (Boolean) 
                 PageHost(browser)
                 if (tab?.crashed == true) Crashed(tab)
               }
-              if (!wide && !editing) {
+              if (browser.findMatches != null) FindBar(browser)
+              else if (!wide && !editing) {
                 BottomBar(browser, tab, onTabs = {
                   tab?.let { browser.capturePicture(it) }
                   panel = Panel.Tabs
@@ -457,6 +460,10 @@ private fun PageMenu(browser: Browser, tab: Tab, onDismiss: () -> Unit, onSettin
       context.startActivity(Intent.createChooser(send, null))
       onDismiss()
     }
+    SheetAction("Find on Page") {
+      browser.startFind()
+      onDismiss()
+    }
     SheetAction(if (tab.desktopSite) "Request Mobile Site" else "Request Desktop Site") {
       tab.desktopSite = !tab.desktopSite
       browser.applySettings(tab)
@@ -540,4 +547,52 @@ private fun PermissionDialog(browser: Browser, prompt: Browser.PermissionPrompt)
     confirmButton = { TextButton(onClick = { browser.answerPermission(true, canRemember && remember) }) { Text("Allow") } },
     dismissButton = { TextButton(onClick = { browser.answerPermission(false, canRemember && remember) }) { Text("Block") } },
   )
+}
+
+/** Find on Page: the text, how many matches, previous/next and Done (in place of the bottom bar). */
+@Composable
+private fun FindBar(browser: Browser) {
+  var text by remember { mutableStateOf("") }
+  val requester = remember { FocusRequester() }
+  LaunchedEffect(Unit) { runCatching { requester.requestFocus() } }
+  Column {
+    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+    Row(Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+      BasicTextField(
+        value = text,
+        onValueChange = {
+          text = it
+          browser.find(it)
+        },
+        singleLine = true,
+        textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
+        cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+        keyboardActions = KeyboardActions(onSearch = { browser.findNext(true) }),
+        modifier = Modifier.weight(1f).clip(RoundedCornerShape(18.dp))
+          .background(MaterialTheme.colorScheme.surfaceContainerHighest).padding(horizontal = 14.dp, vertical = 9.dp)
+          .focusRequester(requester),
+      )
+      val matches = browser.findMatches ?: 0
+      Text(
+        when {
+          text.isEmpty() -> ""
+          matches == 0 -> "No matches"
+          browser.findMore -> "$matches+ matches"
+          matches == 1 -> "1 match"
+          else -> "$matches matches"
+        },
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(horizontal = 8.dp),
+      )
+      IconButton(onClick = { browser.findNext(false) }, enabled = matches > 0) {
+        Icon(SummitIcons.Back, "Previous match", Modifier.size(20.dp).rotate(90f))
+      }
+      IconButton(onClick = { browser.findNext(true) }, enabled = matches > 0) {
+        Icon(SummitIcons.Back, "Next match", Modifier.size(20.dp).rotate(-90f))
+      }
+      TextButton(onClick = { browser.endFind() }) { Text("Done") }
+    }
+  }
 }

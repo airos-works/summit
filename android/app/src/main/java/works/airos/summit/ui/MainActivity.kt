@@ -18,6 +18,15 @@ import works.airos.summit.browser.Browser
 class MainActivity : ComponentActivity() {
   private lateinit var browser: Browser
   private var permissionsDone: ((Boolean) -> Unit)? = null
+  private var filesDone: ((List<android.net.Uri>?) -> Unit)? = null
+  private val pickOne = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+    filesDone?.invoke(uri?.let { listOf(it) })
+    filesDone = null
+  }
+  private val pickMany = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+    filesDone?.invoke(uris)
+    filesDone = null
+  }
   private val permissionLauncher = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
     val done = permissionsDone
     permissionsDone = null
@@ -38,6 +47,12 @@ class MainActivity : ComponentActivity() {
     enableEdgeToEdge()
     browser = Browser.get(this)
     browser.attach(this)
+    browser.filePicker = Browser.FilePicker { mimeTypes, multiple, done ->
+      filesDone?.invoke(null)
+      filesDone = done
+      val types = mimeTypes.filter { it.contains('/') }.ifEmpty { listOf("*/*") }.toTypedArray()
+      if (multiple) pickMany.launch(types) else pickOne.launch(types)
+    }
     browser.systemPermissions = Browser.SystemPermissions { permissions, done ->
       val missing = permissions.filter { checkSelfPermission(it) != android.content.pm.PackageManager.PERMISSION_GRANTED }
       if (missing.isEmpty()) {
@@ -83,6 +98,7 @@ class MainActivity : ComponentActivity() {
     ProcessLifecycleOwner.get().lifecycle.removeObserver(appLifecycle)
     browser.saveSession()
     browser.systemPermissions = null
+    browser.filePicker = null
     browser.detach(this)
     super.onDestroy()
   }
