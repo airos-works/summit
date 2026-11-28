@@ -127963,12 +127963,51 @@ index 0000000000000000000000000000000000000000..abdba4dff009ff314eecd9f825a128aa
 +namespace WebKit {
 +String storageDirectoryPathHaiku(bool cache, const String& baseDirectory, const String& directoryName, bool create);
 +} // namespace WebKit
+diff --git a/Source/WebKit/Platform/summit/StoragePathsWPE.cpp b/Source/WebKit/Platform/summit/StoragePathsWPE.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..9028ac92d50c26aa2ccbbb2d773a06e14ae52fbd
+--- /dev/null
++++ b/Source/WebKit/Platform/summit/StoragePathsWPE.cpp
+@@ -0,0 +1,33 @@
++/*
++ * Copyright (C) 2026 air/OS contributors. SPDX-License-Identifier: BSD-2-Clause
++ */
++
++#include "config.h"
++#include "StoragePathsHaiku.h"
++
++#if !PLATFORM(HAIKU)
++
++#include <glib.h>
++#include <wtf/FileSystem.h>
++
++namespace WebKit {
++
++// Where the shared WebExtensions code keeps its files: under baseDirectory, or
++// the user's data (or cache) directory, which the Android embedder points into
++// the app's private storage.
++String storageDirectoryPathHaiku(bool cache, const String& baseDirectory, const String& directoryName, bool create)
++{
++    if (directoryName.contains('\0') || baseDirectory.contains('\0') || directoryName.startsWith('/'))
++        return { };
++    String base = baseDirectory;
++    if (base.isEmpty())
++        base = String::fromUTF8(cache ? g_get_user_cache_dir() : g_get_user_data_dir());
++    auto path = directoryName.isEmpty() ? base : FileSystem::pathByAppendingComponent(base, directoryName);
++    if (create && !FileSystem::makeAllDirectories(path))
++        return { };
++    return path;
++}
++
++} // namespace WebKit
++
++#endif
 diff --git a/Source/WebKit/Platform/summit/SummitHaikuTypes.h b/Source/WebKit/Platform/summit/SummitHaikuTypes.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..8b6dfcbd76a8d2b304d5cd667d95b63ea8e482dc
+index 0000000000000000000000000000000000000000..f3ddb1708c63fe658c7e74802033f5f85fb83dd7
 --- /dev/null
 +++ b/Source/WebKit/Platform/summit/SummitHaikuTypes.h
-@@ -0,0 +1,76 @@
+@@ -0,0 +1,86 @@
 +/*
 + * Copyright (C) 2026 air/OS contributors. SPDX-License-Identifier: BSD-2-Clause
 + */
@@ -127995,6 +128034,8 @@ index 0000000000000000000000000000000000000000..8b6dfcbd76a8d2b304d5cd667d95b63e
 +#else
 +
 +#include "NativeBrowserCommandWPE.h"
++#include <cerrno>
++#include <signal.h>
 +#include <wtf/MonotonicTime.h>
 +
 +namespace WebKit {
@@ -128037,6 +128078,14 @@ index 0000000000000000000000000000000000000000..8b6dfcbd76a8d2b304d5cd667d95b63e
 +    BPoint LeftTop() const { return { left, top }; }
 +    bool operator==(const BRect&) const = default;
 +};
++
++// Processes, which Haiku calls teams: only whether one still runs.
++using team_id = int32_t;
++struct team_info { };
++inline status_t get_team_info(team_id team, team_info*)
++{
++    return team > 0 && (!kill(team, 0) || errno == EPERM) ? B_OK : B_BAD_VALUE;
++}
 +
 +class BHandler;
 +using BMessage = NativeBrowserCommand;
@@ -128927,7 +128976,7 @@ index 4aa44664bcb8fd583fd38914ebc053fe737f8ce9..2411f2e16b0942622b701ef51dd712b3
          return EXIT_SUCCESS;
 diff --git a/Source/WebKit/Shared/Extensions/WebExtensionActionDetails.cpp b/Source/WebKit/Shared/Extensions/WebExtensionActionDetails.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..8b3a07f1fdb45fbceab2671317320e3c49ce9a27
+index 0000000000000000000000000000000000000000..6d598d26c4fec0fb6f94d54440587af28babf3ff
 --- /dev/null
 +++ b/Source/WebKit/Shared/Extensions/WebExtensionActionDetails.cpp
 @@ -0,0 +1,105 @@
@@ -128949,20 +128998,20 @@ index 0000000000000000000000000000000000000000..8b3a07f1fdb45fbceab2671317320e3c
 +    if (source.isNull())
 +        return RefPtr<JSON::Object> { };
 +    if (source.length() > maximumWebExtensionActionIconJSONLength)
-+        return std::unexpected("icon data exceeds the supported message size"_s);
++        return std::unexpected(String("icon data exceeds the supported message size"_s));
 +    RefPtr value = JSON::Value::parseJSON(source);
 +    if (!value)
-+        return std::unexpected("invalid icon JSON"_s);
++        return std::unexpected(String("invalid icon JSON"_s));
 +    if (value->type() == JSON::Value::Type::Null)
 +        return RefPtr<JSON::Object> { };
 +    RefPtr object = value->asObject();
 +    if (!object || object->size() > maximumWebExtensionActionIconRepresentations)
-+        return std::unexpected("icons must be a bounded size dictionary"_s);
++        return std::unexpected(String("icons must be a bounded size dictionary"_s));
 +    for (auto& key : object->keys()) {
 +        auto path = object->getString(key);
 +        if (!isValidWebExtensionActionIconDimension(key) || path.isEmpty() || path.contains('\0')
 +            || (!path.startsWith('/') && !path.startsWith("data:"_s)))
-+            return std::unexpected("invalid icon dimension or extension resource path"_s);
++            return std::unexpected(String("invalid icon dimension or extension resource path"_s));
 +    }
 +    return object->size() ? object : RefPtr<JSON::Object> { };
 +}
@@ -128974,7 +129023,7 @@ index 0000000000000000000000000000000000000000..8b3a07f1fdb45fbceab2671317320e3c
 +    auto number = value->asDouble();
 +    auto tab = number ? toWebExtensionTabIdentifier(*number) : std::nullopt;
 +    if (!isValid(tab) || *number > 9007199254740991.0)
-+        return std::unexpected("tabId must be a valid safe integer identifier"_s);
++        return std::unexpected(String("tabId must be a valid safe integer identifier"_s));
 +    return tab;
 +}
 +
@@ -128985,7 +129034,7 @@ index 0000000000000000000000000000000000000000..8b3a07f1fdb45fbceab2671317320e3c
 +        return result;
 +    RefPtr object = value ? value->asObject() : nullptr;
 +    if (!object)
-+        return std::unexpected("action details must be an object"_s);
++        return std::unexpected(String("action details must be an object"_s));
 +    const bool isColor = kind == WebExtensionActionDetailsKind::BadgeBackgroundColor || kind == WebExtensionActionDetailsKind::BadgeTextColor;
 +    ASCIILiteral valueKey = isColor ? "color"_s : kind == WebExtensionActionDetailsKind::Title ? "title"_s
 +        : kind == WebExtensionActionDetailsKind::BadgeText ? "text"_s : "popup"_s;
@@ -129001,7 +129050,7 @@ index 0000000000000000000000000000000000000000..8b3a07f1fdb45fbceab2671317320e3c
 +            auto number = field->asDouble();
 +            auto window = number ? toWebExtensionWindowIdentifier(*number) : std::nullopt;
 +            if (!isValid(window) || *number > 9007199254740991.0)
-+                return std::unexpected("windowId must be a valid safe integer identifier"_s);
++                return std::unexpected(String("windowId must be a valid safe integer identifier"_s));
 +            result.window = window;
 +        } else if (kind != WebExtensionActionDetailsKind::Get && key == valueKey) {
 +            hasValue = true;
@@ -129010,26 +129059,26 @@ index 0000000000000000000000000000000000000000..8b3a07f1fdb45fbceab2671317320e3c
 +            else if (isColor && field->type() == JSON::Value::Type::Array) {
 +                Ref array = field->asArray().releaseNonNull();
 +                if (array->length() != 4)
-+                    return std::unexpected("action color must contain four RGBA bytes"_s);
++                    return std::unexpected(String("action color must contain four RGBA bytes"_s));
 +                uint32_t packed = 0;
 +                for (auto& component : array.get()) {
 +                    auto number = component->asDouble();
 +                    if (!number || !std::isfinite(*number) || std::trunc(*number) != *number || *number < 0 || *number > 255)
-+                        return std::unexpected("action color components must be integers from 0 to 255"_s);
++                        return std::unexpected(String("action color components must be integers from 0 to 255"_s));
 +                    packed = (packed << 8) | static_cast<uint32_t>(*number);
 +                }
 +                result.color = packed;
 +            } else if (field->type() == JSON::Value::Type::String) {
 +                result.value = field->asString();
 +                if (!isColor && result.value.contains('\0'))
-+                    return std::unexpected("action text must not contain null characters"_s);
++                    return std::unexpected(String("action text must not contain null characters"_s));
 +            } else
 +                return std::unexpected(isColor ? "action color must be CSS text, an RGBA array or null"_s : "action text must be a string or null"_s);
 +        } else
-+            return std::unexpected("unsupported action detail"_s);
++            return std::unexpected(String("unsupported action detail"_s));
 +    }
 +    if (result.tab && result.window)
-+        return std::unexpected("action details cannot specify both tabId and windowId"_s);
++        return std::unexpected(String("action details cannot specify both tabId and windowId"_s));
 +    if (kind != WebExtensionActionDetailsKind::Get && kind != WebExtensionActionDetailsKind::BadgeTextColor && !hasValue)
 +        return std::unexpected(isColor ? "the action color field is required"_s : "the action text field is required"_s);
 +    return result;
@@ -129246,10 +129295,10 @@ index 0000000000000000000000000000000000000000..5cf33ee10e72c8815caa02dbea9d84f6
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && USE(SUMMIT_EXTENSIONS)
 diff --git a/Source/WebKit/Shared/Extensions/WebExtensionCommandShortcut.cpp b/Source/WebKit/Shared/Extensions/WebExtensionCommandShortcut.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..933695ec94f462b5293ffb590abc6db0f8e3b112
+index 0000000000000000000000000000000000000000..c5bd3565b7126bf5e2d82956082c2ea470da6da6
 --- /dev/null
 +++ b/Source/WebKit/Shared/Extensions/WebExtensionCommandShortcut.cpp
-@@ -0,0 +1,164 @@
+@@ -0,0 +1,165 @@
 +/*
 + * Copyright (C) 2026 KunanyiOS contributors.
 + *
@@ -129280,6 +129329,7 @@ index 0000000000000000000000000000000000000000..933695ec94f462b5293ffb590abc6db0
 +#if ENABLE(WK_WEB_EXTENSIONS) && USE(SUMMIT_EXTENSIONS)
 +
 +#include <wtf/ASCIICType.h>
++#include <wtf/text/MakeString.h>
 +#include <wtf/text/StringBuilder.h>
 +#include <wtf/text/StringToIntegerConversion.h>
 +
@@ -129547,10 +129597,18 @@ index 97ec7c434b41f997ad18082ffa2477a4cdb0699f..6c729fb4eb2d013699f0250a8b7d4b22
      Vector<WebKit::WebExtensionContext::PageIdentifierTuple> inspectorBackgroundPageIdentifiers;
  #endif
 diff --git a/Source/WebKit/Shared/Extensions/WebExtensionCookieParameters.h b/Source/WebKit/Shared/Extensions/WebExtensionCookieParameters.h
-index b03a1f75602bf93dec3f3280814e610e4a610566..52d5743524b779a276fc121082536090ccf03e54 100644
+index b03a1f75602bf93dec3f3280814e610e4a610566..d8c895a9e6f4c2dd9d514a92c2a5ebb49322c857 100644
 --- a/Source/WebKit/Shared/Extensions/WebExtensionCookieParameters.h
 +++ b/Source/WebKit/Shared/Extensions/WebExtensionCookieParameters.h
-@@ -39,6 +39,9 @@ struct WebExtensionCookieParameters {
+@@ -28,6 +28,7 @@
+ #if ENABLE(WK_WEB_EXTENSIONS)
+ 
+ #include <WebCore/Cookie.h>
++#include <pal/SessionID.h>
+ #include <wtf/URL.h>
+ #include <wtf/text/WTFString.h>
+ 
+@@ -39,6 +40,9 @@ struct WebExtensionCookieParameters {
  };
  
  struct WebExtensionCookieFilterParameters {
@@ -129576,7 +129634,7 @@ index c55bde434b8ada1a8c16b16066a94416007ee906..b5288d8a8fa0069d4597e7717b25ad0c
      std::optional<String> path;
 diff --git a/Source/WebKit/Shared/Extensions/WebExtensionCookiePartitionKey.h b/Source/WebKit/Shared/Extensions/WebExtensionCookiePartitionKey.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..162d2b755bbeef2b9920ba4cc59776a0e6b88c84
+index 0000000000000000000000000000000000000000..17ee90c4c9c4c877e234c77eadd3c823426f59d9
 --- /dev/null
 +++ b/Source/WebKit/Shared/Extensions/WebExtensionCookiePartitionKey.h
 @@ -0,0 +1,51 @@
@@ -129605,27 +129663,27 @@ index 0000000000000000000000000000000000000000..162d2b755bbeef2b9920ba4cc59776a0
 +{
 +    RefPtr object = value.asObject();
 +    if (!object)
-+        return std::unexpected("partitionKey must be an object"_s);
++        return std::unexpected(String("partitionKey must be an object"_s));
 +    for (auto& key : object->keys()) {
 +        // This backend keys CHIPS by top-level site. Do not silently accept an
 +        // ancestor-bit filter that it cannot distinguish.
 +        if (key != "topLevelSite"_s)
-+            return std::unexpected("unsupported cookie partitionKey field"_s);
++            return std::unexpected(String("unsupported cookie partitionKey field"_s));
 +    }
 +    RefPtr site = object->getValue("topLevelSite"_s);
 +    if (!site) {
 +        if (allowWildcard)
 +            return std::optional<String> { };
-+        return std::unexpected("partitionKey requires topLevelSite"_s);
++        return std::unexpected(String("partitionKey requires topLevelSite"_s));
 +    }
 +    if (site->type() != JSON::Value::Type::String)
-+        return std::unexpected("partitionKey topLevelSite must be a string"_s);
++        return std::unexpected(String("partitionKey topLevelSite must be a string"_s));
 +    auto text = site->asString();
 +    if (text.isEmpty())
 +        return std::optional<String> { emptyString() };
 +    URL url { text };
 +    if (text.contains('\0') || !url.isValid() || !url.protocolIsInHTTPFamily() || url.host().isEmpty())
-+        return std::unexpected("partitionKey topLevelSite must be an HTTP or HTTPS site"_s);
++        return std::unexpected(String("partitionKey topLevelSite must be an HTTP or HTTPS site"_s));
 +    return std::optional<String> { WebCore::Site { url }.toString() };
 +}
 +
@@ -129633,7 +129691,7 @@ index 0000000000000000000000000000000000000000..162d2b755bbeef2b9920ba4cc59776a0
 +#endif
 diff --git a/Source/WebKit/Shared/Extensions/WebExtensionCookieQueryParser.cpp b/Source/WebKit/Shared/Extensions/WebExtensionCookieQueryParser.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..3d43a0322fc5ec60f87fa231053f997e5d136564
+index 0000000000000000000000000000000000000000..a4a92399207d5e24af7b0dba1d29eb75b2c98dd9
 --- /dev/null
 +++ b/Source/WebKit/Shared/Extensions/WebExtensionCookieQueryParser.cpp
 @@ -0,0 +1,75 @@
@@ -129648,7 +129706,7 @@ index 0000000000000000000000000000000000000000..3d43a0322fc5ec60f87fa231053f997e
 +{
 +    RefPtr object = value ? value->asObject() : nullptr;
 +    if (!object)
-+        return std::unexpected("cookie details must be an object"_s);
++        return std::unexpected(String("cookie details must be an object"_s));
 +    WebExtensionCookieQuery result;
 +    for (auto& key : object->keys()) {
 +        Ref field = object->getValue(key).releaseNonNull();
@@ -129663,7 +129721,7 @@ index 0000000000000000000000000000000000000000..3d43a0322fc5ec60f87fa231053f997e
 +            if (field->type() == JSON::Value::Type::Null)
 +                continue;
 +            if (field->type() != JSON::Value::Type::String)
-+                return std::unexpected("cookie firstPartyDomain must be a string or null"_s);
++                return std::unexpected(String("cookie firstPartyDomain must be a string or null"_s));
 +            if (!field->asString().isEmpty())
 +                result.matchesNoCookie = true;
 +            continue;
@@ -129671,7 +129729,7 @@ index 0000000000000000000000000000000000000000..3d43a0322fc5ec60f87fa231053f997e
 +        if (kind == WebExtensionCookieQueryKind::GetAll && (key == "secure"_s || key == "session"_s)) {
 +            auto flag = field->asBoolean();
 +            if (!flag)
-+                return std::unexpected("cookie filter flags must be booleans"_s);
++                return std::unexpected(String("cookie filter flags must be booleans"_s));
 +            if (key == "secure"_s)
 +                result.filter.secure = *flag;
 +            else
@@ -129680,22 +129738,22 @@ index 0000000000000000000000000000000000000000..3d43a0322fc5ec60f87fa231053f997e
 +        }
 +        bool common = key == "name"_s || key == "url"_s || key == "storeId"_s;
 +        if (!common && (kind != WebExtensionCookieQueryKind::GetAll || (key != "domain"_s && key != "path"_s)))
-+            return std::unexpected("unsupported cookie query field"_s);
++            return std::unexpected(String("unsupported cookie query field"_s));
 +        if (field->type() != JSON::Value::Type::String)
-+            return std::unexpected("cookie query text must be a string"_s);
++            return std::unexpected(String("cookie query text must be a string"_s));
 +        auto text = field->asString();
 +        if (text.contains('\0'))
-+            return std::unexpected("cookie query text must not contain null characters"_s);
++            return std::unexpected(String("cookie query text must not contain null characters"_s));
 +        if (key == "name"_s)
 +            result.filter.name = text;
 +        else if (key == "url"_s) {
 +            result.url = URL { text };
 +            if (!result.url.isValid() || !result.url.protocolIsInHTTPFamily() || result.url.host().isEmpty())
-+                return std::unexpected("cookie URL must be a valid HTTP or HTTPS URL"_s);
++                return std::unexpected(String("cookie URL must be a valid HTTP or HTTPS URL"_s));
 +        } else if (key == "storeId"_s) {
 +            result.session = parseWebExtensionCookieStoreIdentifier(text);
 +            if (!result.session)
-+                return std::unexpected("invalid cookie store identifier"_s);
++                return std::unexpected(String("invalid cookie store identifier"_s));
 +        } else if (key == "path"_s)
 +            result.filter.path = text;
 +        else {
@@ -129707,7 +129765,7 @@ index 0000000000000000000000000000000000000000..3d43a0322fc5ec60f87fa231053f997e
 +        }
 +    }
 +    if (kind == WebExtensionCookieQueryKind::Get && (!result.filter.name || !result.url.isValid()))
-+        return std::unexpected("cookie get requires name and url"_s);
++        return std::unexpected(String("cookie get requires name and url"_s));
 +    return result;
 +}
 +}
@@ -129868,7 +129926,7 @@ index 0000000000000000000000000000000000000000..4f868e6f7a20003c2b5035f3090d9c87
 +#endif
 diff --git a/Source/WebKit/Shared/Extensions/WebExtensionCookieWriteParser.cpp b/Source/WebKit/Shared/Extensions/WebExtensionCookieWriteParser.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..576325da2be05edcc019ece97d1a8da13f6a22c0
+index 0000000000000000000000000000000000000000..95cd8efa69ef36e59f980def40cab280ad144743
 --- /dev/null
 +++ b/Source/WebKit/Shared/Extensions/WebExtensionCookieWriteParser.cpp
 @@ -0,0 +1,174 @@
@@ -129899,7 +129957,7 @@ index 0000000000000000000000000000000000000000..576325da2be05edcc019ece97d1a8da1
 +{
 +    RefPtr object = value ? value->asObject() : nullptr;
 +    if (!object)
-+        return std::unexpected("cookie details must be an object"_s);
++        return std::unexpected(String("cookie details must be an object"_s));
 +    WebExtensionCookieWrite result;
 +    auto& cookie = result.cookie;
 +    cookie.name = emptyString();
@@ -129926,15 +129984,15 @@ index 0000000000000000000000000000000000000000..576325da2be05edcc019ece97d1a8da1
 +            if (field->type() == JSON::Value::Type::Null)
 +                continue;
 +            if (field->type() != JSON::Value::Type::String)
-+                return std::unexpected("cookie firstPartyDomain must be a string or null"_s);
++                return std::unexpected(String("cookie firstPartyDomain must be a string or null"_s));
 +            if (!field->asString().isEmpty())
-+                return std::unexpected("first-party isolation is not supported; firstPartyDomain must be empty"_s);
++                return std::unexpected(String("first-party isolation is not supported; firstPartyDomain must be empty"_s));
 +            continue;
 +        }
 +        if (key == "secure"_s || key == "httpOnly"_s) {
 +            auto flag = field->asBoolean();
 +            if (!flag)
-+                return std::unexpected("cookie flags must be booleans"_s);
++                return std::unexpected(String("cookie flags must be booleans"_s));
 +            if (key == "secure"_s)
 +                cookie.secure = *flag;
 +            else
@@ -129946,23 +130004,23 @@ index 0000000000000000000000000000000000000000..576325da2be05edcc019ece97d1a8da1
 +            auto milliseconds = seconds ? *seconds * 1000.0 : std::numeric_limits<double>::quiet_NaN();
 +            if (!std::isfinite(milliseconds) || milliseconds < static_cast<double>(std::numeric_limits<int64_t>::min())
 +                || milliseconds >= static_cast<double>(std::numeric_limits<int64_t>::max()))
-+                return std::unexpected("cookie expirationDate must be a finite representable number"_s);
++                return std::unexpected(String("cookie expirationDate must be a finite representable number"_s));
 +            cookie.expires = milliseconds;
 +            cookie.session = false;
 +            continue;
 +        }
 +        if (key != "url"_s && key != "name"_s && key != "value"_s && key != "domain"_s
 +            && key != "path"_s && key != "sameSite"_s && key != "storeId"_s)
-+            return std::unexpected("unsupported cookie write field"_s);
++            return std::unexpected(String("unsupported cookie write field"_s));
 +        if (field->type() != JSON::Value::Type::String)
-+            return std::unexpected("cookie text fields must be strings"_s);
++            return std::unexpected(String("cookie text fields must be strings"_s));
 +        auto text = field->asString();
 +        if (text.contains('\0'))
-+            return std::unexpected("cookie text must not contain null characters"_s);
++            return std::unexpected(String("cookie text must not contain null characters"_s));
 +        if (key == "url"_s) {
 +            result.url = URL { text };
 +            if (!result.url.isValid() || !result.url.protocolIsInHTTPFamily() || result.url.host().isEmpty())
-+                return std::unexpected("cookie URL must be a valid HTTP or HTTPS URL"_s);
++                return std::unexpected(String("cookie URL must be a valid HTTP or HTTPS URL"_s));
 +        } else if (key == "name"_s)
 +            cookie.name = text;
 +        else if (key == "value"_s)
@@ -129974,7 +130032,7 @@ index 0000000000000000000000000000000000000000..576325da2be05edcc019ece97d1a8da1
 +        else if (key == "storeId"_s) {
 +            result.session = parseWebExtensionCookieStoreIdentifier(text);
 +            if (!result.session)
-+                return std::unexpected("invalid cookie store identifier"_s);
++                return std::unexpected(String("invalid cookie store identifier"_s));
 +        } else if (text == "lax"_s)
 +            cookie.sameSite = WebCore::Cookie::SameSitePolicy::Lax;
 +        else if (text == "strict"_s)
@@ -129989,14 +130047,14 @@ index 0000000000000000000000000000000000000000..576325da2be05edcc019ece97d1a8da1
 +        }
 +#endif
 +        else
-+            return std::unexpected("unsupported cookie SameSite value"_s);
++            return std::unexpected(String("unsupported cookie SameSite value"_s));
 +    }
 +    if (!result.url.isValid())
-+        return std::unexpected("cookie set requires url"_s);
++        return std::unexpected(String("cookie set requires url"_s));
 +    if (hasInvalidCookieText(cookie.name) || hasInvalidCookieText(cookie.value) || cookie.name.contains('='))
-+        return std::unexpected("invalid cookie name or value"_s);
++        return std::unexpected(String("invalid cookie name or value"_s));
 +    if (cookie.name.utf8().length() + cookie.value.utf8().length() > 4096)
-+        return std::unexpected("cookie name and value exceed 4096 bytes"_s);
++        return std::unexpected(String("cookie name and value exceed 4096 bytes"_s));
 +
 +    auto host = result.url.host().toString();
 +    cookie.domain = host;
@@ -130007,40 +130065,40 @@ index 0000000000000000000000000000000000000000..576325da2be05edcc019ece97d1a8da1
 +            text = text.substring(1);
 +        if (text.isEmpty() || text.startsWith('.') || hasInvalidCookieText(text) || text.contains('/')
 +            || text.contains('\\') || text.contains('@') || text.contains('?') || text.contains('#'))
-+            return std::unexpected("invalid cookie domain"_s);
++            return std::unexpected(String("invalid cookie domain"_s));
 +        if (text.contains(':') && !text.startsWith('['))
 +            text = makeString('[', text, ']');
 +        URL domainURL { makeString("https://"_s, text, '/') };
 +        if (!domainURL.isValid() || domainURL.host().isEmpty() || domainURL.port() || !domainURL.user().isEmpty() || !domainURL.password().isEmpty())
-+            return std::unexpected("invalid cookie domain"_s);
++            return std::unexpected(String("invalid cookie domain"_s));
 +        auto canonicalDomain = domainURL.host().toString();
 +        // URL::host() retains IPv6 brackets; hostIsIPAddress expects the address.
 +        auto address = host.startsWith('[') && host.endsWith(']') ? host.substring(1, host.length() - 2) : host;
 +        bool isIPAddress = URL::hostIsIPAddress(address);
 +        if (host != canonicalDomain && (isIPAddress || !host.endsWith(makeString('.', canonicalDomain))))
-+            return std::unexpected("cookie domain does not match its URL"_s);
++            return std::unexpected(String("cookie domain does not match its URL"_s));
 +        auto suffix = canonicalDomain.endsWith('.') ? canonicalDomain.left(canonicalDomain.length() - 1) : canonicalDomain;
 +        bool isPublicSuffix = WebCore::PublicSuffixStore::singleton().isPublicSuffix(suffix);
 +        if (isPublicSuffix && host != canonicalDomain)
-+            return std::unexpected("cookie domain is a public suffix"_s);
++            return std::unexpected(String("cookie domain is a public suffix"_s));
 +        if (!isIPAddress && !isPublicSuffix)
 +            cookie.domain = makeString('.', canonicalDomain);
 +    }
 +    cookie.path = path && !path->isEmpty() ? *path : WebCore::CookieUtil::defaultPathForURL(result.url);
 +    if (!cookie.path.startsWith('/') || hasInvalidCookieText(cookie.path))
-+        return std::unexpected("invalid cookie path"_s);
++        return std::unexpected(String("invalid cookie path"_s));
 +    if (cookie.secure && !WebCore::SecurityOrigin::create(result.url)->isPotentiallyTrustworthy())
-+        return std::unexpected("secure cookies require a trustworthy URL"_s);
++        return std::unexpected(String("secure cookies require a trustworthy URL"_s));
 +    if (explicitNoRestriction && !cookie.secure)
-+        return std::unexpected("SameSite no_restriction requires secure"_s);
++        return std::unexpected(String("SameSite no_restriction requires secure"_s));
 +    if (!cookie.partitionKey.isEmpty() && (!cookie.secure || !result.url.protocolIs("https"_s)))
-+        return std::unexpected("partitioned cookies require secure and an HTTPS URL"_s);
++        return std::unexpected(String("partitioned cookies require secure and an HTTPS URL"_s));
 +    if (cookie.name.startsWith("__Secure-"_s) && !cookie.secure)
-+        return std::unexpected("__Secure- cookies require secure"_s);
++        return std::unexpected(String("__Secure- cookies require secure"_s));
 +    if (cookie.name.startsWith("__Host-"_s) && (!cookie.secure || hasDomainAttribute || cookie.path != "/"_s))
-+        return std::unexpected("__Host- cookies require secure, path / and no domain"_s);
++        return std::unexpected(String("__Host- cookies require secure, path / and no domain"_s));
 +    if ((cookie.name.startsWith("__Http-"_s) || cookie.name.startsWith("__Host-Http-"_s)) && (!cookie.secure || !cookie.httpOnly))
-+        return std::unexpected("HTTP-prefixed cookies require secure and httpOnly"_s);
++        return std::unexpected(String("HTTP-prefixed cookies require secure and httpOnly"_s));
 +    cookie.created = WallTime::now().secondsSinceEpoch().milliseconds();
 +    return result;
 +}
@@ -130555,7 +130613,7 @@ index 7b6ccdaa7ceab34d0f5cdee1db4ed79a1b4a406a..23d3e0a2626e7dfb6034c2b4d1eee82a
  private:
 diff --git a/Source/WebKit/Shared/Extensions/WebExtensionMenuItemParser.cpp b/Source/WebKit/Shared/Extensions/WebExtensionMenuItemParser.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..71a8588d5b14fb29470c80c674c0f54417a490e7
+index 0000000000000000000000000000000000000000..f3431a32bc95aa6753128e685ae8dd1fc1117f55
 --- /dev/null
 +++ b/Source/WebKit/Shared/Extensions/WebExtensionMenuItemParser.cpp
 @@ -0,0 +1,247 @@
@@ -130582,7 +130640,7 @@ index 0000000000000000000000000000000000000000..71a8588d5b14fb29470c80c674c0f544
 +        if (auto number = value->asDouble(); number && std::isfinite(*number) && std::trunc(*number) == *number && std::abs(*number) <= maximumSafeInteger)
 +            return makeString("n:"_s, String::number(static_cast<int64_t>(*number)));
 +    }
-+    return std::unexpected("menu identifiers must be nonempty strings or safe integers"_s);
++    return std::unexpected(String("menu identifiers must be nonempty strings or safe integers"_s));
 +}
 +
 +std::expected<WebExtensionMenuIdentifier, String> decodeWebExtensionMenuIdentifier(const String& key)
@@ -130597,7 +130655,7 @@ index 0000000000000000000000000000000000000000..71a8588d5b14fb29470c80c674c0f544
 +        if (number && *number >= -maximumSafeInteger && *number <= maximumSafeInteger && String::number(*number) == value)
 +            return WebExtensionMenuIdentifier { *number };
 +    }
-+    return std::unexpected("invalid native menu identifier"_s);
++    return std::unexpected(String("invalid native menu identifier"_s));
 +}
 +
 +static bool validType(WebExtensionMenuItemType type)
@@ -130616,10 +130674,10 @@ index 0000000000000000000000000000000000000000..71a8588d5b14fb29470c80c674c0f544
 +{
 +    for (auto& text : patterns) {
 +        if (!validText(text))
-+            return std::unexpected("menu URL patterns must be strings without null characters"_s);
++            return std::unexpected(String("menu URL patterns must be strings without null characters"_s));
 +        RefPtr pattern = WebExtensionMatchPattern::getOrCreate(text);
 +        if (!pattern || (documentPatterns ? !pattern->isSupported() : !pattern->isValid()))
-+            return std::unexpected("invalid menu URL match pattern"_s);
++            return std::unexpected(String("invalid menu URL match pattern"_s));
 +    }
 +    return { };
 +}
@@ -130651,14 +130709,14 @@ index 0000000000000000000000000000000000000000..71a8588d5b14fb29470c80c674c0f544
 +    };
 +    if (value.type() == JSON::Value::Type::String) {
 +        if (!add("16"_s, value))
-+            return std::unexpected("menu icons must name extension resources"_s);
++            return std::unexpected(String("menu icons must name extension resources"_s));
 +    } else if (RefPtr object = value.asObject()) {
 +        for (auto& key : object->keys()) {
 +            if (!add(key, *object->getValue(key)))
-+                return std::unexpected("menu icon dimensions and resource paths must be valid"_s);
++                return std::unexpected(String("menu icon dimensions and resource paths must be valid"_s));
 +        }
 +    } else
-+        return std::unexpected("icons must be a resource path, dictionary or null"_s);
++        return std::unexpected(String("icons must be a resource path, dictionary or null"_s));
 +    return result->toJSONString();
 +}
 +
@@ -130666,20 +130724,20 @@ index 0000000000000000000000000000000000000000..71a8588d5b14fb29470c80c674c0f544
 +{
 +    bool creating = operation == WebExtensionMenuItemOperation::Create;
 +    if ((creating || !parameters.identifier.isNull()) && !decodeWebExtensionMenuIdentifier(parameters.identifier))
-+        return std::unexpected("invalid menu identifier"_s);
++        return std::unexpected(String("invalid menu identifier"_s));
 +    if (parameters.parentIdentifier && !decodeWebExtensionMenuIdentifier(*parameters.parentIdentifier))
-+        return std::unexpected("invalid parent menu identifier"_s);
++        return std::unexpected(String("invalid parent menu identifier"_s));
 +    if (parameters.type && !validType(*parameters.type))
-+        return std::unexpected("invalid menu item type"_s);
++        return std::unexpected(String("invalid menu item type"_s));
 +    auto effectiveType = parameters.type.value_or(WebExtensionMenuItemType::Normal);
 +    if ((creating || parameters.type) && !isCheckedType(effectiveType) && parameters.checked.value_or(false))
-+        return std::unexpected("only checkbox and radio items can be checked"_s);
++        return std::unexpected(String("only checkbox and radio items can be checked"_s));
 +    if ((!parameters.title.isNull() && !validText(parameters.title)) || ((creating || parameters.type) && effectiveType != WebExtensionMenuItemType::Separator && parameters.title.isEmpty() && (creating || !parameters.title.isNull())))
-+        return std::unexpected("non-separator menu items require a nonempty title"_s);
++        return std::unexpected(String("non-separator menu items require a nonempty title"_s));
 +    if (!parameters.command.isNull() && (!validText(parameters.command) || parameters.command.isEmpty()))
-+        return std::unexpected("menu command must be a nonempty string"_s);
++        return std::unexpected(String("menu command must be a nonempty string"_s));
 +    if (parameters.contexts && (parameters.contexts->isEmpty() || !allWebExtensionMenuItemContextTypes().containsAll(*parameters.contexts)))
-+        return std::unexpected("menu contexts must name supported contexts"_s);
++        return std::unexpected(String("menu contexts must name supported contexts"_s));
 +    if (parameters.documentURLPatterns) {
 +        auto validation = validatePatterns(*parameters.documentURLPatterns, true);
 +        if (!validation)
@@ -130694,11 +130752,11 @@ index 0000000000000000000000000000000000000000..71a8588d5b14fb29470c80c674c0f544
 +        RefPtr value = JSON::Value::parseJSON(parameters.iconsJSON);
 +        RefPtr icons = value ? value->asObject() : nullptr;
 +        if (!icons)
-+            return std::unexpected("invalid native icon dictionary"_s);
++            return std::unexpected(String("invalid native icon dictionary"_s));
 +        for (auto& key : icons->keys()) {
 +            auto path = icons->getString(key);
 +            if (!validDimension(key) || !validText(path) || !path.startsWith('/') || path.startsWith("//"_s))
-+                return std::unexpected("invalid native icon resource path"_s);
++                return std::unexpected(String("invalid native icon resource path"_s));
 +        }
 +    }
 +    return { };
@@ -130708,7 +130766,7 @@ index 0000000000000000000000000000000000000000..71a8588d5b14fb29470c80c674c0f544
 +{
 +    RefPtr object = value ? value->asObject() : nullptr;
 +    if (!object)
-+        return std::unexpected("menu properties must be a dictionary"_s);
++        return std::unexpected(String("menu properties must be a dictionary"_s));
 +    WebExtensionMenuItemParameters result;
 +    for (auto& key : object->keys()) {
 +        Ref field = object->getValue(key).releaseNonNull();
@@ -130722,12 +130780,12 @@ index 0000000000000000000000000000000000000000..71a8588d5b14fb29470c80c674c0f544
 +                result.parentIdentifier = WTF::move(*identifier);
 +        } else if (key == "title"_s || key == "command"_s) {
 +            if (field->type() != JSON::Value::Type::String || !validText(field->asString()))
-+                return std::unexpected("menu title and command must be strings without null characters"_s);
++                return std::unexpected(String("menu title and command must be strings without null characters"_s));
 +            (key == "title"_s ? result.title : result.command) = field->asString();
 +        } else if (key == "checked"_s || key == "enabled"_s || key == "visible"_s) {
 +            auto boolean = field->asBoolean();
 +            if (!boolean)
-+                return std::unexpected("menu flags must be booleans"_s);
++                return std::unexpected(String("menu flags must be booleans"_s));
 +            (key == "checked"_s ? result.checked : key == "enabled"_s ? result.enabled : result.visible) = *boolean;
 +        } else if (key == "type"_s) {
 +            auto type = field->asString();
@@ -130735,11 +130793,11 @@ index 0000000000000000000000000000000000000000..71a8588d5b14fb29470c80c674c0f544
 +            else if (type == "checkbox"_s) result.type = WebExtensionMenuItemType::Checkbox;
 +            else if (type == "radio"_s) result.type = WebExtensionMenuItemType::Radio;
 +            else if (type == "separator"_s) result.type = WebExtensionMenuItemType::Separator;
-+            else return std::unexpected("unknown menu item type"_s);
++            else return std::unexpected(String("unknown menu item type"_s));
 +        } else if (key == "contexts"_s) {
 +            RefPtr array = field->asArray();
 +            if (!array || !array->length())
-+                return std::unexpected("contexts must be a nonempty array"_s);
++                return std::unexpected(String("contexts must be a nonempty array"_s));
 +            OptionSet<WebExtensionMenuItemContextType> contexts;
 +            for (auto& entry : *array) {
 +                auto context = entry->asString();
@@ -130761,21 +130819,21 @@ index 0000000000000000000000000000000000000000..71a8588d5b14fb29470c80c674c0f544
 +                // Valid contexts of other browsers for surfaces this browser does not have.
 +                // An item naming them together with supported contexts remains usable.
 +                else if (context == "bookmark"_s || context == "tools_menu"_s || context == "launcher"_s) continue;
-+                else return std::unexpected("unsupported menu context for this manifest version"_s);
++                else return std::unexpected(String("unsupported menu context for this manifest version"_s));
 +            }
 +            if (contexts.isEmpty())
-+                return std::unexpected("none of the requested menu contexts is available in this browser"_s);
++                return std::unexpected(String("none of the requested menu contexts is available in this browser"_s));
 +            result.contexts = contexts;
 +        } else if (key == "documentUrlPatterns"_s || key == "targetUrlPatterns"_s) {
 +            RefPtr array = field->asArray();
 +            if (!array)
-+                return std::unexpected("menu URL patterns must be arrays of strings"_s);
++                return std::unexpected(String("menu URL patterns must be arrays of strings"_s));
 +            bool documentPatterns = key == "documentUrlPatterns"_s;
 +            Vector<String> patterns;
 +            bool droppedPattern = false;
 +            for (auto& entry : *array) {
 +                if (entry->type() != JSON::Value::Type::String)
-+                    return std::unexpected("menu URL patterns must be strings"_s);
++                    return std::unexpected(String("menu URL patterns must be strings"_s));
 +                auto text = entry->asString();
 +                // Chrome and Firefox ignore patterns for schemes they cannot match (uBlock Origin
 +                // lists "abp:*" beside an https pattern), so drop them rather than the whole item.
@@ -130787,7 +130845,7 @@ index 0000000000000000000000000000000000000000..71a8588d5b14fb29470c80c674c0f544
 +                patterns.append(WTF::move(text));
 +            }
 +            if (patterns.isEmpty() && droppedPattern)
-+                return std::unexpected("invalid menu URL match pattern"_s);
++                return std::unexpected(String("invalid menu URL match pattern"_s));
 +            (documentPatterns ? result.documentURLPatterns : result.targetURLPatterns) = WTF::move(patterns);
 +        } else if (key == "icons"_s) {
 +            auto icons = parseIcons(field.get(), baseURL);
@@ -130795,7 +130853,7 @@ index 0000000000000000000000000000000000000000..71a8588d5b14fb29470c80c674c0f544
 +                return std::unexpected(icons.error());
 +            result.iconsJSON = WTF::move(*icons);
 +        } else
-+            return std::unexpected("unsupported menu property"_s);
++            return std::unexpected(String("unsupported menu property"_s));
 +    }
 +    if (operation == WebExtensionMenuItemOperation::Create && result.identifier.isNull())
 +        result.identifier = makeString("s:"_s, createVersion4UUIDString());
@@ -133443,7 +133501,7 @@ index 22cf8229b21e9131e12ae213f39ad7017399ff10..f3f7b525f8cf53e335c5eb32d4a30874
  
 diff --git a/Source/WebKit/Shared/Extensions/WebExtensionWindowQueryParser.cpp b/Source/WebKit/Shared/Extensions/WebExtensionWindowQueryParser.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..2e802cca459c50bc8143f4d5b75c5ec43a3cd700
+index 0000000000000000000000000000000000000000..77a587082b5d022ae4ce8e4ff4f4b2656c6c720d
 --- /dev/null
 +++ b/Source/WebKit/Shared/Extensions/WebExtensionWindowQueryParser.cpp
 @@ -0,0 +1,41 @@
@@ -133459,18 +133517,18 @@ index 0000000000000000000000000000000000000000..2e802cca459c50bc8143f4d5b75c5ec4
 +        return result;
 +    RefPtr object = value->asObject();
 +    if (!object)
-+        return std::unexpected("window options must be an object"_s);
++        return std::unexpected(String("window options must be an object"_s));
 +    for (auto& key : object->keys()) {
 +        Ref entry = object->getValue(key).releaseNonNull();
 +        if (key == "populate"_s && kind == WebExtensionWindowQueryKind::Get) {
 +            auto populate = entry->asBoolean();
 +            if (!populate)
-+                return std::unexpected("populate must be a boolean"_s);
++                return std::unexpected(String("populate must be a boolean"_s));
 +            result.populate = *populate ? WebExtensionWindow::PopulateTabs::Yes : WebExtensionWindow::PopulateTabs::No;
 +        } else if (key == "windowTypes"_s) {
 +            RefPtr types = entry->asArray();
 +            if (!types || !types->length())
-+                return std::unexpected("windowTypes must be a non-empty array"_s);
++                return std::unexpected(String("windowTypes must be a non-empty array"_s));
 +            result.types = { };
 +            for (auto& type : *types) {
 +                auto name = type->asString();
@@ -133479,10 +133537,10 @@ index 0000000000000000000000000000000000000000..2e802cca459c50bc8143f4d5b75c5ec4
 +                else if (name == "popup"_s)
 +                    result.types.add(WebExtensionWindowTypeFilter::Popup);
 +                else
-+                    return std::unexpected("windowTypes must contain only 'normal' or 'popup'"_s);
++                    return std::unexpected(String("windowTypes must contain only 'normal' or 'popup'"_s));
 +            }
 +        } else
-+            return std::unexpected("unsupported window option"_s);
++            return std::unexpected(String("unsupported window option"_s));
 +    }
 +    return result;
 +}
@@ -133753,7 +133811,7 @@ index 04bfb854a2dae611ac4afa90715c69dafcea9def..910a59257c6867b235e36676033d28aa
  
  #if HAVE(COOKIE_CHANGE_LISTENER_API)
 diff --git a/Source/WebKit/Shared/ResourceLoadInfo.h b/Source/WebKit/Shared/ResourceLoadInfo.h
-index 697e9973af33a9c9c2b37a46bac679cc0cf5b399..ae2ee6667732d27a5eecc953dff791fbe9624d96 100644
+index 697e9973af33a9c9c2b37a46bac679cc0cf5b399..1ad14ada5b33a0cec595ed61659fe5ce87532183 100644
 --- a/Source/WebKit/Shared/ResourceLoadInfo.h
 +++ b/Source/WebKit/Shared/ResourceLoadInfo.h
 @@ -50,7 +50,11 @@ struct ResourceLoadInfo {
@@ -133762,7 +133820,7 @@ index 697e9973af33a9c9c2b37a46bac679cc0cf5b399..ae2ee6667732d27a5eecc953dff791fb
          XMLHTTPRequest,
 -        XSLT
 +        XSLT,
-+#if PLATFORM(HAIKU)
++#if USE(SUMMIT_EXTENSIONS)
 +        // Only blocking webRequest decisions describe WebSocket connections.
 +        WebSocket,
 +#endif
@@ -133770,7 +133828,7 @@ index 697e9973af33a9c9c2b37a46bac679cc0cf5b399..ae2ee6667732d27a5eecc953dff791fb
  
      NetworkResourceLoadIdentifier resourceLoadID;
 diff --git a/Source/WebKit/Shared/ResourceLoadInfo.serialization.in b/Source/WebKit/Shared/ResourceLoadInfo.serialization.in
-index 890f42a669ecff3e7dfcfcd0cff1184e03f5d289..2a651210f586a619c48f18673dde8706841ce27c 100644
+index 890f42a669ecff3e7dfcfcd0cff1184e03f5d289..9b189d6e07187fc6185cabb95fcf234b1f180f2a 100644
 --- a/Source/WebKit/Shared/ResourceLoadInfo.serialization.in
 +++ b/Source/WebKit/Shared/ResourceLoadInfo.serialization.in
 @@ -35,7 +35,10 @@
@@ -133779,7 +133837,7 @@ index 890f42a669ecff3e7dfcfcd0cff1184e03f5d289..2a651210f586a619c48f18673dde8706
      XMLHTTPRequest,
 -    XSLT
 +    XSLT,
-+#if PLATFORM(HAIKU)
++#if USE(SUMMIT_EXTENSIONS)
 +    WebSocket,
 +#endif
  };
@@ -135851,10 +135909,10 @@ index db779aefcd6fa39e1b544159d7f0780b583445b6..78e1ce4036e2a889ca25f9f3ffed2420
  UIProcess/API/glib/WebKitImage.cpp @no-unify
 diff --git a/Source/WebKit/SummitExtensions.cmake b/Source/WebKit/SummitExtensions.cmake
 new file mode 100644
-index 0000000000000000000000000000000000000000..3346a9146fb2e6c6130f0961649856508a4357bb
+index 0000000000000000000000000000000000000000..9badce381a1b38d7344d3f2c869b2b808bd46706
 --- /dev/null
 +++ b/Source/WebKit/SummitExtensions.cmake
-@@ -0,0 +1,210 @@
+@@ -0,0 +1,232 @@
 +# Summit's WebExtensions implementation (Firefox, Chrome and Safari web
 +# extensions), shared by the Haiku port (air/OS) and the WPE port on Android.
 +# The code lives mostly in */Extensions/haiku and is compiled where
@@ -136057,12 +136115,34 @@ index 0000000000000000000000000000000000000000..3346a9146fb2e6c6130f096164985650
 +    endif ()
 +    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_summitContextHeader}" "${_summitViewHeader}")
 +    list(APPEND WebKit_SOURCES
++        Platform/summit/StoragePathsWPE.cpp
 +        UIProcess/Extensions/wpe/NativeBrowserCommandWPE.cpp
 +    )
++    # The Haiku port's own headers the shared code includes by name (all
++    # named *Haiku.h, so none can stand in for a WPE header of the same name):
++    # forwarding headers in one directory, not the Haiku directories themselves.
++    set(_summitForwardingDir "${WebKit_DERIVED_SOURCES_DIR}/SummitHaikuHeaders")
++    file(MAKE_DIRECTORY "${_summitForwardingDir}")
++    file(GLOB _summitHaikuHeaders
++        "${WEBKIT_DIR}/Platform/haiku/*Haiku.h"
++        "${WEBKIT_DIR}/UIProcess/haiku/*Haiku.h"
++        "${WEBKIT_DIR}/UIProcess/Extensions/haiku/*.h")
++    foreach (_header IN LISTS _summitHaikuHeaders)
++        get_filename_component(_name "${_header}" NAME)
++        set(_forward "#include \"${_header}\"\n")
++        set(_target "${_summitForwardingDir}/${_name}")
++        if (EXISTS "${_target}")
++            file(READ "${_target}" _existing)
++        else ()
++            set(_existing "")
++        endif ()
++        if (NOT _existing STREQUAL _forward)
++            file(WRITE "${_target}" "${_forward}")
++        endif ()
++    endforeach ()
 +    list(APPEND WebKit_PRIVATE_INCLUDE_DIRECTORIES
-+        "${WEBKIT_DIR}/UIProcess/haiku"
 +        "${WEBKIT_DIR}/UIProcess/Extensions/wpe"
-+        "${WEBKIT_DIR}/UIProcess/Extensions/haiku"
++        "${_summitForwardingDir}"
 +    )
 +endif ()
 diff --git a/Source/WebKit/UIProcess/API/APIContentRuleListStore.cpp b/Source/WebKit/UIProcess/API/APIContentRuleListStore.cpp
@@ -136889,8 +136969,43 @@ index 56b8f77cf6cff36f45b52cf47dfbd0dcf1fb55e0..5e5d8a93db182819bde5e9ed4222fec6
  };
  
  WebKitNavigationAction* webkitNavigationActionCreate(Ref<API::NavigationAction>&&);
+diff --git a/Source/WebKit/UIProcess/API/glib/WebKitPrivate.cpp b/Source/WebKit/UIProcess/API/glib/WebKitPrivate.cpp
+index 5451b813c53f8ea4f6016493330305e147ebce28..3cbffbc157610006bbee55e69b1b1fb6044afd6d 100644
+--- a/Source/WebKit/UIProcess/API/glib/WebKitPrivate.cpp
++++ b/Source/WebKit/UIProcess/API/glib/WebKitPrivate.cpp
+@@ -36,7 +36,7 @@
+ #endif
+ #endif
+ 
+-#if ENABLE(WK_WEB_EXTENSIONS)
++#if (ENABLE(WK_WEB_EXTENSIONS) && !USE(SUMMIT_EXTENSIONS))
+ #include "WebExtension.h"
+ #include "WebExtensionContext.h"
+ #include "WebExtensionMatchPattern.h"
+@@ -188,7 +188,7 @@ unsigned toWebKitError(unsigned webCoreError)
+     }
+ }
+ 
+-#if ENABLE(WK_WEB_EXTENSIONS)
++#if (ENABLE(WK_WEB_EXTENSIONS) && !USE(SUMMIT_EXTENSIONS))
+ #if ENABLE(2022_GLIB_API)
+ unsigned toWebKitWebExtensionError(unsigned apiError)
+ {
+diff --git a/Source/WebKit/UIProcess/API/glib/WebKitPrivate.h b/Source/WebKit/UIProcess/API/glib/WebKitPrivate.h
+index 760f1c793394ed84889ad8683f8e47df792658e2..bcbb7588fca54b63711ed0e40bd74d627ceada34 100644
+--- a/Source/WebKit/UIProcess/API/glib/WebKitPrivate.h
++++ b/Source/WebKit/UIProcess/API/glib/WebKitPrivate.h
+@@ -33,7 +33,7 @@ unsigned toPlatformModifiers(OptionSet<WebKit::WebEventModifier>);
+ WebKitNavigationType toWebKitNavigationType(WebCore::NavigationType);
+ unsigned toWebKitMouseButton(WebKit::WebMouseEventButton);
+ unsigned toWebKitError(unsigned webCoreError);
+-#if ENABLE(WK_WEB_EXTENSIONS)
++#if (ENABLE(WK_WEB_EXTENSIONS) && !USE(SUMMIT_EXTENSIONS))
+ #if ENABLE(2022_GLIB_API)
+ unsigned toWebKitWebExtensionError(unsigned apiError);
+ unsigned toWebKitWebExtensionContextError(unsigned apiError);
 diff --git a/Source/WebKit/UIProcess/API/glib/WebKitWebExtension.cpp b/Source/WebKit/UIProcess/API/glib/WebKitWebExtension.cpp
-index 7639e575ad2a4c9e38745717b75266cb87108edd..8f794b989233ce03ff9ec8cea4100fa236509c2c 100644
+index 7639e575ad2a4c9e38745717b75266cb87108edd..65ed0fc6ff5206fe28753d8d3bac5779211c0639 100644
 --- a/Source/WebKit/UIProcess/API/glib/WebKitWebExtension.cpp
 +++ b/Source/WebKit/UIProcess/API/glib/WebKitWebExtension.cpp
 @@ -53,7 +53,7 @@ using namespace WebKit;
@@ -136902,8 +137017,26 @@ index 7639e575ad2a4c9e38745717b75266cb87108edd..8f794b989233ce03ff9ec8cea4100fa2
      GRefPtr<GFile> path;
      RefPtr<WebExtension> extension;
      UTF8CString defaultLocale;
+@@ -457,7 +457,7 @@ static void webkit_web_extension_class_init(WebKitWebExtensionClass* klass)
+ 
+ static gboolean webkitWebExtensionInitableInit(GInitable* initable, GCancellable* cancellable, GError** error)
+ {
+-#if ENABLE(WK_WEB_EXTENSIONS)
++#if (ENABLE(WK_WEB_EXTENSIONS) && !USE(SUMMIT_EXTENSIONS))
+     WebKitWebExtension* self = WEBKIT_WEB_EXTENSION(initable);
+     GRefPtr<GFile> extensionPath = self->priv->path;
+     g_return_val_if_fail(WEBKIT_IS_WEB_EXTENSION(self), FALSE);
+@@ -485,7 +485,7 @@ static void gInitableInterfaceInit(GInitableIface* iface)
+     iface->init = webkitWebExtensionInitableInit;
+ }
+ 
+-#if ENABLE(WK_WEB_EXTENSIONS)
++#if (ENABLE(WK_WEB_EXTENSIONS) && !USE(SUMMIT_EXTENSIONS))
+ 
+ WebKitWebExtension* webkitWebExtensionCreate(HashMap<String, GRefPtr<GBytes>>&& resources, GError** error)
+ {
 diff --git a/Source/WebKit/UIProcess/API/glib/WebKitWebExtensionContext.cpp b/Source/WebKit/UIProcess/API/glib/WebKitWebExtensionContext.cpp
-index df9bc1deac7f45f6bc99e7ad9a0166cc32dbc99c..a00dce84922bc946b6a14a134f280260e74a1d7d 100644
+index df9bc1deac7f45f6bc99e7ad9a0166cc32dbc99c..73bc46827eb1064f50efbbd1242f10195e3b9b58 100644
 --- a/Source/WebKit/UIProcess/API/glib/WebKitWebExtensionContext.cpp
 +++ b/Source/WebKit/UIProcess/API/glib/WebKitWebExtensionContext.cpp
 @@ -33,7 +33,7 @@
@@ -136915,6 +137048,213 @@ index df9bc1deac7f45f6bc99e7ad9a0166cc32dbc99c..a00dce84922bc946b6a14a134f280260
  constexpr auto WEBKIT_CONTEXT_ERROR_DOMAIN = "WKWebExtensionContextErrorDomain"_s;
  #endif
  
+@@ -51,7 +51,7 @@ constexpr auto WEBKIT_CONTEXT_ERROR_DOMAIN = "WKWebExtensionContextErrorDomain"_
+ static void gInitableInterfaceInit(GInitableIface*);
+ 
+ struct _WebKitWebExtensionContextPrivate {
+-#if ENABLE(WK_WEB_EXTENSIONS)
++#if (ENABLE(WK_WEB_EXTENSIONS) && !USE(SUMMIT_EXTENSIONS))
+     RefPtr<WebKit::WebExtensionContext> context;
+     GWeakPtr<WebKitWebExtension> extension;
+     UTF8CString baseURI;
+@@ -210,7 +210,7 @@ static void webkit_web_extension_context_class_init(WebKitWebExtensionContextCla
+ 
+ static gboolean webkitWebExtensionContextInitableInit(GInitable* initable, GCancellable* cancellable, GError** error)
+ {
+-#if ENABLE(WK_WEB_EXTENSIONS)
++#if (ENABLE(WK_WEB_EXTENSIONS) && !USE(SUMMIT_EXTENSIONS))
+     WebKitWebExtensionContext* self = WEBKIT_WEB_EXTENSION_CONTEXT(initable);
+     if (!self->priv->extension) {
+         g_set_error_literal(error, webkit_web_extension_context_error_quark(),
+@@ -246,7 +246,7 @@ static void gInitableInterfaceInit(GInitableIface* iface)
+     iface->init = webkitWebExtensionContextInitableInit;
+ }
+ 
+-#if ENABLE(WK_WEB_EXTENSIONS)
++#if (ENABLE(WK_WEB_EXTENSIONS) && !USE(SUMMIT_EXTENSIONS))
+ 
+ void webkitWebExtensionContextSetWebExtension(WebKitWebExtensionContext* context, WebKitWebExtension* extension)
+ {
+diff --git a/Source/WebKit/UIProcess/API/glib/WebKitWebExtensionContextPrivate.h b/Source/WebKit/UIProcess/API/glib/WebKitWebExtensionContextPrivate.h
+index 191e2fcfdb8ca672e3ca50dc8227e8a3835c8595..7da20851158ed71587ec5bbdd3276a00657130f1 100644
+--- a/Source/WebKit/UIProcess/API/glib/WebKitWebExtensionContextPrivate.h
++++ b/Source/WebKit/UIProcess/API/glib/WebKitWebExtensionContextPrivate.h
+@@ -26,7 +26,7 @@
+ #include "WebKitWebExtensionContext.h"
+ #include <wtf/RefPtr.h>
+ 
+-#if ENABLE(WK_WEB_EXTENSIONS)
++#if (ENABLE(WK_WEB_EXTENSIONS) && !USE(SUMMIT_EXTENSIONS))
+ 
+ RefPtr<WebKit::WebExtensionContext> webkitWebExtensionContextToImpl(WebKitWebExtensionContext*);
+ 
+diff --git a/Source/WebKit/UIProcess/API/glib/WebKitWebExtensionInternal.h b/Source/WebKit/UIProcess/API/glib/WebKitWebExtensionInternal.h
+index 3a5a34118ffd77eb8df75bbc8d2085a06a5e61ef..22a90cfc206d58cc72888ad3283d41908f4667e2 100644
+--- a/Source/WebKit/UIProcess/API/glib/WebKitWebExtensionInternal.h
++++ b/Source/WebKit/UIProcess/API/glib/WebKitWebExtensionInternal.h
+@@ -19,7 +19,7 @@
+ 
+ #pragma once
+ 
+-#if ENABLE(WK_WEB_EXTENSIONS)
++#if (ENABLE(WK_WEB_EXTENSIONS) && !USE(SUMMIT_EXTENSIONS))
+ 
+ #include "WebKitWebExtension.h"
+ #include <WebKit/WKBase.h>
+diff --git a/Source/WebKit/UIProcess/API/glib/WebKitWebExtensionMatchPattern.cpp b/Source/WebKit/UIProcess/API/glib/WebKitWebExtensionMatchPattern.cpp
+index 43f6b13b27a5db417b64aff98533eb440e3a48d6..77911ea6994cb8565c5e2060e94ba6a58d0e2a2b 100644
+--- a/Source/WebKit/UIProcess/API/glib/WebKitWebExtensionMatchPattern.cpp
++++ b/Source/WebKit/UIProcess/API/glib/WebKitWebExtensionMatchPattern.cpp
+@@ -42,7 +42,7 @@ using namespace WebKit;
+  * Since: 2.48
+  */
+ struct _WebKitWebExtensionMatchPattern {
+-#if ENABLE(WK_WEB_EXTENSIONS)
++#if (ENABLE(WK_WEB_EXTENSIONS) && !USE(SUMMIT_EXTENSIONS))
+     explicit _WebKitWebExtensionMatchPattern(RefPtr<WebExtensionMatchPattern>&& matchPattern)
+         : matchPattern(WTF::move(matchPattern))
+     {
+@@ -65,7 +65,7 @@ struct _WebKitWebExtensionMatchPattern {
+ 
+ G_DEFINE_BOXED_TYPE(WebKitWebExtensionMatchPattern, webkit_web_extension_match_pattern, webkit_web_extension_match_pattern_ref, webkit_web_extension_match_pattern_unref)
+ 
+-#if ENABLE(WK_WEB_EXTENSIONS)
++#if (ENABLE(WK_WEB_EXTENSIONS) && !USE(SUMMIT_EXTENSIONS))
+ 
+ /**
+  * webkit_web_extension_match_pattern_register_custom_url_scheme:
+diff --git a/Source/WebKit/UIProcess/API/glib/WebKitWebExtensionMatchPatternPrivate.h b/Source/WebKit/UIProcess/API/glib/WebKitWebExtensionMatchPatternPrivate.h
+index bfe8bb3d678cbd6c171c3cfe168e89640eeb2d5a..33944a0b6424207cc488217e9591486512becf78 100644
+--- a/Source/WebKit/UIProcess/API/glib/WebKitWebExtensionMatchPatternPrivate.h
++++ b/Source/WebKit/UIProcess/API/glib/WebKitWebExtensionMatchPatternPrivate.h
+@@ -27,7 +27,7 @@
+ 
+ typedef struct _WebKitWebExtensionMatchPattern WebKitWebExtensionMatchPattern;
+ 
+-#if ENABLE(WK_WEB_EXTENSIONS)
++#if (ENABLE(WK_WEB_EXTENSIONS) && !USE(SUMMIT_EXTENSIONS))
+ 
+ WebKitWebExtensionMatchPattern* webkitWebExtensionMatchPatternCreate(Ref<WebKit::WebExtensionMatchPattern>&);
+ WebKitWebExtensionMatchPattern* webkitWebExtensionMatchPatternCreate(const RefPtr<WebKit::WebExtensionMatchPattern>&);
+diff --git a/Source/WebKit/UIProcess/API/glib/WebKitWebExtensionPrivate.h b/Source/WebKit/UIProcess/API/glib/WebKitWebExtensionPrivate.h
+index c31803950d4d66cc02796e2cd192d50bb31994e5..640849f11ec62305d51527982cce3b9fd06dbaec 100644
+--- a/Source/WebKit/UIProcess/API/glib/WebKitWebExtensionPrivate.h
++++ b/Source/WebKit/UIProcess/API/glib/WebKitWebExtensionPrivate.h
+@@ -23,7 +23,7 @@
+ #include "WebKitWebExtension.h"
+ #include <wtf/RefPtr.h>
+ 
+-#if ENABLE(WK_WEB_EXTENSIONS)
++#if (ENABLE(WK_WEB_EXTENSIONS) && !USE(SUMMIT_EXTENSIONS))
+ 
+ RefPtr<WebKit::WebExtension> webkitWebExtensionToImpl(WebKitWebExtension*);
+ 
+diff --git a/Source/WebKit/UIProcess/API/glib/WebKitWebView.cpp b/Source/WebKit/UIProcess/API/glib/WebKitWebView.cpp
+index 997b8ca09f58c40ae9180136cbd2e9cdcc669d2c..82a7da8692750c4045465e9c1801cab6997a6460 100644
+--- a/Source/WebKit/UIProcess/API/glib/WebKitWebView.cpp
++++ b/Source/WebKit/UIProcess/API/glib/WebKitWebView.cpp
+@@ -139,7 +139,7 @@
+ #include "WebKitJavascriptResultPrivate.h"
+ #endif
+ 
+-#if ENABLE(WK_WEB_EXTENSIONS)
++#if (ENABLE(WK_WEB_EXTENSIONS) && !USE(SUMMIT_EXTENSIONS))
+ #include "WebKitWebExtensionContextPrivate.h"
+ #endif
+ 
+@@ -271,7 +271,7 @@ enum {
+     PROP_PAGE_ICONS,
+ #endif
+ 
+-#if ENABLE(WK_WEB_EXTENSIONS)
++#if (ENABLE(WK_WEB_EXTENSIONS) && !USE(SUMMIT_EXTENSIONS))
+     PROP_WEB_EXTENSION_CONTEXT,
+ #endif
+ 
+@@ -464,7 +464,7 @@ struct _WebKitWebViewPrivate {
+ #if ENABLE(WEBXR) && USE(OPENXR)
+     bool isImmersiveModeEnabled;
+ #endif
+-#if ENABLE(WK_WEB_EXTENSIONS)
++#if (ENABLE(WK_WEB_EXTENSIONS) && !USE(SUMMIT_EXTENSIONS))
+     GWeakPtr<WebKitWebExtensionContext> webExtensionContext;
+ #endif
+ };
+@@ -736,7 +736,7 @@ static WebKitFaviconDatabase* webkitWebViewGetFaviconDatabase(WebKitWebView* web
+ }
+ #endif // PLATFORM(GTK) || ENABLE(2021_GLIB_API)
+ 
+-#if ENABLE(WK_WEB_EXTENSIONS)
++#if (ENABLE(WK_WEB_EXTENSIONS) && !USE(SUMMIT_EXTENSIONS))
+ WebKitWebExtensionContext* webkitWebViewGetWebExtensionContext(WebKitWebView *webView)
+ {
+     return webView->priv->webExtensionContext.get();
+@@ -916,7 +916,7 @@ static Ref<API::PageConfiguration> webkitWebViewCreatePageConfiguration(WebKitWe
+         break;
+     }
+ 
+-#if ENABLE(WK_WEB_EXTENSIONS)
++#if (ENABLE(WK_WEB_EXTENSIONS) && !USE(SUMMIT_EXTENSIONS))
+     if (WebKitWebExtensionContext *ctx = webkitWebViewGetWebExtensionContext(webView); priv->webExtensionMode != WEBKIT_WEB_EXTENSION_MODE_NONE && ctx) {
+         RefPtr<WebExtensionContext> context = webkitWebExtensionContextToImpl(ctx);
+         pageConfiguration->setCrossOriginAccessControlCheckEnabled(false);
+@@ -1051,7 +1051,7 @@ static void webkitWebViewConstructed(GObject* object)
+     }
+ #endif
+ 
+-#if ENABLE(WK_WEB_EXTENSIONS)
++#if (ENABLE(WK_WEB_EXTENSIONS) && !USE(SUMMIT_EXTENSIONS))
+     if (!priv->websitePolicies && priv->webExtensionMode != WEBKIT_WEB_EXTENSION_MODE_NONE)
+         priv->websitePolicies = adoptGRef(webkit_website_policies_new_with_policies("autoplay", WEBKIT_AUTOPLAY_ALLOW, nullptr));
+ #endif
+@@ -1195,7 +1195,7 @@ static void webkitWebViewSetProperty(GObject* object, guint propId, const GValue
+     case PROP_DEFAULT_CONTENT_SECURITY_POLICY:
+         webView->priv->defaultContentSecurityPolicy = UTF8CString::unsafeFromUTF8(g_value_get_string(value));
+         break;
+-#if ENABLE(WK_WEB_EXTENSIONS)
++#if (ENABLE(WK_WEB_EXTENSIONS) && !USE(SUMMIT_EXTENSIONS))
+     case PROP_WEB_EXTENSION_CONTEXT:
+         webView->priv->webExtensionContext.reset(static_cast<WebKitWebExtensionContext*>(g_value_get_object(value)));
+         break;
+@@ -1327,7 +1327,7 @@ static void webkitWebViewGetProperty(GObject* object, guint propId, GValue* valu
+         g_value_set_boxed(value, webkit_web_view_get_page_icons(webView));
+         break;
+ #endif
+-#if ENABLE(WK_WEB_EXTENSIONS)
++#if (ENABLE(WK_WEB_EXTENSIONS) && !USE(SUMMIT_EXTENSIONS))
+     case PROP_WEB_EXTENSION_CONTEXT:
+         g_value_set_object(value, webkitWebViewGetWebExtensionContext(webView));
+         break;
+@@ -1926,7 +1926,7 @@ static void webkit_web_view_class_init(WebKitWebViewClass* webViewClass)
+         FALSE,
+         WEBKIT_PARAM_READABLE);
+ 
+-#if ENABLE(WK_WEB_EXTENSIONS)
++#if (ENABLE(WK_WEB_EXTENSIONS) && !USE(SUMMIT_EXTENSIONS))
+     /**
+      * WebKitWebView:web-extension-context:
+      *
+diff --git a/Source/WebKit/UIProcess/API/glib/WebKitWebViewPrivate.h b/Source/WebKit/UIProcess/API/glib/WebKitWebViewPrivate.h
+index 8290b71c2b9826d8aa10eaff0449e05f814fbbf4..a7652831ac02c2e905f0b0ba7480909162c2c740 100644
+--- a/Source/WebKit/UIProcess/API/glib/WebKitWebViewPrivate.h
++++ b/Source/WebKit/UIProcess/API/glib/WebKitWebViewPrivate.h
+@@ -35,7 +35,7 @@
+ #include "WebEvent.h"
+ #include "WebHitTestResultData.h"
+ #include "WebImage.h"
+-#if ENABLE(WK_WEB_EXTENSIONS)
++#if (ENABLE(WK_WEB_EXTENSIONS) && !USE(SUMMIT_EXTENSIONS))
+ #include "WebKitWebExtensionContext.h"
+ #endif
+ #include "WebKitWebView.h"
+@@ -145,6 +145,6 @@ void webkitWebViewSetIsImmersiveModeEnabled(WebKitWebView*, bool);
+ 
+ void webkitWebViewLoadServiceWorker(WebKitWebView*, const URL&, bool usingModules, CompletionHandler<void(bool success)>&&);
+ 
+-#if ENABLE(WK_WEB_EXTENSIONS)
++#if (ENABLE(WK_WEB_EXTENSIONS) && !USE(SUMMIT_EXTENSIONS))
+ WebKitWebExtensionContext *webkitWebViewGetWebExtensionContext(WebKitWebView*);
+ #endif
 diff --git a/Source/WebKit/UIProcess/API/glib/webkit.h.in b/Source/WebKit/UIProcess/API/glib/webkit.h.in
 index 6b1ae2f744b6be6310c2bd87f26969ec2ee9ec9e..3853572f1cdb397a5d0b673d68adc9d68755ac18 100644
 --- a/Source/WebKit/UIProcess/API/glib/webkit.h.in
@@ -169757,13 +170097,14 @@ index 0000000000000000000000000000000000000000..c1df4004f2e7f7571aeca829225161bb
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && USE(SUMMIT_EXTENSIONS)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionDownloadsHaiku.h b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionDownloadsHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..4582fcffbebafd093e6385e105712d9f79c5ac14
+index 0000000000000000000000000000000000000000..40c97d504f4e0ae579ba248bfdbe53b8809a3493
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionDownloadsHaiku.h
-@@ -0,0 +1,130 @@
+@@ -0,0 +1,131 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#pragma once
 +#if ENABLE(WK_WEB_EXTENSIONS) && USE(SUMMIT_EXTENSIONS)
++#include "SummitHaikuTypes.h"
 +#include "WebExtensionEventListenerType.h"
 +#include <expected>
 +#include <memory>
@@ -173331,7 +173672,7 @@ index 0000000000000000000000000000000000000000..1f5def2889eaf933a68c6bc922ecac05
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && USE(SUMMIT_EXTENSIONS)
 diff --git a/Source/WebKit/UIProcess/Extensions/wpe/NativeBrowserCommandWPE.cpp b/Source/WebKit/UIProcess/Extensions/wpe/NativeBrowserCommandWPE.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..4e2a0539240e0f28a9b4266b81c111b3e4f76935
+index 0000000000000000000000000000000000000000..1dc51608bc8e184db211112b57aae6cf98d6f3c2
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/wpe/NativeBrowserCommandWPE.cpp
 @@ -0,0 +1,138 @@
@@ -173460,12 +173801,12 @@ index 0000000000000000000000000000000000000000..4e2a0539240e0f28a9b4266b81c111b3
 +    // The sink runs on the main thread, as BMessenger delivery to a window does.
 +    auto text = json->toJSONString().utf8();
 +    if (isMainThread()) {
-+        s_sink(text.data(), s_sinkUserData);
++        s_sink(text.legacyCStringPointer(), s_sinkUserData);
 +        return B_OK;
 +    }
 +    RunLoop::mainSingleton().dispatch([text = WTF::move(text)] {
 +        if (s_sink)
-+            s_sink(text.data(), s_sinkUserData);
++            s_sink(text.legacyCStringPointer(), s_sinkUserData);
 +    });
 +    return B_OK;
 +}
@@ -173603,6 +173944,23 @@ index c03dffe8fbd2d38590bd977f4a9707a518a2f1f6..2d966db318a8bc9b8880c8622c4eae44
  
  #include "Logging.h"
  #include "WebExtensionLocalization.h"
+diff --git a/Source/WebKit/UIProcess/Extensions/wpe/WebKitContext.h b/Source/WebKit/UIProcess/Extensions/wpe/WebKitContext.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..05d162b70f2067b26a2fa012c58999184deb2557
+--- /dev/null
++++ b/Source/WebKit/UIProcess/Extensions/wpe/WebKitContext.h
+@@ -0,0 +1,11 @@
++/*
++ * Copyright (C) 2026 air/OS contributors. SPDX-License-Identifier: BSD-2-Clause
++ */
++
++#pragma once
++
++// Summit: on WPE, the shared WebExtensions code includes the Haiku API header
++// WebKitContext.h only for its message codes and the Haiku types it uses;
++// this stands in for it.
++#include "SummitHaikuTypes.h"
++#include "WebKitBrowserCommandCodes.h"
 diff --git a/Source/WebKit/UIProcess/Gamepad/UIGamepadProvider.cpp b/Source/WebKit/UIProcess/Gamepad/UIGamepadProvider.cpp
 index e3ade8843975adf85b92287882013a6884a0fa4d..5ce01b59a92f1f461587586136454070a08f625d 100644
 --- a/Source/WebKit/UIProcess/Gamepad/UIGamepadProvider.cpp
@@ -189552,7 +189910,7 @@ index 0000000000000000000000000000000000000000..d20c1ab236093199423373a60eba66d4
 +#endif // ENABLE(WK_WEB_EXTENSIONS)
 diff --git a/Source/WebKit/UIProcess/haiku/WebExtensionTimingHaiku.h b/Source/WebKit/UIProcess/haiku/WebExtensionTimingHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..4ca74790360f4fd0cc5f56ef8825717626294c3d
+index 0000000000000000000000000000000000000000..11b5afa117ef334f5dbf1c2470f0133aa8740b8c
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebExtensionTimingHaiku.h
 @@ -0,0 +1,56 @@
@@ -189582,7 +189940,7 @@ index 0000000000000000000000000000000000000000..4ca74790360f4fd0cc5f56ef88257176
 +
 +#pragma once
 +
-+#if PLATFORM(HAIKU)
++#if PLATFORM(HAIKU) || USE(SUMMIT_EXTENSIONS)
 +
 +#include "SummitHaikuTypes.h"
 +#include <cstdio>
@@ -203609,7 +203967,7 @@ index 77c4db0966a28ff00141af56b68d0fd16a6a826b..4d8372f4f47e8b05e804aa2bb49fbcf9
      if (m_listeners.isEmpty())
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIAction.cpp b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIAction.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..d40ade01a5381eddd7a6f4a00aa2abcd46beec95
+index 0000000000000000000000000000000000000000..18e32a8796895846f358291a1e42d70f5f6bb097
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIAction.cpp
 @@ -0,0 +1,498 @@
@@ -203686,21 +204044,21 @@ index 0000000000000000000000000000000000000000..d40ade01a5381eddd7a6f4a00aa2abcd
 +static std::expected<JSObjectRef, String> actionIconObject(JSContextRef context, JSValueRef value)
 +{
 +    if (!value || !JSValueIsObject(context, value))
-+        return std::unexpected("icon details must be a dictionary"_s);
++        return std::unexpected(String("icon details must be a dictionary"_s));
 +    auto object = JSValueToObject(context, value, nullptr);
 +    if (JSObjectIsFunction(context, object))
-+        return std::unexpected("icon details must be a dictionary"_s);
++        return std::unexpected(String("icon details must be a dictionary"_s));
 +    auto* global = toJS(context);
 +    JSC::JSLockHolder lock(global);
 +    auto& vm = global->vm();
 +    auto scope = DECLARE_TOP_EXCEPTION_SCOPE(vm);
 +    bool array = JSC::isArray(global, toJS(global, value));
 +    if (scope.exception()) {
-+        TRY_CLEAR_EXCEPTION(scope, std::unexpected("icon dictionary type could not be read"_s));
-+        return std::unexpected("icon dictionary type could not be read"_s);
++        TRY_CLEAR_EXCEPTION(scope, std::unexpected(String("icon dictionary type could not be read"_s)));
++        return std::unexpected(String("icon dictionary type could not be read"_s));
 +    }
 +    if (array)
-+        return std::unexpected("icon details must be a dictionary"_s);
++        return std::unexpected(String("icon details must be a dictionary"_s));
 +    return object;
 +}
 +
@@ -203716,13 +204074,13 @@ index 0000000000000000000000000000000000000000..d40ade01a5381eddd7a6f4a00aa2abcd
 +    auto* nativeObject = toJS(object);
 +    nativeObject->methodTable()->getOwnPropertyNames(nativeObject, global, names, JSC::DontEnumPropertiesMode::Exclude);
 +    if (scope.exception()) {
-+        TRY_CLEAR_EXCEPTION(scope, std::unexpected("icon dimensions could not be read"_s));
-+        return std::unexpected("icon dimensions could not be read"_s);
++        TRY_CLEAR_EXCEPTION(scope, std::unexpected(String("icon dimensions could not be read"_s)));
++        return std::unexpected(String("icon dimensions could not be read"_s));
 +    }
 +    Vector<String> result;
 +    for (auto& name : names) {
 +        if (result.size() >= maximumWebExtensionActionIconRepresentations)
-+            return std::unexpected("too many icon representations"_s);
++            return std::unexpected(String("too many icon representations"_s));
 +        result.append(name.string());
 +    }
 +    return result;
@@ -203743,7 +204101,7 @@ index 0000000000000000000000000000000000000000..d40ade01a5381eddd7a6f4a00aa2abcd
 +    constexpr size_t maximumImageBytes = 64 * 1024 * 1024;
 +    if (image.size().isEmpty() || image.data().isDetached() || image.data().byteLength() > maximumImageBytes
 +        || image.data().length() != uint64_t(image.width()) * image.height() * 4)
-+        return std::unexpected("ImageData is detached, invalid or too large"_s);
++        return std::unexpected(String("ImageData is detached, invalid or too large"_s));
 +    Ref pixels = image.byteArrayPixelBuffer();
 +#if USE(SKIA)
 +    // Encode straight ImageData pixels directly. Painting into an 8-bit
@@ -203754,28 +204112,28 @@ index 0000000000000000000000000000000000000000..d40ade01a5381eddd7a6f4a00aa2abcd
 +    RefPtr buffer = WebCore::ImageBuffer::create(image.size(), WebCore::RenderingMode::Unaccelerated,
 +        WebCore::RenderingPurpose::Unspecified, 1, WebCore::ColorSpace::SRGB(), WebCore::PixelFormat::BGRA8);
 +    if (!buffer)
-+        return std::unexpected("the icon image buffer could not be created"_s);
++        return std::unexpected(String("the icon image buffer could not be created"_s));
 +    buffer->putPixelBuffer(pixels.get(), WebCore::IntRect { { }, image.size() });
 +    auto encoded = WebCore::encodeDataURL(WTF::move(buffer), "image/png"_s);
 +#endif
 +    if (!encoded.startsWith("data:image/png;base64,"_s) || encoded.length() > maximumWebExtensionActionIconJSONLength)
-+        return std::unexpected("the icon ImageData could not be encoded"_s);
++        return std::unexpected(String("the icon ImageData could not be encoded"_s));
 +    return encoded;
 +}
 +
 +static std::expected<String, String> actionIconPath(JSContextRef context, JSValueRef value, const URL& baseURL)
 +{
 +    if (!JSValueIsString(context, value))
-+        return std::unexpected("an icon path must be a string"_s);
++        return std::unexpected(String("an icon path must be a string"_s));
 +    JSRetainPtr text(Adopt, JSValueToStringCopy(context, value, nullptr));
 +    auto path = toString(text.get());
 +    if (path.isEmpty() || path.contains('\0') || path.length() > maximumWebExtensionActionIconJSONLength)
-+        return std::unexpected("invalid icon path"_s);
++        return std::unexpected(String("invalid icon path"_s));
 +    if (path.startsWithIgnoringASCIICase("data:"_s))
 +        return makeString("data:"_s, path.substring(5));
 +    URL url { baseURL, path };
 +    if (!baseURL.isValid() || !url.isValid() || !protocolHostAndPortAreEqual(url, baseURL))
-+        return std::unexpected("an icon path must name this extension's resources"_s);
++        return std::unexpected(String("an icon path must name this extension's resources"_s));
 +    return url.path().toString();
 +}
 +
@@ -203787,8 +204145,8 @@ index 0000000000000000000000000000000000000000..d40ade01a5381eddd7a6f4a00aa2abcd
 +        return icons;
 +    auto add = [&](const String& dimension, JSValueRef source) -> std::expected<void, String> {
 +        if (!isValidWebExtensionActionIconDimension(dimension))
-+            return std::unexpected("icon dimensions must be positive integer keys"_s);
-+        std::expected<String, String> path = std::unexpected("an icon image must be an ImageData object"_s);
++            return std::unexpected(String("icon dimensions must be positive integer keys"_s));
++        std::expected<String, String> path = std::unexpected(String("an icon image must be an ImageData object"_s));
 +        if (imageData) {
 +            if (RefPtr image = actionImageData(context, source))
 +                path = actionImageDataURL(*image);
@@ -203797,7 +204155,7 @@ index 0000000000000000000000000000000000000000..d40ade01a5381eddd7a6f4a00aa2abcd
 +        if (!path)
 +            return std::unexpected(path.error());
 +        if (path->length() > maximumWebExtensionActionIconJSONLength - totalPathLength)
-+            return std::unexpected("icon data exceeds the supported message size"_s);
++            return std::unexpected(String("icon data exceeds the supported message size"_s));
 +        totalPathLength += path->length();
 +        icons->setString(dimension, *path);
 +        return { };
@@ -203818,7 +204176,7 @@ index 0000000000000000000000000000000000000000..d40ade01a5381eddd7a6f4a00aa2abcd
 +        JSValueRef exception = nullptr;
 +        Protected<JSValueRef> source(JSContextGetGlobalContext(context), JSObjectGetProperty(context, *object, toJSString(name).get(), &exception));
 +        if (exception)
-+            return std::unexpected("an icon property getter threw an exception"_s);
++            return std::unexpected(String("an icon property getter threw an exception"_s));
 +        if (auto added = add(name, source.get()); !added)
 +            return std::unexpected(added.error());
 +    }
@@ -216817,7 +217175,7 @@ index 0000000000000000000000000000000000000000..2084e710404275e00c2a4eda7e9e4672
 +#endif
 diff --git a/Source/WebKit/WebProcess/Extensions/Bindings/JSWebExtensionActionDetails.h b/Source/WebKit/WebProcess/Extensions/Bindings/JSWebExtensionActionDetails.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..692bb73d9edfc46fdfa2bf5a6acb1f7801819a36
+index 0000000000000000000000000000000000000000..e7881a14d18c241255830a10adaca7f0ada57a00
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/Extensions/Bindings/JSWebExtensionActionDetails.h
 @@ -0,0 +1,21 @@
@@ -216833,11 +217191,11 @@ index 0000000000000000000000000000000000000000..692bb73d9edfc46fdfa2bf5a6acb1f78
 +    if (!value || JSValueIsUndefined(context, value))
 +        return std::optional<WebExtensionTabIdentifier> { };
 +    if (!JSValueIsNumber(context, value))
-+        return std::unexpected("tabId must be a valid safe integer identifier"_s);
++        return std::unexpected(String("tabId must be a valid safe integer identifier"_s));
 +    auto number = JSValueToNumber(context, value, nullptr);
 +    auto tab = toWebExtensionTabIdentifier(number);
 +    if (!isValid(tab) || number > 9007199254740991.0)
-+        return std::unexpected("tabId must be a valid safe integer identifier"_s);
++        return std::unexpected(String("tabId must be a valid safe integer identifier"_s));
 +    return tab;
 +}
 +}
@@ -216991,7 +217349,7 @@ index 0000000000000000000000000000000000000000..928b5089cc6ae1383f4cde7956e180da
 +#endif
 diff --git a/Source/WebKit/WebProcess/Extensions/Bindings/JSWebExtensionMenuItemParameters.cpp b/Source/WebKit/WebProcess/Extensions/Bindings/JSWebExtensionMenuItemParameters.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..3e2c4a44dd874fe381eeae101b3bdbc219513617
+index 0000000000000000000000000000000000000000..ebefe4797c238b73cde7ab4fd2d0bd03e67eaaf9
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/Extensions/Bindings/JSWebExtensionMenuItemParameters.cpp
 @@ -0,0 +1,287 @@
@@ -217045,8 +217403,8 @@ index 0000000000000000000000000000000000000000..3e2c4a44dd874fe381eeae101b3bdbc2
 +    auto scope = DECLARE_TOP_EXCEPTION_SCOPE(vm);
 +    bool result = JSC::isArray(globalObject, toJS(globalObject, value));
 +    if (scope.exception()) {
-+        TRY_CLEAR_EXCEPTION(scope, std::unexpected("menu property type could not be read"_s));
-+        return std::unexpected("menu property type could not be read"_s);
++        TRY_CLEAR_EXCEPTION(scope, std::unexpected(String("menu property type could not be read"_s)));
++        return std::unexpected(String("menu property type could not be read"_s));
 +    }
 +    return result;
 +}
@@ -217062,8 +217420,8 @@ index 0000000000000000000000000000000000000000..3e2c4a44dd874fe381eeae101b3bdbc2
 +    // properties, while propagating a proxy or prototype enumeration failure.
 +    toJS(object)->getPropertyNames(globalObject, names, JSC::DontEnumPropertiesMode::Exclude);
 +    if (scope.exception()) {
-+        TRY_CLEAR_EXCEPTION(scope, std::unexpected("menu properties could not be read"_s));
-+        return std::unexpected("menu properties could not be read"_s);
++        TRY_CLEAR_EXCEPTION(scope, std::unexpected(String("menu properties could not be read"_s)));
++        return std::unexpected(String("menu properties could not be read"_s));
 +    }
 +    Vector<String> result;
 +    for (auto& name : names)
@@ -217149,13 +217507,13 @@ index 0000000000000000000000000000000000000000..3e2c4a44dd874fe381eeae101b3bdbc2
 +std::expected<WebExtensionMenuItemInput, String> parseWebExtensionMenuItemInput(JSContextRef context, JSValueRef value, WebExtensionMenuItemOperation operation, bool manifestVersion3, const URL& baseURL)
 +{
 +    if (!value || !JSValueIsObject(context, value))
-+        return std::unexpected("menu properties must be a dictionary"_s);
++        return std::unexpected(String("menu properties must be a dictionary"_s));
 +    auto isArray = menuIsArray(context, value);
 +    if (!isArray || *isArray)
-+        return std::unexpected("menu properties must be a dictionary"_s);
++        return std::unexpected(String("menu properties must be a dictionary"_s));
 +    auto object = JSValueToObject(context, value, nullptr);
 +    if (JSObjectIsFunction(context, object))
-+        return std::unexpected("menu properties must be a dictionary"_s);
++        return std::unexpected(String("menu properties must be a dictionary"_s));
 +    Protected<JSObjectRef> protectedObject(JSContextGetGlobalContext(context), object);
 +    WebExtensionMenuItemInput result;
 +    Ref properties = JSON::Object::create();
@@ -217166,7 +217524,7 @@ index 0000000000000000000000000000000000000000..3e2c4a44dd874fe381eeae101b3bdbc2
 +        JSValueRef exception = nullptr;
 +        auto field = JSObjectGetProperty(context, object, toJSString(key).get(), &exception);
 +        if (exception)
-+            return std::unexpected("a menu property getter threw an exception"_s);
++            return std::unexpected(String("a menu property getter threw an exception"_s));
 +        if (JSValueIsUndefined(context, field))
 +            continue;
 +        Protected<JSValueRef> protectedField(JSContextGetGlobalContext(context), field);
@@ -217175,7 +217533,7 @@ index 0000000000000000000000000000000000000000..3e2c4a44dd874fe381eeae101b3bdbc2
 +            if (JSValueIsNull(context, field))
 +                continue;
 +            if (!JSValueIsObject(context, field) || !JSObjectIsFunction(context, JSValueToObject(context, field, nullptr)))
-+                return std::unexpected("onclick must be a function or null"_s);
++                return std::unexpected(String("onclick must be a function or null"_s));
 +            result.clickHandler = Protected<JSObjectRef>(JSContextGetGlobalContext(context), JSValueToObject(context, field, nullptr));
 +            continue;
 +        }
@@ -217185,7 +217543,7 @@ index 0000000000000000000000000000000000000000..3e2c4a44dd874fe381eeae101b3bdbc2
 +            continue;
 +        RefPtr converted = menuPropertyValue(context, key, field);
 +        if (!converted)
-+            return std::unexpected("unsupported menu property or invalid JavaScript value"_s);
++            return std::unexpected(String("unsupported menu property or invalid JavaScript value"_s));
 +        if (key == "id"_s)
 +            result.explicitIdentifier = true;
 +        properties->setValue(key, converted.releaseNonNull());
@@ -217208,7 +217566,7 @@ index 0000000000000000000000000000000000000000..3e2c4a44dd874fe381eeae101b3bdbc2
 +        if (std::isfinite(number))
 +            return encodeWebExtensionMenuIdentifier(JSON::Value::create(number).ptr());
 +    }
-+    return std::unexpected("menu identifiers must be nonempty strings or safe integers"_s);
++    return std::unexpected(String("menu identifiers must be nonempty strings or safe integers"_s));
 +}
 +
 +JSValueRef toWebAPIMenuIdentifier(JSContextRef context, const String& nativeKey)
