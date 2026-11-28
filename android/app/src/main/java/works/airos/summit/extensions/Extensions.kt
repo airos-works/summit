@@ -35,7 +35,12 @@ object ExtensionsNative {
 
   /** Engine events (JSON), on the main thread. */
   @JvmStatic fun onEvent(json: String) {
-    Extensions.instance?.onEvent(JSONObject(json))
+    // An exception would otherwise end silently in the engine's JNI call.
+    try {
+      Extensions.instance?.onEvent(JSONObject(json))
+    } catch (e: Exception) {
+      Log.e("Summit", "engine event ${json.take(200)}", e)
+    }
   }
 }
 
@@ -94,6 +99,8 @@ class Extensions(private val context: Context, private val browser: Browser) {
     ready = ExtensionsNative.initialize(sessionHandle, storage.absolutePath, catalog.absolutePath)
     if (!ready) return
     reloadCatalog()
+    // The bookmarks as they are now; their later changes are reported.
+    SummitCore.bookmarkChanges()
     for (extension in installed.toList()) loadInstalled(extension)
   }
 
@@ -243,6 +250,29 @@ class Extensions(private val context: Context, private val browser: Browser) {
       .put("active", active.toString()).put("focused", true))
   }
 
+  // ---------------------------------------------------------------- history and bookmarks
+
+  /** A page was visited (history.onVisited), as air/OS's RecordVisit reports it. */
+  fun historyVisited(url: String) {
+    if (!ready) return
+    val item = SummitCore.historyItem(url)
+    if (item.isNotEmpty()) call(JSONObject().put("op", "historyChanged").put("event", "visited").put("json", item))
+  }
+
+  /** The browser changed the bookmarks: their events to extensions. */
+  fun bookmarksChanged() {
+    if (ready) forwardBookmarkEvents(JSONArray(SummitCore.bookmarkChanges()))
+  }
+
+  private fun forwardBookmarkEvents(events: JSONArray?) {
+    if (events == null) return
+    for (i in 0 until events.length()) {
+      val event = events.getJSONObject(i)
+      call(JSONObject().put("op", "bookmarksChanged").put("event", event.optString("event"))
+        .put("id", event.optString("id")).put("json", event.optString("json")))
+    }
+  }
+
   /**
    * Names the URL the next page made will show (see SummitExtensionsWPE's
    * "pageFor"); true when it is an extension's page, made for that extension.
@@ -351,9 +381,11 @@ class Extensions(private val context: Context, private val browser: Browser) {
   /** An extension asks the browser to change its tabs (the BROWSER_* commands of WebKitContext.h). */
   private fun browserCommand(fields: JSONObject) {
     val identifier = fields.string("identifier")
-    fun respond(status: String, pages: List<Long> = emptyList(), error: String = "") {
-      call(JSONObject().put("op", "respond").put("identifier", identifier).put("status", status)
-        .put("error", error).put("pages", JSONArray(pages.map { it.toString() })))
+    fun respond(status: String, pages: List<Long> = emptyList(), error: String = "", data: String = "") {
+      val request = JSONObject().put("op", "respond").put("identifier", identifier).put("status", status)
+        .put("error", error).put("pages", JSONArray(pages.map { it.toString() }))
+      if (data.isNotEmpty()) request.put("data", data)
+      call(request)
     }
     fun tabsNamed(field: String): List<Tab> {
       val ids = fields.optJSONArray("${field}_identifier")?.let { a -> (0 until a.length()).map { a.optString(it).toLongOrNull() ?: 0 } }
@@ -394,6 +426,20 @@ class Extensions(private val context: Context, private val browser: Browser) {
       BrowserCodes.BROWSER_GO_FORWARD -> {
         pageTabs.firstOrNull()?.page?.goForward()
         respond("B_OK")
+      }
+      // chrome.history and chrome.bookmarks, answered by the shared core as on air/OS.
+      BrowserCodes.BROWSER_HISTORY, BrowserCodes.BROWSER_BOOKMARKS -> {
+        val kind = if (fields.int("command") == BrowserCodes.BROWSER_HISTORY) "history" else "bookmarks"
+        val answer = JSONObject(SummitCore.browserData(kind, fields.string("method"), fields.string("arguments").ifEmpty { "{}" }))
+        if (works.airos.summit.BuildConfig.DEBUG) Log.d(TAG, "$kind.${fields.string("method")}: ${answer.toString().take(300)}")
+        val history = answer.optJSONArray("historyEvents") ?: JSONArray()
+        for (i in 0 until history.length()) {
+          val event = history.getJSONObject(i)
+          call(JSONObject().put("op", "historyChanged").put("event", event.optString("event")).put("json", event.optString("json")))
+        }
+        // Extensions hear of bookmark changes before the answer, as in Chrome.
+        forwardBookmarkEvents(answer.optJSONArray("bookmarkEvents"))
+        respond(answer.optString("status", "B_ERROR"), error = answer.optString("error"), data = answer.optString("data"))
       }
       else -> respond("B_NOT_SUPPORTED", error = "not supported on Android yet")
     }

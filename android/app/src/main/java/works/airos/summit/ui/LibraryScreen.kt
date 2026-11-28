@@ -79,7 +79,10 @@ fun LibraryScreen(browser: Browser, onOpen: (String) -> Unit, onDone: () -> Unit
           }
           if (section != 1) {
             IconButton(onClick = {
-              if (section == 0) SummitCore.toggleBookmark(page.url, page.title) else SummitCore.removeHistory(page.url)
+              if (section == 0) {
+                SummitCore.toggleBookmark(page.url, page.title)
+                browser.extensions.bookmarksChanged()
+              } else SummitCore.removeHistory(page.url)
               revision++
             }) { Icon(SummitIcons.Close, "Remove") }
           }

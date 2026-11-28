@@ -169,15 +169,27 @@ How it fits together on WPE:
   (for example `SUMMIT_TRACE_EXTENSION_CONSOLE=1`, extension pages' console
   in logcat).
 
-Working on the emulator: installing uBlock Origin from its XPI (approval
-dialog), loading it at startup, its action in the page menu, and its popup as a
-tab. Still to do:
+- Action popups: the engine asks the app to show one (an event to the action
+  listener); the app makes a page for it (`pageFor` with purpose `popup`),
+  hands it back (`attachPopup`, which makes it the action's popup for the tab
+  as `addPopupPage` does on Haiku) and shows it in a bottom sheet. It is no
+  tab, so the extension's active tab stays the page. Either side closes it
+  (`popupClosed` from the app).
+- Extension pages report the mobile browsers' user agents on Android
+  (Firefox for Android, Chrome for Android), so packages take their mobile
+  layouts.
 
-1. Action popups as a bottom sheet instead of a tab, and the stores' "Add to
-   Summit" card (`core/StoreOffer`).
+Working on the emulator with uBlock Origin 1.77.4: installing from its XPI
+(approval dialog), loading at startup, blocking (webRequest, surrogates,
+cosmetic filtering), the badge count, the popup in a sheet with its mobile
+layout, and its dashboard in a tab. Still to do:
+
+1. The stores' "Add to Summit" card (`core/StoreOffer`) and installing from
+   the stores' pages.
 2. The Haiku-only parts, each marked `FIXME (Summit, Android)`: notifications,
    `tabs.captureVisibleTab`, debugger input, `cookies.onChanged` on libsoup,
-   idle state, opening downloads. Native messaging has no Android counterpart.
+   idle state, opening downloads. Native messaging has
+   no Android counterpart.
 3. Safari web extensions (`.appex` bundles) as on air/OS.
 
 ## Status and plan

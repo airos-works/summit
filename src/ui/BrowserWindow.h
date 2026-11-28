@@ -63,6 +63,7 @@ class BookmarksBar;
 class AddressSuggestions;
 class FaviconCache;
 class SharedProfile;
+struct BrowserDataAnswer;
 class ProtocolHandlers;
 class PageTranslator;
 struct ExtensionStoreItem;
@@ -787,6 +788,8 @@ private:
     void HistoryCommand(const BMessage& message, uint64 identifier);
     // An extension's chrome.bookmarks call (B_WEBKIT_BROWSER_BOOKMARKS).
     void BookmarksCommand(const BMessage& message, uint64 identifier);
+    // The reply to an extension's history or bookmarks command (core/ExtensionBrowserData).
+    void RespondWithBrowserData(uint64 identifier, const BrowserDataAnswer& answer);
     // An extension's chrome.search call (B_WEBKIT_BROWSER_SEARCH): searches in
     // tab (the one named, else the active one), a new tab or a new window.
     void SearchCommand(const BMessage& message, uint64 identifier, Tab* tab);

@@ -174356,10 +174356,10 @@ index 0000000000000000000000000000000000000000..1f5def2889eaf933a68c6bc922ecac05
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && USE(SUMMIT_EXTENSIONS)
 diff --git a/Source/WebKit/UIProcess/Extensions/wpe/ExtensionActionPopupWPE.cpp b/Source/WebKit/UIProcess/Extensions/wpe/ExtensionActionPopupWPE.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..c7ad90786c54a8bd54e5a167b4a691bde21b8670
+index 0000000000000000000000000000000000000000..8d042dfa44a03dd858d673591e2c2dd5c0a405c4
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/wpe/ExtensionActionPopupWPE.cpp
-@@ -0,0 +1,154 @@
+@@ -0,0 +1,205 @@
 +/*
 + * Copyright (C) 2026 air/OS contributors. SPDX-License-Identifier: BSD-2-Clause
 + */
@@ -174460,10 +174460,61 @@ index 0000000000000000000000000000000000000000..c7ad90786c54a8bd54e5a167b4a691bd
 +    return m_tab.ptr() == &tab;
 +}
 +
-+void WebExtensionContext::actionOpenPopup(WebPageProxyIdentifier, std::optional<WebExtensionWindowIdentifier>,
-+    std::optional<WebExtensionTabIdentifier>, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&& completion)
++void WebExtensionContext::actionOpenPopup(WebPageProxyIdentifier, std::optional<WebExtensionWindowIdentifier> windowIdentifier,
++    std::optional<WebExtensionTabIdentifier> tabIdentifier, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&& completion)
 +{
-+    completion(toWebExtensionError("action.openPopup()"_s, nullString(), "Popups are not supported here yet."_s));
++    ASSERT(RunLoop::isMain());
++    constexpr auto api = "action.openPopup()"_s;
++    auto reject = [&](const String& message) { completion(toWebExtensionError(api, nullString(), message)); };
++    if ((windowIdentifier && tabIdentifier)
++        || (windowIdentifier && (!isValid(windowIdentifier) || (!isCurrent(windowIdentifier) && windowIdentifier->toUInt64() > 9007199254740991ULL)))
++        || (tabIdentifier && (!isValid(tabIdentifier) || tabIdentifier->toUInt64() > 9007199254740991ULL))) {
++        reject("Invalid popup target."_s);
++        return;
++    }
++    RefPtr controller = extensionController();
++    if (!isLoaded() || !controller) {
++        reject("The extension is no longer loaded."_s);
++        return;
++    }
++    RefPtr<WebExtensionTab> tab;
++    RefPtr<WebExtensionWindow> window;
++    if (tabIdentifier) {
++        tab = getTab(*tabIdentifier);
++        window = tab ? tab->window() : nullptr;
++    } else {
++        window = windowIdentifier && !isCurrent(windowIdentifier) ? getWindow(*windowIdentifier) : focusedWindow();
++        tab = window ? window->activeTab() : nullptr;
++    }
++    if (!window || !window->isOpen() || !window->extensionHasAccess() || !window->isFocused()) {
++        reject("The target browser window is not focused or accessible."_s);
++        return;
++    }
++    if (!tab || !isValidTab(*tab) || !tab->isOpen() || !tab->extensionHasAccess() || window->activeTab().get() != tab.get()) {
++        reject("The popup target is not the active tab."_s);
++        return;
++    }
++    for (auto& context : controller->extensionContexts()) {
++        if (context->m_nativeActionPopup) {
++            reject("Another extension popup is already open."_s);
++            return;
++        }
++    }
++    Ref action = getOrCreateAction(tab.get());
++    if (!action->isEnabled() || !action->presentsPopup()) {
++        reject("The action is disabled or has no popup."_s);
++        return;
++    }
++    // Programmatic presentation neither grants activeTab nor fires onClicked.
++    // The popup counts as presented once the app was asked to show it.
++    Ref popup = ExtensionActionPopupHaiku::create(*this, action, *tab);
++    m_nativeActionPopup = popup.copyRef();
++    if (!popup->start()) {
++        closeNativeActionPopup();
++        reject("The popup could not be shown."_s);
++        return;
++    }
++    completion({ });
 +}
 +
 +void WebExtensionContext::closeNativeActionPopup()
@@ -174725,10 +174776,10 @@ index 0000000000000000000000000000000000000000..f09f93ff184d0096720a65f79d19fc40
 +#endif
 diff --git a/Source/WebKit/UIProcess/Extensions/wpe/NativeBrowserCommandWPE.cpp b/Source/WebKit/UIProcess/Extensions/wpe/NativeBrowserCommandWPE.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..32481883b4053c0bc48fb6b356d1f7e740ae92cf
+index 0000000000000000000000000000000000000000..008a88c7dd29fda527eac56642491617ef7c7833
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/wpe/NativeBrowserCommandWPE.cpp
-@@ -0,0 +1,146 @@
+@@ -0,0 +1,144 @@
 +/*
 + * Copyright (C) 2026 air/OS contributors
 + *
@@ -174859,12 +174910,10 @@ index 0000000000000000000000000000000000000000..32481883b4053c0bc48fb6b356d1f7e7
 +        return B_BAD_PORT_ID;
 +    Ref json = message->toJSON();
 +    json->setString("target"_s, String::number(identifier));
-+    // The sink runs on the main thread, as BMessenger delivery to a window does.
++    // The sink runs on the main thread, later, as BMessenger delivery to a
++    // window does: the sender finishes first (the command broker registers a
++    // command after sending it, so an answer given inside the send was lost).
 +    auto text = json->toJSONString().utf8();
-+    if (isMainThread()) {
-+        s_sink(text.legacyCStringPointer(), s_sinkUserData);
-+        return B_OK;
-+    }
 +    RunLoop::mainSingleton().dispatch([text = WTF::move(text)] {
 +        if (s_sink)
 +            s_sink(text.legacyCStringPointer(), s_sinkUserData);
@@ -175006,10 +175055,10 @@ index 0000000000000000000000000000000000000000..714e6e4bde757d6847d3835a65165ae6
 +#endif
 diff --git a/Source/WebKit/UIProcess/Extensions/wpe/SummitExtensionsWPE.cpp b/Source/WebKit/UIProcess/Extensions/wpe/SummitExtensionsWPE.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..bc1692eb7b920cf1c0c60060d6e47c6df942ddb7
+index 0000000000000000000000000000000000000000..e4c5659ed0a0956c6e7f046ca08c0801e6375c13
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/wpe/SummitExtensionsWPE.cpp
-@@ -0,0 +1,324 @@
+@@ -0,0 +1,347 @@
 +/*
 + * Copyright (C) 2026 air/OS contributors. SPDX-License-Identifier: BSD-2-Clause
 + */
@@ -175283,6 +175332,29 @@ index 0000000000000000000000000000000000000000..bc1692eb7b920cf1c0c60060d6e47c6d
 +                return ExtensionActionPopupHaiku::attach(*context, candidate) ? "{}"_s : "{\"error\":\"no popup\"}"_s;
 +        }
 +        return "{\"error\":\"no page\"}"_s;
++    } else if (op == "historyChanged"_s) {
++        // BWebKitContext::NotifyHistoryChanged: "visited" or "removed", with
++        // the history item or what was removed (core/ExtensionBrowserData).
++        auto event = request.getString("event"_s);
++        if (event != "visited"_s && event != "removed"_s)
++            return "{\"error\":\"bad event\"}"_s;
++        h.controller->didChangeHistoryHaiku(event == "visited"_s ? WebExtensionEventListenerType::HistoryOnVisited : WebExtensionEventListenerType::HistoryOnVisitRemoved,
++            request.getString("json"_s));
++    } else if (op == "bookmarksChanged"_s) {
++        // BWebKitContext::NotifyBookmarksChanged (BookmarkChangeReporter's events).
++        auto event = request.getString("event"_s);
++        std::optional<WebExtensionEventListenerType> type;
++        if (event == "created"_s)
++            type = WebExtensionEventListenerType::BookmarksOnCreated;
++        else if (event == "removed"_s)
++            type = WebExtensionEventListenerType::BookmarksOnRemoved;
++        else if (event == "changed"_s)
++            type = WebExtensionEventListenerType::BookmarksOnChanged;
++        else if (event == "moved"_s)
++            type = WebExtensionEventListenerType::BookmarksOnMoved;
++        if (!type)
++            return "{\"error\":\"bad event\"}"_s;
++        h.controller->didChangeBookmarksHaiku(*type, request.getString("id"_s), request.getString("json"_s));
 +    } else if (op == "respond"_s) {
 +        // BWebKitContext::RespondToBrowserCommand(WithData).
 +        BrowserCommandBrokerHaiku::Result result;

@@ -25,6 +25,11 @@ object SummitCore {
   @JvmStatic external fun clearHistory(since: Long): Int
   @JvmStatic external fun isBookmarked(url: String): Boolean
   @JvmStatic external fun toggleBookmark(url: String, title: String): Boolean
+
+  // Extensions' chrome.history and chrome.bookmarks (core/ExtensionBrowserData, as on air/OS).
+  @JvmStatic external fun browserData(kind: String, method: String, arguments: String): String
+  @JvmStatic external fun bookmarkChanges(): String
+  @JvmStatic external fun historyItem(url: String): String
   @JvmStatic external fun bookmarks(): String
   @JvmStatic external fun readingList(): String
   @JvmStatic external fun addToReadingList(url: String, title: String)

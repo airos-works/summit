@@ -323,7 +323,10 @@ class Browser private constructor(private val appContext: Context) {
       override fun onPageFinished(page: WebPage, url: String) {
         tab.loading = false
         tab.progress = 100
-        if (!tab.private && url.startsWith("http")) SummitCore.visit(url, tab.title)
+        if (!tab.private && url.startsWith("http")) {
+          SummitCore.visit(url, tab.title)
+          extensions.historyVisited(url)
+        }
       }
 
       override fun doUpdateVisitedHistory(page: WebPage, url: String, isReload: Boolean) {

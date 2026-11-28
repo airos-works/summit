@@ -5,6 +5,7 @@
 // static natives of works.airos.summit.core.SummitCore; structured results are
 // JSON strings.
 #include "core/Address.h"
+#include "core/ExtensionBrowserData.h"
 #include "core/LoadError.h"
 #include "core/Profile.h"
 #include "core/ReadingList.h"
@@ -404,4 +405,91 @@ SUMMIT_JNI(jstring, describeLoadFailure)(JNIEnv* env, jclass, jstring kindString
     auto text = summit::DescribeLoadFailure(failure, ToString(env, url), ToString(env, description));
     json result = {{"title", text.title}, {"explanation", text.explanation}};
     return ToJava(env, result.dump());
+}
+
+// ---------------------------------------------------------------- extensions
+
+namespace {
+
+// The extension APIs' view of the profile (core/ExtensionBrowserData), as
+// air/OS's SharedProfileStore: history changes are saved with the next save,
+// bookmark changes at once.
+class AndroidProfileStore final : public summit::ProfileStore {
+public:
+    void Read(const std::function<void(const summit::Profile&)>& function) const override
+    {
+        std::lock_guard lock(gLock);
+        function(gProfile);
+    }
+    void Change(Kind kind, const std::function<bool(summit::Profile&)>& function) override
+    {
+        std::lock_guard lock(gLock);
+        if (function(gProfile) && kind == Kind::Bookmarks && gOpen && gWritable) {
+            std::string error;
+            gProfile.Save(gProfilePath, error);
+        }
+    }
+    void ClearHistory() override
+    {
+        std::lock_guard lock(gLock);
+        gProfile.history.clear();
+        if (gOpen && gWritable) {
+            std::string error;
+            gProfile.Save(gProfilePath, error);
+        }
+    }
+};
+
+summit::BookmarkChangeReporter gBookmarkReporter;
+
+json BookmarkEventsJSON()
+{
+    std::lock_guard lock(gLock);
+    json events = json::array();
+    for (const auto& event : gBookmarkReporter.Changes(gProfile.bookmarks))
+        events.push_back({{"event", event.kind}, {"id", std::to_string(event.id)}, {"json", event.info.dump()}});
+    return events;
+}
+
+} // namespace
+
+// An extension's chrome.history or chrome.bookmarks call (kind "history" or
+// "bookmarks"): {"status": "B_OK"..., "data": JSON text, "error",
+// "historyEvents": [{"event", "json"}], "bookmarkEvents": [{"event", "id", "json"}]}.
+SUMMIT_JNI(jstring, browserData)(JNIEnv* env, jclass, jstring kind, jstring method, jstring arguments)
+{
+    AndroidProfileStore store;
+    const std::string which = ToString(env, kind);
+    const auto answer = which == "history"
+        ? summit::ExtensionHistoryCommand(store, ToString(env, method), ToString(env, arguments))
+        : which == "bookmarks" ? summit::ExtensionBookmarksCommand(store, ToString(env, method), ToString(env, arguments))
+        : summit::BrowserDataAnswer::Failure(summit::BrowserDataAnswer::Status::NotSupported);
+    const char* status = answer.status == summit::BrowserDataAnswer::Status::Ok ? "B_OK"
+        : answer.status == summit::BrowserDataAnswer::Status::BadValue ? "B_BAD_VALUE" : "B_NOT_SUPPORTED";
+    json history = json::array();
+    for (const auto& [event, info] : answer.historyEvents)
+        history.push_back({{"event", event}, {"json", info}});
+    json result = {{"status", status}, {"data", answer.data}, {"error", answer.error}, {"historyEvents", history},
+        {"bookmarkEvents", answer.bookmarksChanged ? BookmarkEventsJSON() : json::array()}};
+    return ToJava(env, result.dump());
+}
+
+// The bookmark events since the last call (bookmarks the browser itself
+// changed), as browserData's "bookmarkEvents". The first call reports none.
+SUMMIT_JNI(jstring, bookmarkChanges)(JNIEnv* env, jclass)
+{
+    return ToJava(env, BookmarkEventsJSON().dump());
+}
+
+// chrome.history's HistoryItem for a page in the history (for
+// history.onVisited after a visit), or "" when it is not there.
+SUMMIT_JNI(jstring, historyItem)(JNIEnv* env, jclass, jstring url)
+{
+    std::lock_guard lock(gLock);
+    const std::string address = ToString(env, url);
+    for (const auto& page : gProfile.history) {
+        if (page.url == address)
+            return ToJava(env, summit::HistoryItemJSON(page).dump());
+    }
+    return ToJava(env, "");
 }

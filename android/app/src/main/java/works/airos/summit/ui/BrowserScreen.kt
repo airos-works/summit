@@ -241,7 +241,7 @@ private fun Toolbar(
       })
       if (!wide && !focused) ReloadStop(tab)
       if (wide && !focused) {
-        BookmarkStar(tab)
+        BookmarkStar(browser, tab)
         ToolIcon(SummitIcons.Bookmarks, "Bookmarks and history", onClick = onLibrary)
         TabCountButton(browser.tabs.count { it.private == (tab?.private == true) }, onTabs)
         ToolIcon(SummitIcons.Add, "New tab") { browser.newTab(private = tab?.private == true) }
@@ -259,11 +259,12 @@ private fun ReloadStop(tab: Tab?) {
 }
 
 @Composable
-private fun BookmarkStar(tab: Tab?) {
+private fun BookmarkStar(browser: Browser, tab: Tab?) {
   val url = tab?.url.orEmpty()
   var bookmarked by remember(url) { mutableStateOf(url.isNotEmpty() && SummitCore.isBookmarked(url)) }
   ToolIcon(if (bookmarked) SummitIcons.Star else SummitIcons.StarOutline, "Bookmark", enabled = url.startsWith("http")) {
     bookmarked = SummitCore.toggleBookmark(url, tab?.title.orEmpty())
+    browser.extensions.bookmarksChanged()
   }
 }
 
@@ -475,6 +476,7 @@ private fun PageMenu(browser: Browser, tab: Tab, onDismiss: () -> Unit, onSettin
   ActionSheet(onDismiss) {
     SheetAction(if (bookmarked) "Remove Bookmark" else "Add Bookmark") {
       SummitCore.toggleBookmark(tab.url, tab.title)
+      browser.extensions.bookmarksChanged()
       onDismiss()
     }
     SheetAction("Add to Reading List") {
