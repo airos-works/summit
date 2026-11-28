@@ -147588,6 +147588,38 @@ index 0000000000000000000000000000000000000000..d8db971013dac85e18ac70577aaa3042
 +#endif // ENABLE(WEBDRIVER_KEYBOARD_INTERACTIONS)
 +
 +} // namespace WebKit
+diff --git a/Source/WebKit/UIProcess/Automation/libwpe/WebAutomationSessionWPE.cpp b/Source/WebKit/UIProcess/Automation/libwpe/WebAutomationSessionWPE.cpp
+index 0be3cf86b341c59f365d44be8e01772153d4b720..f470f0fadce90ab84179a65681a6a7ac84e784cb 100644
+--- a/Source/WebKit/UIProcess/Automation/libwpe/WebAutomationSessionWPE.cpp
++++ b/Source/WebKit/UIProcess/Automation/libwpe/WebAutomationSessionWPE.cpp
+@@ -32,6 +32,7 @@
+ #include "WebAutomationSessionMacros.h"
+ #include "WebEventModifier.h"
+ #include "WebPageProxy.h"
++#include <WebCore/Scrollbar.h>
+ #include <optional>
+ #include <wtf/glib/GRefPtr.h>
+ #include <wtf/glib/GUniquePtr.h>
+@@ -488,7 +489,18 @@ void WebAutomationSession::platformSimulateWheelInteraction(WebPageProxy& page,
+ 
+ #if ENABLE(WPE_PLATFORM)
+     auto* view = page.wpeView();
+-    GRefPtr<WPEEvent> event = adoptGRef(wpe_event_scroll_new(view, WPE_INPUT_SOURCE_MOUSE, 0, static_cast<WPEModifiers>(0), delta.width(), delta.height(), false, false, locationInView.x(), locationInView.y()));
++    // A wheel action's delta is in CSS pixels, positive towards the end of the
++    // page. Sent as is, it was taken for that many wheel notches (each a line
++    // step of the view's size) with the sign the reverse of WPE's, where
++    // positive deltas scroll back: the page scrolled ~94 times too far the
++    // wrong way (Summit #306). Send the notches WebEventFactory scales back into
++    // the action's pixels: a discrete wheel scroll, which snaps at once as a
++    // mouse wheel does (and as air/OS sends wheel actions).
++    auto notches = [](int pixels, int viewSize) {
++        return pixels ? -static_cast<double>(pixels) / WebCore::Scrollbar::pixelsPerLineStep(viewSize) : 0.;
++    };
++    GRefPtr<WPEEvent> event = adoptGRef(wpe_event_scroll_new(view, WPE_INPUT_SOURCE_MOUSE, 0, static_cast<WPEModifiers>(0),
++        notches(delta.width(), wpe_view_get_width(view)), notches(delta.height(), wpe_view_get_height(view)), false, false, locationInView.x(), locationInView.y()));
+     wpe_view_event(view, event.get());
+ #endif
+ }
 diff --git a/Source/WebKit/UIProcess/DrawingAreaProxy.h b/Source/WebKit/UIProcess/DrawingAreaProxy.h
 index 848fb013c996d9c41a576ccb8dc759bb61e31031..5c456460f4a04589047d3637bd319359f3f33423 100644
 --- a/Source/WebKit/UIProcess/DrawingAreaProxy.h
