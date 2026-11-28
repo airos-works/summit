@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<!-- Sensor check for Summit: the html5test.co feature checks, the Generic
+     Sensor API (Accelerometer, LinearAccelerationSensor, GravitySensor) and
+     the device motion and orientation events, live. Needs a secure context
+     (file:, localhost or https). window.sensorState holds everything for
+     scripts (Summit MCP evaluate: JSON.stringify(sensorState)). -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sensors</title>
+<style>
+  :root { color-scheme: light dark; font: 15px/1.4 system-ui, sans-serif; }
+  body { margin: 16px; max-width: 760px; }
+  h1 { font-size: 1.4em; margin: 0 0 12px; }
+  h2 { font-size: 1.05em; margin: 20px 0 6px; }
+  table { border-collapse: collapse; width: 100%; }
+  td, th { text-align: left; padding: 3px 8px; border-bottom: 1px solid #8884; font-variant-numeric: tabular-nums; }
+  .yes { color: #1a7f37; } .no { color: #c62828; }
+  #bubble { width: 180px; height: 180px; border-radius: 50%; border: 2px solid #8888; position: relative; margin: 8px 0; }
+  #dot { width: 20px; height: 20px; border-radius: 50%; background: #1a73e8; position: absolute; left: 80px; top: 80px; }
+</style>
+</head>
+<body>
+<h1>Sensors</h1>
+<p id="context"></p>
+
+<h2>Feature checks (as html5test.co)</h2>
+<table id="features"></table>
+
+<h2>Permissions</h2>
+<table id="permissions"></table>
+
+<h2>Generic Sensor API</h2>
+<table id="sensors"><tr><th>Sensor</th><th>State</th><th>x</th><th>y</th><th>z</th><th>Readings</th></tr></table>
+
+<h2>Device motion and orientation events</h2>
+<table id="events"></table>
+<div id="bubble"><div id="dot"></div></div>
+
+<script>
+"use strict";
+const state = window.sensorState = { features: {}, permissions: {}, sensors: {}, motion: { count: 0 }, orientation: { count: 0 } };
+const round = v => v === null || v === undefined ? null : Math.round(v * 1000) / 1000;
+const cell = v => v === null || v === undefined ? "–" : (typeof v === "number" ? v.toFixed(2) : String(v));
+
+document.getElementById("context").textContent = "Secure context: " + window.isSecureContext;
+
+const features = {
+  "Geolocation": () => !!navigator.geolocation,
+  "Device Orientation": () => !!window.DeviceOrientationEvent,
+  "Device Motion": () => !!window.DeviceMotionEvent,
+  "Generic Sensor API": () => "Sensor" in window,
+  "Accelerometer": () => "Sensor" in window && "Accelerometer" in window,
+  "Gyroscope": () => "Sensor" in window && "Gyroscope" in window,
+  "Magnetometer": () => "Sensor" in window && "Magnetometer" in window,
+  "Linear Acceleration": () => "Sensor" in window && "LinearAccelerationSensor" in window,
+  "Absolute Orientation": () => "Sensor" in window && "AbsoluteOrientationSensor" in window,
+  "Relative Orientation": () => "Sensor" in window && "RelativeOrientationSensor" in window,
+  "Ambient Light": () => "Sensor" in window && "AmbientLightSensor" in window,
+  "Gravity": () => "Sensor" in window && "GravitySensor" in window,
+};
+const featureTable = document.getElementById("features");
+for (const [name, check] of Object.entries(features)) {
+  const ok = state.features[name] = check();
+  featureTable.insertRow().innerHTML = `<td>${name}</td><td class="${ok ? "yes" : "no"}">${ok ? "Yes" : "No"}</td>`;
+}
+
+const permissionTable = document.getElementById("permissions");
+for (const name of ["accelerometer", "gyroscope", "magnetometer"]) {
+  const row = permissionTable.insertRow();
+  row.innerHTML = `<td>${name}</td><td>…</td>`;
+  navigator.permissions.query({ name }).then(status => {
+    state.permissions[name] = status.state;
+    row.cells[1].textContent = status.state;
+  }, error => {
+    state.permissions[name] = "error: " + error.name;
+    row.cells[1].textContent = error.name + ": " + error.message;
+  });
+}
+
+const sensorTable = document.getElementById("sensors");
+for (const name of ["Accelerometer", "LinearAccelerationSensor", "GravitySensor"]) {
+  const row = sensorTable.insertRow();
+  row.innerHTML = `<td>${name}</td><td></td><td></td><td></td><td></td><td>0</td>`;
+  const entry = state.sensors[name] = { state: "absent", readings: 0, x: null, y: null, z: null };
+  const show = () => {
+    row.cells[1].textContent = entry.state;
+    row.cells[2].textContent = cell(entry.x);
+    row.cells[3].textContent = cell(entry.y);
+    row.cells[4].textContent = cell(entry.z);
+    row.cells[5].textContent = entry.readings;
+  };
+  if (!(name in window)) { show(); continue; }
+  try {
+    const sensor = new window[name]({ frequency: 10 });
+    entry.state = "starting";
+    sensor.addEventListener("activate", () => { entry.state = "activated"; entry.activatedAt = round(performance.now()); show(); });
+    sensor.addEventListener("reading", () => {
+      entry.readings++;
+      entry.x = round(sensor.x); entry.y = round(sensor.y); entry.z = round(sensor.z);
+      entry.timestamp = round(sensor.timestamp);
+      entry.hasReading = sensor.hasReading;
+      show();
+    });
+    sensor.addEventListener("error", event => {
+      entry.state = "error: " + event.error.name;
+      entry.message = event.error.message;
+      show();
+    });
+    sensor.start();
+    window["sensor" + name] = sensor;
+  } catch (error) {
+    entry.state = "constructor threw " + error.name;
+  }
+  show();
+}
+
+const eventTable = document.getElementById("events");
+const motionRow = eventTable.insertRow();
+const orientationRow = eventTable.insertRow();
+motionRow.innerHTML = "<td>devicemotion</td><td>none yet</td>";
+orientationRow.innerHTML = "<td>deviceorientation</td><td>none yet</td>";
+
+window.addEventListener("devicemotion", event => {
+  const g = event.accelerationIncludingGravity, a = event.acceleration, r = event.rotationRate;
+  Object.assign(state.motion, {
+    count: state.motion.count + 1,
+    gravityX: round(g && g.x), gravityY: round(g && g.y), gravityZ: round(g && g.z),
+    linearX: round(a && a.x), linearY: round(a && a.y), linearZ: round(a && a.z),
+    rotationAlpha: round(r && r.alpha), interval: event.interval,
+  });
+  motionRow.cells[1].textContent = `#${state.motion.count} including gravity (${cell(state.motion.gravityX)}, ${cell(state.motion.gravityY)}, ${cell(state.motion.gravityZ)}) m/s², without (${cell(state.motion.linearX)}, ${cell(state.motion.linearY)}, ${cell(state.motion.linearZ)}), rotation ${cell(state.motion.rotationAlpha)}, interval ${cell(event.interval)} ms`;
+});
+
+window.addEventListener("deviceorientation", event => {
+  Object.assign(state.orientation, {
+    count: state.orientation.count + 1,
+    alpha: round(event.alpha), beta: round(event.beta), gamma: round(event.gamma), absolute: event.absolute,
+  });
+  orientationRow.cells[1].textContent = `#${state.orientation.count} alpha ${cell(event.alpha)}, beta ${cell(event.beta)}°, gamma ${cell(event.gamma)}°, absolute ${event.absolute}`;
+  if (event.beta !== null && event.gamma !== null) {
+    const dot = document.getElementById("dot");
+    const clamp = v => Math.max(-80, Math.min(80, v));
+    dot.style.left = (80 + clamp(event.gamma)) + "px";
+    dot.style.top = (80 + clamp(event.beta)) + "px";
+  }
+});
+</script>
+</body>
+</html>

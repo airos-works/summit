@@ -70,7 +70,7 @@ For a stock Haiku installation, not air/OS. Install the packages together with `
 | Interop 2026, every labelled test on current WPT (21 Nov) | **99.94** | |
 | Interop 2025, same run | **96.85** | |
 | Interop 2024 (25 Nov) | **99.13** | Safari Technology Preview 257: 98.35 on the same tests |
-| [HTML5test](docs/html5test-2026-11-18.md) (18 Nov) | **565 / 588** | Chrome 158: 572, Firefox 160: 547 |
+| [HTML5test](docs/html5test-2026-11-18.md) (18 Nov) | **565 / 588**; 577 with [sensors](docs/sensors.md#html5test) (28 Nov) | Chrome 158: 572, Firefox 160: 547 |
 | [Speedometer 3.1](docs/performance.md) with profile-guided optimization (7 Nov) | 10.2 on a Threadripper 1950X; 5.89 on a ROCK 5 | 8.6 and 4.8 without it |
 
 The Interop runs and what is left are in
