@@ -128004,10 +128004,10 @@ index 0000000000000000000000000000000000000000..9028ac92d50c26aa2ccbbb2d773a06e1
 +#endif
 diff --git a/Source/WebKit/Platform/summit/SummitHaikuTypes.h b/Source/WebKit/Platform/summit/SummitHaikuTypes.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..f380f23d06ab809a379cdf0af7af1179e161c166
+index 0000000000000000000000000000000000000000..88b97346b6cd837b94b9019b44f7b74d7271fe59
 --- /dev/null
 +++ b/Source/WebKit/Platform/summit/SummitHaikuTypes.h
-@@ -0,0 +1,101 @@
+@@ -0,0 +1,150 @@
 +/*
 + * Copyright (C) 2026 air/OS contributors. SPDX-License-Identifier: BSD-2-Clause
 + */
@@ -128031,13 +128031,16 @@ index 0000000000000000000000000000000000000000..f380f23d06ab809a379cdf0af7af1179
 +#include <InterfaceDefs.h>
 +#include <Rect.h>
 +#include <StorageDefs.h>
++#include <String.h>
 +#include <SupportDefs.h>
 +
 +#else
 +
 +#include "NativeBrowserCommandWPE.h"
++#include <algorithm>
 +#include <cerrno>
 +#include <signal.h>
++#include <string>
 +#include <wtf/MonotonicTime.h>
 +
 +namespace WebKit {
@@ -128093,6 +128096,52 @@ index 0000000000000000000000000000000000000000..f380f23d06ab809a379cdf0af7af1179
 +{
 +    return { 241, 241, 241, 255 };
 +}
++
++// Haiku's byte string, for the few shared helpers that use it (download
++// file names): the members they use, on std::string.
++class BString {
++public:
++    BString() = default;
++    BString(const char* text) : m_text(text ? text : "") { }
++    const char* String() const { return m_text.c_str(); }
++    int32_t Length() const { return static_cast<int32_t>(m_text.size()); }
++    bool IsEmpty() const { return m_text.empty(); }
++    char ByteAt(int32_t index) const { return index >= 0 && index < Length() ? m_text[index] : 0; }
++    void SetByteAt(int32_t index, char byte) { if (index >= 0 && index < Length()) m_text[index] = byte; }
++    int32_t FindLast(char c) const { auto i = m_text.rfind(c); return i == std::string::npos ? -1 : static_cast<int32_t>(i); }
++    int32_t FindLast(const char* text) const { auto i = m_text.rfind(text); return i == std::string::npos ? -1 : static_cast<int32_t>(i); }
++    BString& Remove(int32_t from, int32_t length) { if (from >= 0 && from < Length()) m_text.erase(from, length); return *this; }
++    BString& Truncate(int32_t length) { if (length >= 0 && length < Length()) m_text.resize(length); return *this; }
++    BString& Trim()
++    {
++        auto first = m_text.find_first_not_of(" \t\r\n");
++        auto last = m_text.find_last_not_of(" \t\r\n");
++        m_text = first == std::string::npos ? std::string() : m_text.substr(first, last - first + 1);
++        return *this;
++    }
++    BString& Append(const BString& other) { m_text += other.m_text; return *this; }
++    // Moves `length` bytes from `from` into `into` (replacing what it held).
++    BString& MoveInto(BString& into, int32_t from, int32_t length)
++    {
++        if (from < 0 || from > Length() || length < 0) {
++            into.m_text.clear();
++            return *this;
++        }
++        into.m_text = m_text.substr(from, length);
++        m_text.erase(from, length);
++        return *this;
++    }
++    BString& Append(const char* text, int32_t length) { m_text.append(text, std::max<int32_t>(0, length)); return *this; }
++    BString& operator<<(const char* text) { m_text += text ? text : ""; return *this; }
++    BString& operator<<(const BString& other) { m_text += other.m_text; return *this; }
++    BString& operator<<(uint32_t number) { m_text += std::to_string(number); return *this; }
++    BString& operator<<(int32_t number) { m_text += std::to_string(number); return *this; }
++    BString& operator<<(char c) { m_text += c; return *this; }
++    bool operator==(const BString&) const = default;
++
++private:
++    std::string m_text;
++};
 +
 +// Processes, which Haiku calls teams: only whether one still runs.
 +using team_id = int32_t;
@@ -134256,7 +134305,7 @@ index 0000000000000000000000000000000000000000..ccf742682b96c829d26b231a37510f66
 +} // namespace WebKit
 diff --git a/Source/WebKit/Shared/haiku/DownloadFilenameHaiku.h b/Source/WebKit/Shared/haiku/DownloadFilenameHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..304cf15668b687641f0b01db6329074e8d9f3973
+index 0000000000000000000000000000000000000000..0a77eb50068e3e8fc13ee1d28b60c453f4a99b20
 --- /dev/null
 +++ b/Source/WebKit/Shared/haiku/DownloadFilenameHaiku.h
 @@ -0,0 +1,58 @@
@@ -134271,11 +134320,11 @@ index 0000000000000000000000000000000000000000..304cf15668b687641f0b01db6329074e
 +// Haiku's own headers there.
 +#if PLATFORM(HAIKU)
 +#include <StorageDefs.h>
++#include <String.h>
 +#include <SupportDefs.h>
 +#else
 +#include "SummitHaikuTypes.h"
 +#endif
-+#include <String.h>
 +#include <algorithm>
 +
 +namespace WebKit {
@@ -135943,10 +135992,10 @@ index db779aefcd6fa39e1b544159d7f0780b583445b6..78e1ce4036e2a889ca25f9f3ffed2420
  UIProcess/API/glib/WebKitImage.cpp @no-unify
 diff --git a/Source/WebKit/SummitExtensions.cmake b/Source/WebKit/SummitExtensions.cmake
 new file mode 100644
-index 0000000000000000000000000000000000000000..ab6f879880dafd26a3c89b3965f60266e16d1579
+index 0000000000000000000000000000000000000000..d092e19dfe8243c6f6fb22e3fd0182849551c275
 --- /dev/null
 +++ b/Source/WebKit/SummitExtensions.cmake
-@@ -0,0 +1,234 @@
+@@ -0,0 +1,240 @@
 +# Summit's WebExtensions implementation (Firefox, Chrome and Safari web
 +# extensions), shared by the Haiku port (air/OS) and the WPE port on Android.
 +# The code lives mostly in */Extensions/haiku and is compiled where
@@ -136149,8 +136198,14 @@ index 0000000000000000000000000000000000000000..ab6f879880dafd26a3c89b3965f60266
 +        message(FATAL_ERROR "generate-browser-command-codes.py failed")
 +    endif ()
 +    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_summitContextHeader}" "${_summitViewHeader}" "${_summitPermissionHeader}")
++    # XPI and CRX archives (Haiku finds libzip in PlatformHaiku.cmake).
++    find_package(PkgConfig REQUIRED)
++    pkg_check_modules(SUMMIT_LIBZIP REQUIRED IMPORTED_TARGET libzip>=1.11)
++    list(APPEND WebKit_LIBRARIES PkgConfig::SUMMIT_LIBZIP)
++
 +    list(APPEND WebKit_SOURCES
 +        Platform/summit/StoragePathsWPE.cpp
++        UIProcess/Extensions/wpe/ExtensionWebViewWPE.cpp
 +        UIProcess/Extensions/wpe/NativeBrowserCommandWPE.cpp
 +    )
 +    # The Haiku port's own headers the shared code includes by name (all
@@ -136246,10 +136301,18 @@ index d4d415b3d8dfa723539f4f93c8c08972048d7a05..71e5c7982f118a2d571275b815abedc1
      static ContentRuleListStore& defaultStoreSingleton();
      static Ref<ContentRuleListStore> storeWithPath(const WTF::String& storePath);
 diff --git a/Source/WebKit/UIProcess/API/APIHTTPCookieStore.cpp b/Source/WebKit/UIProcess/API/APIHTTPCookieStore.cpp
-index 232e124c97dd5eb474644203a2231e92eba77e65..3dca9b1311102adfc8c9b1702ac966fec065aa63 100644
+index 232e124c97dd5eb474644203a2231e92eba77e65..ecb9600f37b14f7147930185193b104b2d540dfe 100644
 --- a/Source/WebKit/UIProcess/API/APIHTTPCookieStore.cpp
 +++ b/Source/WebKit/UIProcess/API/APIHTTPCookieStore.cpp
-@@ -173,6 +173,26 @@ void HTTPCookieStore::deleteAllCookies(CompletionHandler<void()>&& completionHan
+@@ -35,6 +35,7 @@
+ #include <WebCore/HTTPCookieAcceptPolicy.h>
+ #include <wtf/CallbackAggregator.h>
+ #include <wtf/CrossThreadCopier.h>
++#include <wtf/text/MakeString.h>
+ 
+ #if PLATFORM(IOS_FAMILY)
+ #include "DefaultWebBrowserChecks.h"
+@@ -173,6 +174,64 @@ void HTTPCookieStore::deleteAllCookies(CompletionHandler<void()>&& completionHan
          networkProcess->sendWithAsyncReply(Messages::WebCookieManager::DeleteAllCookies(m_sessionID), [callbackAggregator] { });
  }
  
@@ -136271,12 +136334,50 @@ index 232e124c97dd5eb474644203a2231e92eba77e65..3dca9b1311102adfc8c9b1702ac966fe
 +    }
 +    networkProcess->sendWithAsyncReply(Messages::WebCookieManager::DeleteCookieWithResult(m_sessionID, cookie), WTF::move(completionHandler));
 +}
++#elif USE(SUMMIT_EXTENSIONS)
++// Summit's cookies API on network backends without these answers (soup): set
++// or delete, then read the store back.
++static bool summitSameCookie(const WebCore::Cookie& a, const WebCore::Cookie& b)
++{
++    return a.name == b.name && a.domain == b.domain && a.path == b.path;
++}
++
++static WTF::URL summitCookieURL(const WebCore::Cookie& cookie)
++{
++    auto host = cookie.domain.startsWith('.') ? cookie.domain.substring(1) : cookie.domain;
++    return WTF::URL { makeString(cookie.secure ? "https://"_s : "http://"_s, host, cookie.path.isEmpty() ? "/"_s : cookie.path) };
++}
++
++void HTTPCookieStore::setCookieWithResult(const WebCore::Cookie& cookie, CompletionHandler<void(bool, std::optional<WebCore::Cookie>&&)>&& completionHandler)
++{
++    setCookies({ cookie }, [this, protectedThis = Ref { *this }, cookie, completionHandler = WTF::move(completionHandler)]() mutable {
++        cookiesForURL(summitCookieURL(cookie), [cookie, completionHandler = WTF::move(completionHandler)](Vector<WebCore::Cookie>&& cookies) mutable {
++            for (auto& stored : cookies) {
++                if (summitSameCookie(stored, cookie)) {
++                    completionHandler(true, WebCore::Cookie { stored });
++                    return;
++                }
++            }
++            // An expired cookie deletes; anything else the store refused.
++            completionHandler(cookie.expires && *cookie.expires <= WallTime::now().secondsSinceEpoch().milliseconds(), std::nullopt);
++        });
++    });
++}
++
++void HTTPCookieStore::deleteCookieWithResult(const WebCore::Cookie& cookie, CompletionHandler<void(bool)>&& completionHandler)
++{
++    deleteCookie(cookie, [this, protectedThis = Ref { *this }, cookie, completionHandler = WTF::move(completionHandler)]() mutable {
++        cookiesForURL(summitCookieURL(cookie), [cookie, completionHandler = WTF::move(completionHandler)](Vector<WebCore::Cookie>&& cookies) mutable {
++            completionHandler(std::ranges::none_of(cookies, [&](auto& stored) { return summitSameCookie(stored, cookie); }));
++        });
++    });
++}
 +#endif
 +
  void HTTPCookieStore::deleteCookiesForHostnames(const Vector<WTF::String>& hostnames, CompletionHandler<void()>&& completionHandler)
  {
      if (RefPtr networkProcess = networkProcessIfExists())
-@@ -212,8 +232,13 @@ void HTTPCookieStore::registerObserver(HTTPCookieStoreObserver& observer)
+@@ -212,8 +271,13 @@ void HTTPCookieStore::registerObserver(HTTPCookieStoreObserver& observer)
      if (wasObserving)
          return;
  
@@ -136291,7 +136392,7 @@ index 232e124c97dd5eb474644203a2231e92eba77e65..3dca9b1311102adfc8c9b1702ac966fe
  }
  
  void HTTPCookieStore::unregisterObserver(HTTPCookieStoreObserver& observer)
-@@ -222,8 +247,13 @@ void HTTPCookieStore::unregisterObserver(HTTPCookieStoreObserver& observer)
+@@ -222,8 +286,13 @@ void HTTPCookieStore::unregisterObserver(HTTPCookieStoreObserver& observer)
      if (!m_observers.isEmptyIgnoringNullReferences())
          return;
  
@@ -136306,7 +136407,7 @@ index 232e124c97dd5eb474644203a2231e92eba77e65..3dca9b1311102adfc8c9b1702ac966fe
  }
  
  bool HTTPCookieStore::isOptInCookiePartitioningEnabled() const
-@@ -241,6 +271,22 @@ void HTTPCookieStore::cookiesDidChange()
+@@ -241,6 +310,22 @@ void HTTPCookieStore::cookiesDidChange()
          observer->cookiesDidChange(*this);
  }
  
@@ -136330,7 +136431,7 @@ index 232e124c97dd5eb474644203a2231e92eba77e65..3dca9b1311102adfc8c9b1702ac966fe
  {
      if (auto* dataStore = m_owningDataStore.get())
 diff --git a/Source/WebKit/UIProcess/API/APIHTTPCookieStore.h b/Source/WebKit/UIProcess/API/APIHTTPCookieStore.h
-index fd697cbee3dcc5567ee77f1f47ac8cbf9df8d857..c2d9b1ce5d96dc8d7fdda9335435010587c970aa 100644
+index fd697cbee3dcc5567ee77f1f47ac8cbf9df8d857..050c866809c93e4352dc23fa1b4d632bec22abe4 100644
 --- a/Source/WebKit/UIProcess/API/APIHTTPCookieStore.h
 +++ b/Source/WebKit/UIProcess/API/APIHTTPCookieStore.h
 @@ -27,6 +27,9 @@
@@ -136353,23 +136454,26 @@ index fd697cbee3dcc5567ee77f1f47ac8cbf9df8d857..c2d9b1ce5d96dc8d7fdda93354350105
  };
  
  class HTTPCookieStore final : public ObjectImpl<Object::Type::HTTPCookieStore> {
-@@ -72,6 +78,10 @@ public:
+@@ -72,6 +78,11 @@ public:
      void cookiesForURL(WTF::URL&&, CompletionHandler<void(Vector<WebCore::Cookie>&&)>&&, RefPtr<WTF::WorkQueue> replyQueue = nullptr);
      void setCookies(Vector<WebCore::Cookie>&&, CompletionHandler<void()>&&);
      void deleteCookie(const WebCore::Cookie&, CompletionHandler<void()>&&);
-+#if PLATFORM(HAIKU) && USE(CURL)
++#if (PLATFORM(HAIKU) && USE(CURL)) || USE(SUMMIT_EXTENSIONS)
++    // Summit's cookies API: whether the store took the cookie, and the cookie as stored.
 +    void setCookieWithResult(const WebCore::Cookie&, CompletionHandler<void(bool, std::optional<WebCore::Cookie>&&)>&&);
 +    void deleteCookieWithResult(const WebCore::Cookie&, CompletionHandler<void(bool)>&&);
 +#endif
      void deleteCookiesForHostnames(const Vector<WTF::String>&, CompletionHandler<void()>&&);
      
      void deleteAllCookies(CompletionHandler<void()>&&);
-@@ -83,6 +93,11 @@ public:
+@@ -83,6 +94,13 @@ public:
      void unregisterObserver(HTTPCookieStoreObserver&);
  
      void cookiesDidChange();
 +#if PLATFORM(HAIKU) && USE(CURL)
 +    void cookiesDidChange(const Vector<WebCore::CookieChange>&);
++#endif
++#if (PLATFORM(HAIKU) && USE(CURL)) || USE(SUMMIT_EXTENSIONS)
 +    PAL::SessionID sessionID() const { return m_sessionID; }
 +    bool hasObservers() const { return !m_observers.isEmptyIgnoringNullReferences(); }
 +#endif
@@ -153248,7 +153352,7 @@ index 6fad62efc1652e15e7b0f50580ae46a529f43318..0849fa2cfbfd21ee411632759a4f2781
  #include <WebCore/LocalizedStrings.h>
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/ExtensionActionPopupHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/ExtensionActionPopupHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..1a2e35861600c06545da503ef763498f62c7e08b
+index 0000000000000000000000000000000000000000..b6f45eb390444e11569538ade81872da44fa96c9
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/ExtensionActionPopupHaiku.cpp
 @@ -0,0 +1,589 @@
@@ -153259,7 +153363,7 @@ index 0000000000000000000000000000000000000000..1a2e35861600c06545da503ef763498f
 +#include <cstdio>
 +#include <cstdlib>
 +#include <cstring>
-+#if ENABLE(WK_WEB_EXTENSIONS) && USE(SUMMIT_EXTENSIONS)
++#if ENABLE(WK_WEB_EXTENSIONS) && USE(SUMMIT_EXTENSIONS) && PLATFORM(HAIKU)
 +#include "APIFrameInfo.h"
 +#include "APINavigationAction.h"
 +#include "APINavigationClient.h"
@@ -153843,13 +153947,16 @@ index 0000000000000000000000000000000000000000..1a2e35861600c06545da503ef763498f
 +#endif
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/ExtensionActionPopupHaiku.h b/Source/WebKit/UIProcess/Extensions/haiku/ExtensionActionPopupHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..523eb7374490116ae6077d2d02eed087f60759fd
+index 0000000000000000000000000000000000000000..85fd33c7500a6b54180e4c9c8f0d17bc2b451478
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/ExtensionActionPopupHaiku.h
-@@ -0,0 +1,88 @@
+@@ -0,0 +1,91 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#pragma once
-+#if ENABLE(WK_WEB_EXTENSIONS) && USE(SUMMIT_EXTENSIONS)
++#if ENABLE(WK_WEB_EXTENSIONS) && USE(SUMMIT_EXTENSIONS) && !PLATFORM(HAIKU)
++// Summit: popups are the browser's own interface; WPE has its own class.
++#include "ExtensionActionPopupWPE.h"
++#elif ENABLE(WK_WEB_EXTENSIONS) && USE(SUMMIT_EXTENSIONS)
 +#include "NativeExtensionPopupHaiku.h"
 +#include "WebExtensionContextIdentifier.h"
 +#include "WebExtensionError.h"
@@ -156014,10 +156121,10 @@ index 0000000000000000000000000000000000000000..94432b90ebf90223c5c4a082e495ee9e
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && USE(SUMMIT_EXTENSIONS)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPICookiesHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPICookiesHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..63e4bf467e97718a234dbae8cd8fecb1bf9ce065
+index 0000000000000000000000000000000000000000..32afac36afaba708ccc9e96ffed25c5da3b05489
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPICookiesHaiku.cpp
-@@ -0,0 +1,417 @@
+@@ -0,0 +1,424 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "config.h"
 +#include "WebExtensionContext.h"
@@ -156104,6 +156211,7 @@ index 0000000000000000000000000000000000000000..63e4bf467e97718a234dbae8cd8fecb1
 +        domain = makeString('[', domain, ']');
 +    return URL { makeString(cookie.secure ? "https://"_s : "http://"_s, domain, '/') };
 +}
++#if USE(CURL)
 +void WebExtensionContext::cookiesDidChange(API::HTTPCookieStore& cookieStore, const Vector<WebCore::CookieChange>& changes)
 +{
 +    if (!isLoaded() || !hasPermission(WebExtensionPermission::cookies()))
@@ -156130,6 +156238,12 @@ index 0000000000000000000000000000000000000000..63e4bf467e97718a234dbae8cd8fecb1
 +            sendToProcessesForEvent(type, Messages::WebExtensionContextProxy::DispatchCookiesChangedEvent(cookieStoreSessionHaiku(store.get()), changes));
 +    });
 +}
++#else
++void WebExtensionContext::cookiesDidChange(API::HTTPCookieStore&)
++{
++    // FIXME (Summit, WPE): cookies.onChanged needs the changes from the soup network process.
++}
++#endif
 +
 +WebsiteDataStore* WebExtensionContext::websiteDataStore(std::optional<PAL::SessionID> session) const
 +{
@@ -156437,10 +156551,10 @@ index 0000000000000000000000000000000000000000..63e4bf467e97718a234dbae8cd8fecb1
 +#endif
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPIDebuggerHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPIDebuggerHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..8cd6f7ef5470564f000b696789c95cd1c5e6a34b
+index 0000000000000000000000000000000000000000..8d855a10167a58df08bd297d04f14aee4bb7ef33
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPIDebuggerHaiku.cpp
-@@ -0,0 +1,1917 @@
+@@ -0,0 +1,1942 @@
 +/* Copyright (C) 2026 Summit contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +// chrome.debugger and runtime.getContexts.
@@ -156481,8 +156595,12 @@ index 0000000000000000000000000000000000000000..8cd6f7ef5470564f000b696789c95cd1
 +#include "WebPageProxy.h"
 +#include "WebPreferences.h"
 +#include "WebViewPrivate.h"
++#if PLATFORM(HAIKU)
 +#include <Bitmap.h>
++#endif
++#if PLATFORM(HAIKU)
 +#include <InterfaceDefs.h>
++#endif
 +#include "SummitHaikuTypes.h"
 +#include <JavaScriptCore/InspectorFrontendChannel.h>
 +#include <WebCore/FloatRect.h>
@@ -157603,6 +157721,7 @@ index 0000000000000000000000000000000000000000..8cd6f7ef5470564f000b696789c95cd1
 +
 +// Haiku's modifier keys for CDP's (Alt 1, Ctrl 2, Meta 4, Shift 8), as
 +// WebKit's Haiku events map them (Command is the web's Control).
++#if PLATFORM(HAIKU)
 +static int32 nativeModifiersHaiku(int modifiers)
 +{
 +    int32 native = 0;
@@ -157616,6 +157735,7 @@ index 0000000000000000000000000000000000000000..8cd6f7ef5470564f000b696789c95cd1
 +        native |= B_SHIFT_KEY | B_LEFT_SHIFT_KEY;
 +    return native;
 +}
++#endif
 +
 +static OptionSet<WebEventModifier> webModifiersHaiku(int modifiers)
 +{
@@ -157631,6 +157751,7 @@ index 0000000000000000000000000000000000000000..8cd6f7ef5470564f000b696789c95cd1
 +    return result;
 +}
 +
++#if PLATFORM(HAIKU)
 +static uint32_t buttonMaskHaiku(const String& button)
 +{
 +    if (button == "left"_s)
@@ -157645,6 +157766,7 @@ index 0000000000000000000000000000000000000000..8cd6f7ef5470564f000b696789c95cd1
 +        return 16;
 +    return 0;
 +}
++#endif
 +
 +// A wheel notch's pixels, as NativeWebWheelEvent scales them.
 +static float wheelPixelsPerNotchHaiku()
@@ -157671,6 +157793,13 @@ index 0000000000000000000000000000000000000000..8cd6f7ef5470564f000b696789c95cd1
 +
 +static void dispatchMouseEventHaiku(WebExtensionDebuggerSessionHaiku& session, WebPageProxy& page, JSON::Object& parameters, DebuggerCompletionHaiku&& completion)
 +{
++#if !PLATFORM(HAIKU)
++    // FIXME (Summit, Android): simulated mouse events for WPE views.
++    UNUSED_PARAM(session);
++    UNUSED_PARAM(page);
++    UNUSED_PARAM(parameters);
++    completion(makeUnexpected(protocolErrorHaiku("Input.dispatchMouseEvent is not supported here"_s, -32000)));
++#else
 +    auto type = parameters.getString("type"_s);
 +    auto x = parameters.getDouble("x"_s);
 +    auto y = parameters.getDouble("y"_s);
@@ -157721,6 +157850,7 @@ index 0000000000000000000000000000000000000000..8cd6f7ef5470564f000b696789c95cd1
 +        page.handleMouseEvent(mouse.releaseNonNull());
 +    }
 +    whenInputHandledHaiku(Ref { page }, WTF::move(completion));
++#endif
 +}
 +
 +// The Windows key code CDP leaves out for a key it names.
@@ -157751,6 +157881,12 @@ index 0000000000000000000000000000000000000000..8cd6f7ef5470564f000b696789c95cd1
 +
 +static void dispatchKeyEventHaiku(WebPageProxy& page, JSON::Object& parameters, DebuggerCompletionHaiku&& completion)
 +{
++#if !PLATFORM(HAIKU)
++    // FIXME (Summit, Android): simulated key events for WPE views.
++    UNUSED_PARAM(page);
++    UNUSED_PARAM(parameters);
++    completion(makeUnexpected(protocolErrorHaiku("Input.dispatchKeyEvent is not supported here"_s, -32000)));
++#else
 +    auto type = parameters.getString("type"_s);
 +    auto text = parameters.getString("text"_s);
 +    if (type == "char"_s) {
@@ -157797,6 +157933,7 @@ index 0000000000000000000000000000000000000000..8cd6f7ef5470564f000b696789c95cd1
 +        }
 +    }
 +    whenInputHandledHaiku(Ref { page }, WTF::move(completion));
++#endif
 +}
 +
 +// ---- Page.captureScreenshot ----
@@ -157878,6 +158015,7 @@ index 0000000000000000000000000000000000000000..8cd6f7ef5470564f000b696789c95cd1
 +
 +    // A tab on screen: the frame its view shows, as composited, in device
 +    // pixels (as Chrome's are). A hidden tab's frame is old: the page paints one.
++#if PLATFORM(HAIKU)
 +    RefPtr client = page.pageClient();
 +    auto frame = client && page.isViewVisible() ? static_cast<WebView&>(*client).presentedFrameHaiku() : nullptr;
 +    if (frame && frame->image) {
@@ -157897,6 +158035,7 @@ index 0000000000000000000000000000000000000000..8cd6f7ef5470564f000b696789c95cd1
 +        finishScreenshotHaiku(WTF::move(pixels), width, height, rowBytes, request, WTF::move(completion));
 +        return;
 +    }
++#endif
 +    auto viewSize = page.viewSize();
 +    Ref snapshot = JSON::Object::create();
 +    snapshot->setInteger("x"_s, 0);
@@ -159689,10 +159828,10 @@ index 0000000000000000000000000000000000000000..aceecd0e06410b5cdc65de58c7a6cea8
 +#endif
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPIMenusHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPIMenusHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..1d1886ceafaca9a7672b07a75cfc12e38f72731f
+index 0000000000000000000000000000000000000000..23c4022f013a046097b47e5d5875dd79e6473b2a
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPIMenusHaiku.cpp
-@@ -0,0 +1,321 @@
+@@ -0,0 +1,325 @@
 +/*
 + * Copyright (C) 2023-2024 Apple Inc. All rights reserved.
 + *
@@ -159729,7 +159868,11 @@ index 0000000000000000000000000000000000000000..1d1886ceafaca9a7672b07a75cfc12e3
 +#include "WebExtensionMenuItemTree.h"
 +#include "WebExtensionPermission.h"
 +#include "WebExtensionUtilities.h"
++#if PLATFORM(HAIKU)
 +#include "WebViewStateHaiku.h"
++#else
++#include "ExtensionWebViewWPE.h"
++#endif
 +namespace WebKit {
 +static bool hasMenuPermission(WebExtensionContext& context)
 +{
@@ -162967,10 +163110,10 @@ index 0000000000000000000000000000000000000000..c034595d6ed3a30297c2fbb58e3890a3
 +#endif
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPITabsHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPITabsHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..edac141f1fd74e1c3ec3440fc7e781ef646e57d6
+index 0000000000000000000000000000000000000000..ae75d39b10b002b6ed725e67e955c84d3b335101
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPITabsHaiku.cpp
-@@ -0,0 +1,783 @@
+@@ -0,0 +1,792 @@
 +/*
 + * Copyright (C) 2023-2024 Apple Inc. All rights reserved.
 + *
@@ -163015,7 +163158,9 @@ index 0000000000000000000000000000000000000000..edac141f1fd74e1c3ec3440fc7e781ef
 +#include "WebPageProxy.h"
 +#include "WebProcessProxy.h"
 +#include "WebViewPrivate.h"
++#if PLATFORM(HAIKU)
 +#include <Bitmap.h>
++#endif
 +#include "SummitHaikuTypes.h"
 +#include <WebCore/UserContentURLPattern.h>
 +#include <wtf/Box.h>
@@ -163643,6 +163788,12 @@ index 0000000000000000000000000000000000000000..edac141f1fd74e1c3ec3440fc7e781ef
 +        completionHandler(toWebExtensionError(apiName, nullString(), "either the 'activeTab' permission or granted host permissions for the current website are required"_s));
 +        return;
 +    }
++#if !PLATFORM(HAIKU)
++    // FIXME (Summit, Android): capture with the page's snapshot.
++    UNUSED_PARAM(imageFormat);
++    UNUSED_PARAM(imageQuality);
++    completionHandler(toWebExtensionError(apiName, nullString(), "capturing tabs is not supported here yet"_s));
++#else
 +    RefPtr page = activeTab->nativePage();
 +    RefPtr client = page ? page->pageClient() : nullptr;
 +    auto frame = client ? static_cast<WebView&>(*client).presentedFrameHaiku() : nullptr;
@@ -163686,6 +163837,7 @@ index 0000000000000000000000000000000000000000..edac141f1fd74e1c3ec3440fc7e781ef
 +            completionHandler(URL { dataURL });
 +        });
 +    });
++#endif
 +}
 +// Within a window the host reorders its tabs; into another one it moves the
 +// tab's page view there (as dragging a tab between windows does).
@@ -164473,10 +164625,10 @@ index 0000000000000000000000000000000000000000..7c867a344fd8a566468519e4e1f74d2d
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && USE(SUMMIT_EXTENSIONS)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextBrowserCommandsHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextBrowserCommandsHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..61a6e49df8930cd9c489be0ae9662fa4b0babf9e
+index 0000000000000000000000000000000000000000..2b8a84a31cf730de9dacf35281f604556c722e51
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextBrowserCommandsHaiku.cpp
-@@ -0,0 +1,874 @@
+@@ -0,0 +1,880 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -165138,6 +165290,11 @@ index 0000000000000000000000000000000000000000..61a6e49df8930cd9c489be0ae9662fa4
 +    RefPtr page = tab.nativePage();
 +    if (!page || !tab.isValid())
 +        return false;
++#if !PLATFORM(HAIKU)
++    // The embedder names a tab's view by its page.
++    return message.AddMessenger(viewField, NativeBrowserTarget { page->identifier().toUInt64() }) == B_OK
++        && message.AddUInt64(pageField, page->identifier().toUInt64()) == B_OK;
++#else
 +    // Registered pages always belong to a native BWebKitView bridge.
 +    auto* client = static_cast<WebView*>(page->pageClient());
 +    if (!client || client->page() != page.get())
@@ -165147,6 +165304,7 @@ index 0000000000000000000000000000000000000000..61a6e49df8930cd9c489be0ae9662fa4
 +        return false;
 +    return message.AddMessenger(viewField, view) == B_OK
 +        && message.AddUInt64(pageField, page->identifier().toUInt64()) == B_OK;
++#endif
 +}
 +
 +bool WebExtensionContext::addNativeBrowserCommandWindow(BMessage& message, const WebExtensionWindow& window) const
@@ -166029,10 +166187,10 @@ index 0000000000000000000000000000000000000000..b53c7538b83ddc779f5cdb9622f82f96
 +#endif
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..583771e8c2d3744ef44598678f20a290d5ccfa48
+index 0000000000000000000000000000000000000000..6770a58f66b8024f1326f40c067ed6c856d9d739
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextHaiku.cpp
-@@ -0,0 +1,288 @@
+@@ -0,0 +1,298 @@
 +/*
 + * Copyright (C) 2022-2025 Apple Inc. All rights reserved.
 + * Copyright (C) 2026 KunanyiOS contributors.
@@ -166078,6 +166236,16 @@ index 0000000000000000000000000000000000000000..583771e8c2d3744ef44598678f20a290
 +#include <wtf/text/MakeString.h>
 +
 +namespace WebKit {
++
++static String summitCreateTemporaryDirectory()
++{
++#if USE(GLIB)
++    return FileSystem::createTemporaryDirectory("WebExtensions"_s);
++#else
++    return FileSystem::createTemporaryDirectory();
++#endif
++}
++
 +
 +void WebExtensionContext::determineInstallReasonDuringLoad()
 +{
@@ -166147,7 +166315,7 @@ index 0000000000000000000000000000000000000000..583771e8c2d3744ef44598678f20a290
 +    if (!m_declarativeNetRequestContentRuleListFilePath.isEmpty())
 +        return m_declarativeNetRequestContentRuleListFilePath;
 +
-+    auto directoryPath = storageIsPersistent() ? storageDirectory() : FileSystem::createTemporaryDirectory();
++    auto directoryPath = storageIsPersistent() ? storageDirectory() : summitCreateTemporaryDirectory();
 +    if (directoryPath.isEmpty())
 +        return nullString();
 +
@@ -170327,10 +170495,10 @@ index 0000000000000000000000000000000000000000..40c97d504f4e0ae579ba248bfdbe53b8
 +#endif
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..022dfcff2f838b5c7310b085c3e65ee95598b5dc
+index 0000000000000000000000000000000000000000..2ae419eb96f29be2936512e70d03e0d8eb8c632a
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionHaiku.cpp
-@@ -0,0 +1,356 @@
+@@ -0,0 +1,358 @@
 +/*
 + * Copyright (C) 2026 KunanyiOS contributors.
 + *
@@ -170588,12 +170756,14 @@ index 0000000000000000000000000000000000000000..022dfcff2f838b5c7310b085c3e65ee9
 +    m_nativeResourceFingerprint = fingerprintWebExtensionMemoryResourcesHaiku(manifest, WTF::move(data), WTF::move(strings));
 +}
 +
++#if PLATFORM(HAIKU)
 +Vector<double> availableScreenScales()
 +{
 +    // Haiku WebPage configurations currently use one backing pixel per CSS
 +    // pixel. Keep icon representation selection consistent with that scale.
 +    return { 1.0 };
 +}
++#endif // WPE: Shared/Extensions/wpe/WebExtensionUtilitiesWPE.cpp
 +
 +static bool validIconSize(const WebCore::FloatSize& size)
 +{
@@ -173780,6 +173950,210 @@ index 0000000000000000000000000000000000000000..1f5def2889eaf933a68c6bc922ecac05
 +} // namespace WebKit
 +
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && USE(SUMMIT_EXTENSIONS)
+diff --git a/Source/WebKit/UIProcess/Extensions/wpe/ExtensionActionPopupWPE.h b/Source/WebKit/UIProcess/Extensions/wpe/ExtensionActionPopupWPE.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..b5a6c3c30481a1d6ae21a4006fe5cedd140413ac
+--- /dev/null
++++ b/Source/WebKit/UIProcess/Extensions/wpe/ExtensionActionPopupWPE.h
+@@ -0,0 +1,59 @@
++/*
++ * Copyright (C) 2026 air/OS contributors. SPDX-License-Identifier: BSD-2-Clause
++ */
++
++#pragma once
++
++#if ENABLE(WK_WEB_EXTENSIONS) && USE(SUMMIT_EXTENSIONS) && !PLATFORM(HAIKU)
++
++#include "WebExtensionError.h"
++#include <expected>
++#include <wtf/CompletionHandler.h>
++#include <wtf/RefCountedAndCanMakeWeakPtr.h>
++#include <wtf/URL.h>
++
++namespace WebKit {
++
++class WebExtensionAction;
++class WebExtensionContext;
++class WebExtensionTab;
++class WebPageProxy;
++
++// Summit: an extension's action popup. On Haiku the engine shows popups itself
++// (ExtensionActionPopupHaiku.cpp); on Android the app will show them.
++// FIXME (Summit, Android): until it does, a popup fails to open and the
++// action's onClicked handling applies.
++class ExtensionActionPopupHaiku final : public RefCountedAndCanMakeWeakPtr<ExtensionActionPopupHaiku> {
++public:
++    using PresentationCompletionHandler = CompletionHandler<void(std::expected<void, WebExtensionError>&&)>;
++
++    static Ref<ExtensionActionPopupHaiku> create(WebExtensionContext&, WebExtensionAction&, WebExtensionTab&) { return adoptRef(*new ExtensionActionPopupHaiku); }
++    static void preload(WebExtensionContext&, WebExtensionTab&) { }
++
++    bool start() { return false; }
++    void present() { fail("Popups are not supported here yet"_s); }
++    bool isPreloaded() const { return false; }
++    bool isPreloadedFor(const WebExtensionAction&, const WebExtensionTab&) const { return false; }
++    void setPresentationCompletionHandler(PresentationCompletionHandler&& handler) { m_presentationCompletion = WTF::move(handler); }
++    void close() { }
++    void validate() { }
++    bool isForTab(const WebExtensionTab&) const { return false; }
++    bool isCurrent() const { return false; }
++    WebPageProxy* page() const { return nullptr; }
++    bool allowsNavigation(const URL&) const { return false; }
++    void documentLoaded() { }
++    void fail(const String& error)
++    {
++        if (m_presentationCompletion)
++            m_presentationCompletion(makeUnexpected(error));
++    }
++    void openInTab(const URL&) { }
++
++private:
++    ExtensionActionPopupHaiku() = default;
++    PresentationCompletionHandler m_presentationCompletion;
++};
++
++} // namespace WebKit
++
++#endif
+diff --git a/Source/WebKit/UIProcess/Extensions/wpe/ExtensionWebViewWPE.cpp b/Source/WebKit/UIProcess/Extensions/wpe/ExtensionWebViewWPE.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..5ee6e3aae469db846a0d87c54cb5b8a5b0cd0d87
+--- /dev/null
++++ b/Source/WebKit/UIProcess/Extensions/wpe/ExtensionWebViewWPE.cpp
+@@ -0,0 +1,67 @@
++/*
++ * Copyright (C) 2026 air/OS contributors. SPDX-License-Identifier: BSD-2-Clause
++ */
++
++#include "config.h"
++#include "ExtensionWebViewWPE.h"
++
++#if USE(SUMMIT_EXTENSIONS) && !PLATFORM(HAIKU)
++
++#include "WPEWebViewPlatform.h"
++#include "wpe/headless/WPEDisplayHeadless.h"
++#include <wtf/glib/GRefPtr.h>
++
++namespace WebKit {
++
++// One headless display for every extension page of the process.
++static WPEDisplay* extensionDisplay()
++{
++    static GRefPtr<WPEDisplay> display = adoptGRef(wpe_display_headless_new());
++    return display.get();
++}
++
++WebView::WebView(Ref<API::PageConfiguration>&& configuration)
++    : m_view(WKWPE::ViewPlatform::create(extensionDisplay(), configuration.get()))
++{
++}
++
++WebView::~WebView()
++{
++    close();
++}
++
++Ref<WebView> WebView::createForExtensionBackground(Ref<API::PageConfiguration>&& configuration)
++{
++    return adoptRef(*new WebView(WTF::move(configuration)));
++}
++
++Ref<WebView> WebView::createForExtensionPopup(std::shared_ptr<WebViewStateHaiku>, Ref<API::PageConfiguration>&& configuration, Function<void(const URL&)>&&)
++{
++    return adoptRef(*new WebView(WTF::move(configuration)));
++}
++
++Ref<WebView> WebView::createForExtensionPage(std::shared_ptr<WebViewStateHaiku>, Ref<API::PageConfiguration>&& configuration)
++{
++    return adoptRef(*new WebView(WTF::move(configuration)));
++}
++
++WebPageProxy* WebView::page() const
++{
++    return m_view ? &m_view->page() : nullptr;
++}
++
++void WebView::close()
++{
++    if (m_closed || !m_view)
++        return;
++    m_closed = true;
++    m_view->page().close();
++}
++
++void refreshExtensionMenusHaiku(WebExtensionContext&)
++{
++}
++
++} // namespace WebKit
++
++#endif
+diff --git a/Source/WebKit/UIProcess/Extensions/wpe/ExtensionWebViewWPE.h b/Source/WebKit/UIProcess/Extensions/wpe/ExtensionWebViewWPE.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..f09f93ff184d0096720a65f79d19fc4081b6be97
+--- /dev/null
++++ b/Source/WebKit/UIProcess/Extensions/wpe/ExtensionWebViewWPE.h
+@@ -0,0 +1,60 @@
++/*
++ * Copyright (C) 2026 air/OS contributors. SPDX-License-Identifier: BSD-2-Clause
++ */
++
++#pragma once
++
++#if USE(SUMMIT_EXTENSIONS) && !PLATFORM(HAIKU)
++
++#include "APIPageConfiguration.h"
++#include "SummitHaikuTypes.h"
++#include "WebPageProxy.h"
++#include <wtf/Function.h>
++#include <wtf/RefCounted.h>
++#include <wtf/RefPtr.h>
++#include <wtf/URL.h>
++
++namespace WKWPE {
++class View;
++}
++
++namespace WebKit {
++
++struct WebViewStateHaiku;
++
++// A page of an extension on WPE: a WPE view on a headless display, as the
++// Haiku port's WebView (UIProcess/haiku/WebViewPrivate.h) makes one with an
++// offscreen BWebKitView. It keeps the shape of that class's interface the
++// shared code uses: the factories, page(), close() and nativeView().
++class WebView final : public RefCounted<WebView> {
++public:
++    static Ref<WebView> createForExtensionBackground(Ref<API::PageConfiguration>&&);
++    // FIXME (Summit, Android): popups and extension pages are shown by the
++    // app; until it can host them they load offscreen like background pages.
++    static Ref<WebView> createForExtensionPopup(std::shared_ptr<WebViewStateHaiku>, Ref<API::PageConfiguration>&&,
++        Function<void(const URL&)>&& openInTab = { });
++    static Ref<WebView> createForExtensionPage(std::shared_ptr<WebViewStateHaiku>, Ref<API::PageConfiguration>&&);
++
++    ~WebView();
++
++    WebPageProxy* page() const;
++    void close();
++    // The browser's view of the page: none, the app does not show these.
++    BMessenger nativeView() const { return { }; }
++
++private:
++    explicit WebView(Ref<API::PageConfiguration>&&);
++
++    RefPtr<WKWPE::View> m_view;
++    bool m_closed { false };
++};
++
++class WebExtensionContext;
++// The browser shows the extension's menu items afresh (the Haiku port's views
++// do in UIProcess/haiku/WebView.cpp).
++// FIXME (Summit, Android): tell the app, when it shows extension menu items.
++void refreshExtensionMenusHaiku(WebExtensionContext&);
++
++} // namespace WebKit
++
++#endif
 diff --git a/Source/WebKit/UIProcess/Extensions/wpe/NativeBrowserCommandWPE.cpp b/Source/WebKit/UIProcess/Extensions/wpe/NativeBrowserCommandWPE.cpp
 new file mode 100644
 index 0000000000000000000000000000000000000000..1dc51608bc8e184db211112b57aae6cf98d6f3c2
@@ -173926,10 +174300,10 @@ index 0000000000000000000000000000000000000000..1dc51608bc8e184db211112b57aae6cf
 +#endif
 diff --git a/Source/WebKit/UIProcess/Extensions/wpe/NativeBrowserCommandWPE.h b/Source/WebKit/UIProcess/Extensions/wpe/NativeBrowserCommandWPE.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..a1904fb580c1455ff45e9a473ab868954f753854
+index 0000000000000000000000000000000000000000..02e355d2170adcf17e342693340ded98d37772d5
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/wpe/NativeBrowserCommandWPE.h
-@@ -0,0 +1,114 @@
+@@ -0,0 +1,117 @@
 +/*
 + * Copyright (C) 2026 air/OS contributors
 + *
@@ -173983,6 +174357,9 @@ index 0000000000000000000000000000000000000000..a1904fb580c1455ff45e9a473ab86895
 +    B_IO_ERROR = -13,
 +    B_WOULD_BLOCK = -14,
 +    B_BAD_PORT_ID = -15,
++    B_NOT_A_DIRECTORY = -16,
++    B_INTERRUPTED = -17,
++    B_BAD_DATA = -18,
 +};
 +
 +// What Haiku names with a BMessenger: a window or a tab's view of the
@@ -174091,6 +174468,22 @@ index 0000000000000000000000000000000000000000..a8679fd7da798116dca41d7c9c5685da
 +// message codes are generated into WebKitBrowserCommandCodes.h.
 +#include "SummitHaikuTypes.h"
 +#include "WebKitBrowserCommandCodes.h"
+diff --git a/Source/WebKit/UIProcess/Extensions/wpe/WebViewPrivate.h b/Source/WebKit/UIProcess/Extensions/wpe/WebViewPrivate.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..718b44ab4704b55a54e421da66f9ac6394e81ebe
+--- /dev/null
++++ b/Source/WebKit/UIProcess/Extensions/wpe/WebViewPrivate.h
+@@ -0,0 +1,10 @@
++/*
++ * Copyright (C) 2026 air/OS contributors. SPDX-License-Identifier: BSD-2-Clause
++ */
++
++#pragma once
++
++// Summit: stands in on WPE for the Haiku port's WebView (UIProcess/haiku), the
++// page client of the pages Summit's WebExtensions code makes itself: an
++// extension's background page, popups and other extension pages.
++#include "ExtensionWebViewWPE.h"
 diff --git a/Source/WebKit/UIProcess/Gamepad/UIGamepadProvider.cpp b/Source/WebKit/UIProcess/Gamepad/UIGamepadProvider.cpp
 index e3ade8843975adf85b92287882013a6884a0fa4d..5ce01b59a92f1f461587586136454070a08f625d 100644
 --- a/Source/WebKit/UIProcess/Gamepad/UIGamepadProvider.cpp
@@ -209777,10 +210170,10 @@ index fc3e8017564cf29eb647731205e00dc8500dd13d..b34100895ae9d802336fb763a86cee52
  #if ENABLE(WK_WEB_EXTENSIONS_SIDEBAR)
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPINotificationsHaiku.cpp b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPINotificationsHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..e31e87ce07dcbd02170a450637b28462f45ba973
+index 0000000000000000000000000000000000000000..9fbfde1f5839d4a6ab867d26d489188e46c9e7c2
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPINotificationsHaiku.cpp
-@@ -0,0 +1,329 @@
+@@ -0,0 +1,340 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "config.h"
 +#include "WebExtensionAPINotificationsHaiku.h"
@@ -209790,13 +210183,15 @@ index 0000000000000000000000000000000000000000..e31e87ce07dcbd02170a450637b28462
 +#include "WebExtensionPermission.h"
 +#include "WebExtensionLocalization.h"
 +#include "WebExtensionUtilities.h"
++#include "SummitHaikuTypes.h"
++#if PLATFORM(HAIKU)
 +#include <Application.h>
 +#include <Entry.h>
 +#include <Handler.h>
-+#include "SummitHaikuTypes.h"
 +#include <Notification.h>
 +#include <String.h>
 +#include <image.h>
++#endif
 +#include <unistd.h>
 +#include <cstdlib>
 +#include <cstring>
@@ -209836,6 +210231,7 @@ index 0000000000000000000000000000000000000000..e31e87ce07dcbd02170a450637b28462
 +static NotificationMap& notificationsForExtension(const String& extensionIdentifier);
 +
 +// On the application's looper, the main thread, as the extension's own calls.
++#if PLATFORM(HAIKU)
 +class NotificationRepliesHaiku final : public BHandler {
 +public:
 +    NotificationRepliesHaiku()
@@ -209910,6 +210306,7 @@ index 0000000000000000000000000000000000000000..e31e87ce07dcbd02170a450637b28462
 +    }
 +    return std::nullopt;
 +}
++#endif
 +
 +static NotificationMap& notificationsForExtension(const String& extensionIdentifier)
 +{
@@ -209929,6 +210326,12 @@ index 0000000000000000000000000000000000000000..e31e87ce07dcbd02170a450637b28462
 +}
 +void WebExtensionAPINotificationsHaiku::present(const String& identifier, const JSON::Object& options)
 +{
++#if !PLATFORM(HAIKU)
++    // FIXME (Summit, Android): show it through the app (as web notifications
++    // are), and dispatch onClicked/onClosed from there.
++    UNUSED_PARAM(identifier);
++    UNUSED_PARAM(options);
++#else
 +    Ref context = extensionContext();
 +    RefPtr manifest = context->manifest();
 +    RefPtr localization = context->localization();
@@ -209998,6 +210401,7 @@ index 0000000000000000000000000000000000000000..e31e87ce07dcbd02170a450637b28462
 +        }
 +    }
 +    BMessenger("application/x-vnd.Haiku-notification_server").SendMessage(&request);
++#endif
 +}
 +void WebExtensionAPINotificationsHaiku::createNotification(const String& identifier, RefPtr<JSON::Value> options, Ref<WebExtensionCallbackHandler>&& callback, String& outExceptionString)
 +{

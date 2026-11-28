@@ -32,13 +32,17 @@ num_of_cpus = $SUMMIT_ANDROID_JOBS
 CBC
 fi
 
+# Summit's own recipes (libraries the engine needs that cerbero does not build).
+cp "$(dirname "$0")"/cerbero-recipes/*.recipe "$SUMMIT_CERBERO_DIR/recipes/"
+
 if [ ! -d "$SUMMIT_CERBERO_HOME/build-tools/bin" ] || [ ! -d "$SUMMIT_CERBERO_HOME/android-ndk-29" ]; then
     summit_cerbero bootstrap --system=no -j "$SUMMIT_ANDROID_JOBS"
 fi
 
 # What the engine links (cerbero's wpewebkit recipe deps, less OpenXR, which
-# Summit does not enable) plus curl for the network process.
+# Summit does not enable) plus curl for the network process and libzip for
+# WebExtension archives.
 summit_cerbero build -j "$SUMMIT_ANDROID_JOBS" \
     icu freetype gettext gstreamer-1.0 gst-plugins-base-1.0 gst-plugins-good-1.0 gst-plugins-bad-1.0 \
     harfbuzz libepoxy libjpeg-turbo libpng libsoup libxslt libwebp openjpeg openssl xkbcommon \
-    curl nghttp2 sqlite3
+    curl nghttp2 sqlite3 libzip
