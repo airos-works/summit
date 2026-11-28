@@ -239,36 +239,38 @@ Done:
 
 - [x] The engine's dependencies cross-built for Android with cerbero (x86_64, arm64).
 - [x] Summit's engine tree builds as WPE for Android (x86_64) and runs the
-      app on the API 36 emulator. Five fixes to the shared tree (all no-ops on
-      air/OS) and two upstream backports (GLib FrameInfo, WPE press counts).
+      app on the API 36 emulator.
 - [x] The app: tabs, private tabs, the address field with shared resolution
       and type-ahead, bookmarks, reading list, history, settings, sharing,
-      links from other apps, phone and tablet layouts, new windows, site
-      permissions, notifications, downloads, fullscreen, error and crash
-      pages, and the tab memory policy.
+      links from other apps, phone, tablet and foldable layouts, new windows,
+      site permissions, notifications, downloads, find in page, file
+      choosers, fullscreen, error and crash pages, and the tab memory policy.
+- [x] WebExtensions with air/OS's implementation (`USE(SUMMIT_EXTENSIONS)`):
+      Firefox and Chrome packages, the stores' "Add to Summit" card, action
+      popups in a sheet, extension pages in tabs, history, bookmarks, search
+      and browser commands answered by shared core code. uBlock Origin and
+      Dark Reader work.
+- [x] Web page preferences shared with air/OS
+      (`Platform/summit/SummitWebPagePreferences.cpp`).
+- [x] Hardware video decoding through GStreamer's `androidmedia`
+      (MediaCodec, to a surface): H.264 plays on `c2.goldfish.h264.decoder`
+      on the emulator.
+- [x] Release builds (R8) and WebDriver/WPT runs in debug builds; a first
+      Interop sample against air/OS (#306).
 
 Next, in order:
 
 1. arm64 engine build and a run on a phone (location delivery, which the
    emulator's provider never gave a page, is unverified).
-2. Browser features still missing on Android: find in page, file choosers,
-   context menus (long press on links and images), a downloads list,
-   favicons in the tab switcher and history, per-site zoom.
-3. Media: hardware decoding through GStreamer's `androidmedia` (MediaCodec)
-   with zero-copy AHardwareBuffer frames; MSE playback on YouTube; WebRTC.
-4. WebExtensions: enable `ENABLE_WK_WEB_EXTENSIONS` for WPE and compile the
-   Haiku port's extension implementation (`UIProcess/Extensions/haiku`,
-   mostly platform-neutral C++) for WPE as well. The few BeAPI-bound files
-   (tab commands, action popups, downloads) need an embedder interface with
-   a Haiku and an Android implementation. The goal is the same extension
-   support as on air/OS: Firefox (XPI, MV2 and MV3), Chrome (CRX, MV2 and
-   MV3) and Safari web extensions, on phones and in desktop mode.
+2. Interop parity (#306): WebDriver input on WPE views (scroll-snap input
+   tests), HTTP/2 in the soup backend, the full Interop 2024-2026 lists.
+3. The FIXMEs of the extension implementation on Android (notifications,
+   captureVisibleTab, debugger input, cookies.onChanged, idle, opening
+   downloads); Safari web extensions; sensors (`docs/sensors.md`).
+4. Media: MSE playback on YouTube; WebRTC capture.
 5. Performance: browserbench.org (Speedometer 3.1, JetStream, MotionMark)
    on a phone against Chrome and Firefox, with the same harness as air/OS
    (`tools/bench`); PGO and LTO for the engine; battery and CPU use when
    idle and while scrolling.
-6. Interop 2024, 2025 and 2026 through WPE WebDriver on Android
-   (`android/wpeview` has the WebDriver service), compared with the air/OS
-   scores (`tools/interop2026`).
-7. CI: build the APK in airos-ci next to the air/OS packages, with a release
+6. CI: build the APK in airos-ci next to the air/OS packages, with a release
    signing key kept outside the repository.
