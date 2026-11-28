@@ -1,0 +1,95 @@
+#!/usr/bin/env python3
+"""WebDriver for Summit on an Android device or emulator, run from the host.
+
+Test runners (WPT's wptrunner, WebKit's run-webdriver-tests) start this as
+their WebDriver binary. It starts Summit's automation activity (debug builds:
+android/app/src/debug, works.airos.summit.automation.AutomationActivity),
+which runs the engine's WebDriver on the device's port 8888, waits for that
+port, forwards the host's --port to it with adb, and stops the app again when
+it is terminated.
+
+  tools/android/summit-webdriver --port=4444 [-s SERIAL]
+"""
+
+import argparse
+import os
+import signal
+import subprocess
+import sys
+import time
+
+APP = "works.airos.summit"
+ACTIVITY = APP + "/works.airos.summit.automation.AutomationActivity"
+DEVICE_PORT = 8888
+
+
+def adb(serial, *args, **kwargs):
+    command = ["adb"] + (["-s", serial] if serial else []) + list(args)
+    return subprocess.run(command, capture_output=True, text=True, **kwargs)
+
+
+def listening(serial, port):
+    """Whether something on the device listens on port (any address)."""
+    for table in ("/proc/net/tcp", "/proc/net/tcp6"):
+        out = adb(serial, "shell", "cat", table).stdout
+        for line in out.splitlines()[1:]:
+            fields = line.split()
+            if len(fields) > 3 and fields[3] == "0A" and int(fields[1].rsplit(":", 1)[1], 16) == port:
+                return True
+    return False
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--port", type=int, default=4444, help="host port for WebDriver clients")
+    parser.add_argument("-s", "--serial", default=os.environ.get("ANDROID_SERIAL"), help="adb device serial")
+    # Runners pass options of their own (--host, log levels): ignored.
+    args, _ = parser.parse_known_args()
+
+    stopping = False
+
+    def stop(*_):
+        nonlocal stopping
+        stopping = True
+
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGQUIT):
+        signal.signal(sig, stop)
+
+    def teardown():
+        adb(args.serial, "shell", "am", "force-stop", APP)
+        adb(args.serial, "forward", "--remove", "tcp:%d" % args.port)
+
+    teardown()
+    adb(args.serial, "shell", "svc", "power", "stayon", "true")
+    adb(args.serial, "shell", "input", "keyevent", "KEYCODE_WAKEUP")
+    started = adb(args.serial, "shell", "am", "start", "-W", "-n", ACTIVITY)
+    if started.returncode != 0 or "Error" in started.stdout:
+        print("summit-webdriver: cannot start %s (a debug build?): %s" % (ACTIVITY, started.stdout.strip()),
+              file=sys.stderr)
+        return 1
+
+    deadline = time.monotonic() + 60
+    while not stopping and not listening(args.serial, DEVICE_PORT):
+        if time.monotonic() > deadline:
+            print("summit-webdriver: WebDriver did not start on the device", file=sys.stderr)
+            teardown()
+            return 1
+        time.sleep(0.2)
+    if stopping:
+        teardown()
+        return 0
+    forwarded = adb(args.serial, "forward", "tcp:%d" % args.port, "tcp:%d" % DEVICE_PORT)
+    if forwarded.returncode != 0:
+        print("summit-webdriver: adb forward failed: %s" % forwarded.stderr.strip(), file=sys.stderr)
+        teardown()
+        return 1
+    print("summit-webdriver: listening on port %d" % args.port, flush=True)
+
+    while not stopping:
+        time.sleep(0.5)
+    teardown()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

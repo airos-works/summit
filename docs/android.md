@@ -209,6 +209,19 @@ layout, and its dashboard in a tab. Still to do:
    no Android counterpart.
 2. Safari web extensions (`.appex` bundles) as on air/OS.
 
+## Automated tests (WebDriver)
+
+Debug builds have WebDriver, as air/OS's Summit does for Interop and WPT:
+`works.airos.summit.automation.AutomationActivity` (in `android/app/src/debug`
+only) starts the engine's WebDriver process beside an automation context, and
+shows the windows WebDriver opens. Their pages are Summit's, with the web
+features `Platform/summit/SummitWebPagePreferences.cpp` turns on, so results
+compare with air/OS's.
+
+`tools/android/summit-webdriver --port=4444` is the WebDriver binary for test
+runners on the host: it starts the activity on the device or emulator, waits
+for WebDriver (port 8888 there) and forwards the host port to it with adb.
+
 ## Status and plan
 
 Done:
