@@ -383,6 +383,9 @@ public final class WebPage {
     /** Returns the view that shows the page, or null if it is in none. */
     public @Nullable WebView getView() { return view; }
 
+    /** Summit: the engine's WebKitWebView of this page (0 once destroyed), for the app's own calls into the engine. */
+    public long getEngineHandle() { return destroyed ? 0 : webKitWebView.getWebKitWebViewPtr(); }
+
     /**
      * Returns the context the page was made with, which its cookies, cache and network state belong to. One that a
      * WebView made for itself ends with the last page made with it, so an app that keeps it to make pages of its own

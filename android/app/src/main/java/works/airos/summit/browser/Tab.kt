@@ -32,6 +32,8 @@ class Tab(val id: Long, val private: Boolean, url: String, title: String = "") {
   /** A blank tab the person opened: the address field takes the focus (and the keyboard comes up). */
   var focusAddress by mutableStateOf(false)
   /** Asks sites for their desktop layout (the desktop user agent). */
+  /** Whether the page was made for an extension's own pages (it shows no others). */
+  var extensionPage = false
   var desktopSite by mutableStateOf(false)
 
   var page: WebPage? = null

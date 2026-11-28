@@ -85,7 +85,8 @@ public final class WebKitWebView {
 
     public long getNativePtr() { return mNativePtr; }
 
-    long getWebKitWebViewPtr() { return mNativePtr != 0 ? nativeGetWebKitWebViewPtr(mNativePtr) : 0; }
+    // Summit: public, for the app's own calls into the engine (WebExtensions).
+    public long getWebKitWebViewPtr() { return mNativePtr != 0 ? nativeGetWebKitWebViewPtr(mNativePtr) : 0; }
 
     public WebKitWebView(@NonNull WPEDisplay display, @NonNull WebKitWebContext context, @Nullable WPEToplevel toplevel,
                          @Nullable WebKitNetworkSession networkSession, @Nullable WebKitSettings settings) {

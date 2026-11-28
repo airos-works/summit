@@ -69,6 +69,10 @@ class MainActivity : ComponentActivity() {
       setOf(Intent.ACTION_VIEW, Intent.ACTION_WEB_SEARCH, Intent.ACTION_SEND)
     browser.restoreSession(openHome = !opensPage)
     if (savedInstanceState == null) handleIntent(intent)
+    // Debug builds: install an extension package from the app's files (tests).
+    if (works.airos.summit.BuildConfig.DEBUG) intent?.getStringExtra("summit.installExtension")?.let { path ->
+      window.decorView.postDelayed({ browser.extensions.install(java.io.File(filesDir, path)) }, 3000)
+    }
     if (browser.tabs.isEmpty()) browser.newTab(browser.homeUrl())
     ProcessLifecycleOwner.get().lifecycle.addObserver(appLifecycle)
     setContent {

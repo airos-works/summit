@@ -132,23 +132,53 @@ whenever WebExtensions are on, on WPE for Android with
   reaches the app as JSON. The command codes are generated for WPE from
   WebKitContext.h, so there is one list.
 
-Still to do, in order:
+How it fits together on WPE:
 
-1. The Haiku embedder layer the shared code uses (`UIProcess/haiku`):
-   `BrowserTabRegistryHaiku`, `BrowserCommandBrokerHaiku`, `FrameInfoHaiku`,
-   `ExtensionPermissionPromptHaiku`, `DownloadRegistryHaiku`,
-   `ContextualIdentitiesHaiku`, `StoragePathsHaiku`, `WebViewStateHaiku`,
-   `WebExtensionTimingHaiku`, `WebExtensionDebuggerHaiku`. Most of each is
-   portable bookkeeping: move that into shared files and leave a Haiku shell
-   (BMessenger delivery, `find_directory`, `system_time`) and a WPE one.
-2. libzip for Android (XPI and CRX archives), a cerbero recipe.
-3. Extension pages (background pages, action popups, offscreen documents,
-   developer tools pages) on WPE: their `WebPageProxy` needs a WPE page client
-   instead of Haiku's `WebView`.
-4. A C API for the app (load, unload, actions, commands, permission prompts,
-   browser commands and their answers) and its JNI and Kotlin side: an
-   extensions manager, the stores' "Add to Summit" card (`core/StoreOffer`),
-   action popups as sheets, and toolbar and menu entries.
+- The shared registries (`BrowserTabRegistryHaiku`, `BrowserCommandBrokerHaiku`,
+  `ExtensionPackageRegistryHaiku` and the rest) compile unchanged on WPE through
+  `Platform/summit/SummitHaikuTypes.h`, which stands in for the few Haiku types
+  they use (`BMessenger` is an embedder target ID, `BMessage` a JSON-able
+  `NativeBrowserCommand`). Their file names keep the Haiku suffix.
+- `UIProcess/Extensions/wpe/` has the WPE parts: background pages on a headless
+  WPE view (`ExtensionWebViewWPE`), action popups as tabs
+  (`ExtensionActionPopupWPE`), and the embedder API (`SummitExtensionsWPE`):
+  - `webkit_summit_extensions_initialize(session, storageDir, sink, data)`
+    starts extensions for a network session (before its first page).
+  - `webkit_summit_extensions_request(json)` takes requests named after
+    `BWebKitContext`'s methods: `prepare`, `load`, `unload`, `actions`,
+    `activateAction`, `commands`, `performCommand`, `setWindowTabs`,
+    `respond` (to a browser command), plus `pageFor` (below).
+  - Answers and events come back through the sink as JSON, as the BMessages a
+    Haiku host gets: `{"target", "what", "fields"}`.
+  - `webkit_summit_extensions_page_identifier(view)` is the page's
+    `WebPageProxyIdentifier`, which tab lists and browser commands use (not
+    `webkit_web_view_get_page_id()`, the web process's page).
+- An extension's own pages (its popup or options page in a tab) need a page
+  made for that extension, as `BWebKitContext::CreateExtensionView` makes one:
+  the app sends `pageFor` with the URL just before it makes the page, and the
+  engine gives that page the extension's configuration. Such a page shows only
+  that extension's pages; going to a web site from it, the engine asks the app
+  (`EXTERNAL_NAVIGATION_REQUESTED`) to show the site in a normal page.
+- The app (`works.airos.summit.extensions`) keeps the installed extensions in
+  the same catalog as air/OS (`core/ExtensionCatalog`, through JNI), with the
+  same identities (`core/ExtensionIdentity`) and installation records, and
+  loads them at startup as air/OS's `ExtensionController` does: the saved state
+  brings back granted sites; a changed package needs new approval.
+- Debug builds read `files/summit.env` (`KEY=VALUE` lines) into the
+  environment before the engine starts, for the engine's `SUMMIT_*` switches
+  (for example `SUMMIT_TRACE_EXTENSION_CONSOLE=1`, extension pages' console
+  in logcat).
+
+Working on the emulator: installing uBlock Origin from its XPI (approval
+dialog), loading it at startup, its action in the page menu, and its popup as a
+tab. Still to do:
+
+1. Action popups as a bottom sheet instead of a tab, and the stores' "Add to
+   Summit" card (`core/StoreOffer`).
+2. The Haiku-only parts, each marked `FIXME (Summit, Android)`: notifications,
+   `tabs.captureVisibleTab`, debugger input, `cookies.onChanged` on libsoup,
+   idle state, opening downloads. Native messaging has no Android counterpart.
+3. Safari web extensions (`.appex` bundles) as on air/OS.
 
 ## Status and plan
 

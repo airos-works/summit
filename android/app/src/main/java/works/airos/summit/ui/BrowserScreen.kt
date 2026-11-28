@@ -71,7 +71,7 @@ import works.airos.summit.browser.Browser
 import works.airos.summit.browser.Tab
 import works.airos.summit.core.SummitCore
 
-private enum class Panel { Page, Tabs, Library, Settings }
+private enum class Panel { Page, Tabs, Library, Settings, Extensions }
 
 /**
  * Summit's window. Phones get the address field at the top and the toolbar
@@ -116,6 +116,15 @@ fun BrowserScreen(browser: Browser, onExit: () -> Unit, onFullscreen: (Boolean) 
               panel = Panel.Page
             }, onDone = { panel = Panel.Page })
             Panel.Settings -> SettingsScreen(browser, onDone = { panel = Panel.Page })
+            Panel.Extensions -> {
+              val context = LocalContext.current
+              ExtensionsScreen(browser.extensions, onAddFromFile = {
+                browser.filePicker?.pick(listOf("application/x-xpinstall", "application/x-chrome-extension", "application/zip", "*/*"), false) { uris ->
+                  val paths = uris?.let { works.airos.summit.browser.Uploads.copy(context, it) }.orEmpty()
+                  paths.firstOrNull()?.let { browser.extensions.install(java.io.File(it)) }
+                }
+              }, onDone = { panel = Panel.Page })
+            }
             Panel.Page -> {
               if (wide) {
                 Toolbar(browser, tab, wide = true, onEditing = { editing = it },
@@ -141,10 +150,15 @@ fun BrowserScreen(browser: Browser, onExit: () -> Unit, onFullscreen: (Boolean) 
           }
         }
         browser.permissionPrompt?.let { PermissionDialog(browser, it) }
+        ExtensionApprovalDialog(browser.extensions)
+        ExtensionPopupSheet(browser.extensions)
         if (menuOpen && tab != null) {
           PageMenu(browser, tab, onDismiss = { menuOpen = false }, onSettings = {
             menuOpen = false
             panel = Panel.Settings
+          }, onExtensions = {
+            menuOpen = false
+            panel = Panel.Extensions
           }, onLibrary = {
             menuOpen = false
             panel = Panel.Library
@@ -300,15 +314,22 @@ private fun AddressField(browser: Browser, tab: Tab?, modifier: Modifier, onFocu
         cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Go, autoCorrectEnabled = false),
         keyboardActions = KeyboardActions(onGo = {
-          browser.go(value.text, tab)
-          focusManager.clearFocus()
+          // Focus goes to the page. Clearing it instead would hand it straight
+          // back to this field, the window's first focusable view (and the
+          // page's view is inside this Compose hierarchy, so clearing Compose's
+          // focus clears the page's too).
+          val text = value.text
+          if (!browser.focusPage()) focusManager.clearFocus()
+          browser.go(text, tab)
         }),
         modifier = Modifier.fillMaxWidth().focusRequester(requester).onFocusChanged { state ->
           if (state.isFocused == focused) return@onFocusChanged
           focused = state.isFocused
           onFocus(focused)
           value = if (focused) {
-            val text = if (url == "about:blank") "" else url
+            // The tab's address now (this handler can run before a recomposition).
+            val current = tab?.url.orEmpty()
+            val text = if (current == "about:blank") "" else current
             TextFieldValue(text, TextRange(0, text.length))
           } else TextFieldValue("")
           Typing.text = value.text
@@ -316,8 +337,13 @@ private fun AddressField(browser: Browser, tab: Tab?, modifier: Modifier, onFocu
       )
       if (!focused) {
         // The site, as Safari and air/OS Mobile show it; the whole address while editing.
+        // An extension's page has no site: its title, as Firefox for Android shows it.
         Text(
-          if (url.isEmpty() || url == "about:blank") "Search or enter address" else SummitCore.shortAddress(url).substringBefore('/'),
+          when {
+            url.isEmpty() || url == "about:blank" -> "Search or enter address"
+            url.startsWith("webkit-extension:") -> tab?.title.orEmpty().ifEmpty { "Extension" }
+            else -> SummitCore.shortAddress(url).substringBefore('/')
+          },
           maxLines = 1,
           overflow = TextOverflow.Ellipsis,
           color = if (url.isEmpty() || url == "about:blank") MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface,
@@ -442,7 +468,8 @@ private fun TabStrip(browser: Browser) {
 }
 
 @Composable
-private fun PageMenu(browser: Browser, tab: Tab, onDismiss: () -> Unit, onSettings: () -> Unit, onLibrary: () -> Unit) {
+private fun PageMenu(browser: Browser, tab: Tab, onDismiss: () -> Unit, onSettings: () -> Unit, onExtensions: () -> Unit,
+  onLibrary: () -> Unit) {
   val context = LocalContext.current
   val bookmarked = remember(tab.url) { SummitCore.isBookmarked(tab.url) }
   ActionSheet(onDismiss) {
@@ -479,6 +506,14 @@ private fun PageMenu(browser: Browser, tab: Tab, onDismiss: () -> Unit, onSettin
       browser.newTab(private = true)
       onDismiss()
     }
+    // Extensions' toolbar actions, as on the desktop's toolbar.
+    for (action in browser.extensions.actions) {
+      SheetAction(action.name + if (action.badge.isNotEmpty()) "  (${action.badge})" else "") {
+        browser.extensions.activate(action)
+        onDismiss()
+      }
+    }
+    SheetAction("Extensions", onClick = onExtensions)
     SheetAction("Bookmarks, Reading List and History", onClick = onLibrary)
     SheetAction("Settings", onClick = onSettings)
     HorizontalDivider()

@@ -51,6 +51,7 @@ import works.airos.summit.core.SummitCore
  */
 class Browser private constructor(private val appContext: Context) {
   companion object {
+    private const val EXTENSION_SCHEME = "webkit-extension:"
     private const val TAG = "Summit"
     const val BACKGROUND_DISCARD_MS = 5 * 60 * 1000L
     private const val PICTURE_WIDTH = 480
@@ -74,6 +75,8 @@ class Browser private constructor(private val appContext: Context) {
     private set
 
   val downloads = Downloads(appContext)
+  /** Summit's WebExtensions (the same engine code as air/OS's). */
+  val extensions = works.airos.summit.extensions.Extensions(appContext, this)
   private val notifications = PageNotifications(appContext)
 
   /** The view of the activity's window, which shows the selected tab's page. */
@@ -226,6 +229,7 @@ class Browser private constructor(private val appContext: Context) {
       if (next != null) select(next) else newTab(homeUrl())
     }
     if (tabs.none { it.private }) endPrivateBrowsing()
+    extensions.syncTabs()
   }
 
   fun closeAll(private: Boolean) {
@@ -249,8 +253,31 @@ class Browser private constructor(private val appContext: Context) {
     target.focusAddress = false
     target.url = url
     target.state = null
-    val page = target.page
+    var page = target.page
+    // Pages made for an extension show only its pages, and only they can: going
+    // between the two takes a new page (as air/OS's separate extension views).
+    if (page != null && (target.extensionPage || url.startsWith(EXTENSION_SCHEME))) {
+      if (view?.page === page) view?.setPage(null)
+      destroyPage(target, keepState = false)
+      page = null
+    }
     if (page != null) page.loadUrl(url) else if (target === selected) show(target)
+  }
+
+  /** Gives the page view the keyboard focus (from the address field); false when it could not take it. */
+  fun focusPage(): Boolean = view?.requestFocus() == true
+
+  /** A page for an extension's action popup, shown in a sheet rather than as a tab. */
+  fun createPopupPage(url: String): WebPage {
+    extensions.preparePage(url, popup = true)
+    return WebPage(contextFor(false))
+  }
+
+  /** A new tab showing url (an extension's tabs.create); its page is made even when it is not selected. */
+  fun openTab(url: String, select: Boolean): Tab {
+    val tab = newTab(url, select = select)
+    if (!select && tab.page == null && url.isNotEmpty()) createPage(tab)
+    return tab
   }
 
   // ---------------------------------------------------------------- pages
@@ -261,12 +288,16 @@ class Browser private constructor(private val appContext: Context) {
     val v = view ?: return
     val page = tab.page ?: createPage(tab)
     if (v.page !== page) v.setPage(page)
+    handler.post { extensions.syncTabs() }
     // Later, not now: this may run inside an engine callback (a page opening
     // a window) whose own page must not be destroyed under it.
     handler.post { if (selected === tab) enforceBudget(keep = tab) }
   }
 
   private fun createPage(tab: Tab): WebPage {
+    // An extension's own page (its popup or options in a tab) gets that
+    // extension's configuration; private tabs' pages never do.
+    tab.extensionPage = extensions.preparePage(if (tab.private) "" else tab.url)
     val page = WebPage(contextFor(tab.private))
     configure(tab, page)
     val state = tab.state
@@ -418,9 +449,13 @@ class Browser private constructor(private val appContext: Context) {
 
   private fun contextFor(private: Boolean): WebContext {
     if (private) return privateContext ?: WebContext(appContext, false, true).also { privateContext = it }
-    return normalContext ?: WebContext(appContext).also {
+    // Normal tabs keep their cookies and storage (wpeview would make an
+    // emulator's session ephemeral by default).
+    return normalContext ?: WebContext(appContext, false, false).also {
       normalContext = it
       it.isTrackingPreventionEnabled = SummitCore.flag("preventCrossSiteTracking")
+      // Before any page is made with the session: pages get the extensions when made.
+      extensions.start(it.networkSessionHandle)
     }
   }
 

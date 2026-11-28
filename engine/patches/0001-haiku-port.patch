@@ -108638,6 +108638,22 @@ index 0000000000000000000000000000000000000000..69b54e60d6ab5063bba15c0845dc7afb
 +} // namespace WebCore
 +
 +#endif // ResourceResponse_h
+diff --git a/Source/WebCore/platform/network/soup/ResourceErrorSoup.cpp b/Source/WebCore/platform/network/soup/ResourceErrorSoup.cpp
+index d09d720d991f74d59bb1b9d5f5e110a4aa163fa6..bfefd5629a9bfda4064fea532eb7146dec6dac03 100644
+--- a/Source/WebCore/platform/network/soup/ResourceErrorSoup.cpp
++++ b/Source/WebCore/platform/network/soup/ResourceErrorSoup.cpp
+@@ -135,6 +135,11 @@ ResourceError::ErrorRecoveryMethod ResourceError::errorRecoveryMethod() const
+         }
+     } else if (m_domain == errorDomainWebKitNetwork)
+         isRecoverableError = m_errorCode == errorCodeHTTPSUpgradeRedirectLoop || m_errorCode == errorCodeTimeout;
++    else if (m_domain == String::fromLatin1(g_quark_to_string(G_TLS_ERROR)) && m_errorCode == G_TLS_ERROR_NOT_TLS) {
++        // Summit (as ResourceErrorCurl.cpp): the port answered in plain HTTP,
++        // so there is no HTTPS server to prefer.
++        isRecoverableError = true;
++    }
+ 
+     return isRecoverableError ? ErrorRecoveryMethod::HTTPFallback : ErrorRecoveryMethod::NoRecovery;
+ }
 diff --git a/Source/WebCore/platform/network/soup/ResourceHandleSoup.cpp b/Source/WebCore/platform/network/soup/ResourceHandleSoup.cpp
 new file mode 100644
 index 0000000000000000000000000000000000000000..6a79d54fd0febf4af25bfce60575b20d7600617e
@@ -119268,7 +119284,7 @@ index 5a8bebfa4fb03b8ed66afe52ec6ea95d97a987ac..63faae935040128a19c5753066e22d7b
 +#endif
  }
 diff --git a/Source/WebKit/NetworkProcess/NetworkResourceLoader.cpp b/Source/WebKit/NetworkProcess/NetworkResourceLoader.cpp
-index 0ecf172b29e1ba69a2573c3de5351f86e5a4ef0e..4878e4d9260e5cbcefd82941766f4cd64e06722a 100644
+index 0ecf172b29e1ba69a2573c3de5351f86e5a4ef0e..860b83e208f280415bed34435f4d9b06898e40b6 100644
 --- a/Source/WebKit/NetworkProcess/NetworkResourceLoader.cpp
 +++ b/Source/WebKit/NetworkProcess/NetworkResourceLoader.cpp
 @@ -115,6 +115,14 @@
@@ -119693,31 +119709,27 @@ index 0ecf172b29e1ba69a2573c3de5351f86e5a4ef0e..4878e4d9260e5cbcefd82941766f4cd6
          if (shouldSendResourceLoadMessages() && !newRequest.isNull())
              protect(connectionToWebProcess().networkProcess())->parentProcessConnection()->send(Messages::NetworkProcessProxy::ResourceLoadDidPerformHTTPRedirection(webPageProxyID(), resourceLoadInfo(), m_redirectResponse, newRequest), 0);
  
-@@ -2334,6 +2668,14 @@ void NetworkResourceLoader::sendBuffer(const FragmentedSharedBuffer& buffer)
+@@ -2334,6 +2668,12 @@ void NetworkResourceLoader::sendBuffer(const FragmentedSharedBuffer& buffer)
  
  void NetworkResourceLoader::tryStoreAsCacheEntry()
  {
-+#if PLATFORM(HAIKU)
 +    // Responses made in this process (a blocking webRequest listener's
 +    // surrogate) have no network load and are never cached.
 +    if (!m_networkLoad) {
 +        LOADER_RELEASE_LOG("tryStoreAsCacheEntry: Not storing cache entry because there is no network load");
 +        return;
 +    }
-+#endif
      if (!canUseCache(m_networkLoad->currentRequest())) {
          LOADER_RELEASE_LOG("tryStoreAsCacheEntry: Not storing cache entry because request is not eligible");
          return;
-@@ -2344,6 +2686,12 @@ void NetworkResourceLoader::tryStoreAsCacheEntry()
+@@ -2344,6 +2684,10 @@ void NetworkResourceLoader::tryStoreAsCacheEntry()
      }
  
      if (isCrossOriginPrefetch()) {
-+#if PLATFORM(HAIKU)
 +        // The transient prefetch cache must honor no-store just as the normal
 +        // HTTP cache does; it otherwise retains the body for a later navigation.
 +        if (m_response.cacheControlContainsNoStore())
 +            return;
-+#endif
          if (CheckedPtr session = protect(connectionToWebProcess().networkProcess())->networkSession(sessionID())) {
              LOADER_RELEASE_LOG("tryStoreAsCacheEntry: Storing entry in prefetch cache");
              session->prefetchCache().store(m_networkLoad->currentRequest().url(), WTF::move(m_response), m_privateRelayed, m_bufferedDataForCache.takeBuffer());
@@ -128158,6 +128170,282 @@ index 0000000000000000000000000000000000000000..88b97346b6cd837b94b9019b44f7b74d
 +} // namespace WebKit
 +
 +#endif
+diff --git a/Source/WebKit/Platform/summit/SummitWebPagePreferences.cpp b/Source/WebKit/Platform/summit/SummitWebPagePreferences.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..d2d913ca9dedc1a1343186118333a95fa4933c6a
+--- /dev/null
++++ b/Source/WebKit/Platform/summit/SummitWebPagePreferences.cpp
+@@ -0,0 +1,244 @@
++/*
++ * Copyright (C) 2026 air/OS contributors. SPDX-License-Identifier: BSD-2-Clause
++ */
++
++#include "config.h"
++#include "SummitWebPagePreferences.h"
++
++#include "WebPreferences.h"
++#include <cstdlib>
++#include <cstring>
++#include <string>
++
++namespace WebKit {
++
++bool summitPreferenceOff(const char* name)
++{
++    const char* list = std::getenv("SUMMIT_PREF_OFF");
++    if (!list)
++        return false;
++    std::string names = std::string(",") + list + ",";
++    return names.find(std::string(",") + name + ",") != std::string::npos;
++}
++
++void applySummitWebPagePreferences(WebPreferences& preferences)
++{
++    // Allow repeatable CPU/GPU Canvas 2D comparisons without changing the
++    // browser's normal preference. The generated preference defaults to true
++    // for Skia ports, so an unset variable preserves the shipping behavior.
++    if (const char* canvasAcceleration = std::getenv("SUMMIT_CANVAS_ACCELERATION"))
++        preferences.setCanvasUsesAcceleratedDrawing(std::strcmp(canvasAcceleration, "0"));
++    // navigator.wakeLock: a screen lock keeps the screen on through the browser
++    // (ScreenAwakeRequestsHaiku) until it is released or the page is hidden.
++    // SUMMIT_SCREEN_WAKE_LOCK=0 reports the API as absent.
++    const char* wakeLock = std::getenv("SUMMIT_SCREEN_WAKE_LOCK");
++    preferences.setScreenWakeLockAPIEnabled(!wakeLock || std::strcmp(wakeLock, "0"));
++#if ENABLE(FULLSCREEN_API)
++    preferences.setFullScreenEnabled(true);
++#endif
++    // The Navigation API, on in Chrome, Safari and WebKitGTK; WebKit leaves it
++    // off for other ports. Without it Reddit falls back to its polyfill, which
++    // misses a Back whose history entry the page rewrote with replaceState
++    // past it: the address went back to the feed and the post stayed (#132).
++    // SUMMIT_NAVIGATION_API=0 turns it off.
++    const char* navigationAPI = std::getenv("SUMMIT_NAVIGATION_API");
++    const bool navigationAPIEnabled = !navigationAPI || std::strcmp(navigationAPI, "0");
++    preferences.setNavigationAPIEnabled(navigationAPIEnabled);
++    preferences.setNavigationAPIPrecommitHandlerEnabled(navigationAPIEnabled);
++    // navigator.clipboard, which every other browser has: copy buttons
++    // (AWS's Cloudscape, GitHub, docs sites) call writeText() and fail
++    // without it (#136). A write needs a click or key press; a read of what
++    // another site or program copied asks with a Paste menu at the element
++    // (requestDOMPasteAccess). SUMMIT_ASYNC_CLIPBOARD=0 turns it off.
++    const char* asyncClipboard = std::getenv("SUMMIT_ASYNC_CLIPBOARD");
++    const bool asyncClipboardEnabled = !asyncClipboard || std::strcmp(asyncClipboard, "0");
++    preferences.setAsyncClipboardAPIEnabled(asyncClipboardEnabled);
++    preferences.setAsyncClipboardRichContentEnabled(asyncClipboardEnabled);
++    preferences.setDOMPasteAccessRequestsEnabled(asyncClipboardEnabled);
++    // navigator.share() and canShare(), with files, as in Safari (Summit
++    // #153): sites show their own Share buttons only when it is there. The
++    // host shows the share menu (BWebKitView::SetShareRequests).
++    // SUMMIT_WEB_SHARE=0 hides it.
++    const char* webShare = std::getenv("SUMMIT_WEB_SHARE");
++    const bool webShareEnabled = !webShare || std::strcmp(webShare, "0");
++    preferences.setWebShareEnabled(webShareEnabled);
++    preferences.setWebShareFileAPIEnabled(webShareEnabled);
++    // Chrome and Firefox ship requestIdleCallback, and sites and extensions built for
++    // them call it unconditionally. WebKit's implementation is complete but off by default.
++    // SUMMIT_REQUEST_IDLE_CALLBACK=0 turns it off, to tell its cost apart.
++    const char* idleCallbacks = std::getenv("SUMMIT_REQUEST_IDLE_CALLBACK");
++    preferences.setRequestIdleCallbackEnabled(!idleCallbacks || std::strcmp(idleCallbacks, "0"));
++    // requestVideoFrameCallback, which Chrome and Firefox ship: three.js
++    // uploads a video texture only when the callback says a new frame came,
++    // and without it every playing video in every animation frame (getartcraft.com:
++    // four 640x360 pictures, 60 times a second, for videos of 24 to 30).
++    // SUMMIT_VIDEO_FRAME_CALLBACK=0 turns it off.
++    const char* videoFrameCallback = std::getenv("SUMMIT_VIDEO_FRAME_CALLBACK");
++    preferences.setRequestVideoFrameCallbackEnabled(!videoFrameCallback || std::strcmp(videoFrameCallback, "0"));
++    // Muted videos that started themselves pause while nothing of them is on
++    // screen and resume when they come back, as on iOS: CNN's front page
++    // plays four at once, most of them below the fold, and took two cores.
++    // SUMMIT_PAUSE_INVISIBLE_AUTOPLAY=0 lets them play.
++    const char* pauseInvisible = std::getenv("SUMMIT_PAUSE_INVISIBLE_AUTOPLAY");
++    preferences.setInvisibleAutoplayNotPermitted(!pauseInvisible || std::strcmp(pauseInvisible, "0"));
++    // Block pop-ups: window.open() needs a click or key press, as in other browsers.
++    preferences.setJavaScriptCanOpenWindowsAutomatically(false);
++    // Developer extras keep a page's console messages (and failed loads) for
++    // developer tools opened later, as other browsers' tools show them;
++    // SUMMIT_DEVELOPER_EXTRAS=0 keeps them off until the tools attach.
++    const char* developerExtras = std::getenv("SUMMIT_DEVELOPER_EXTRAS");
++    preferences.setDeveloperExtrasEnabled(!developerExtras || std::strcmp(developerExtras, "0"));
++    // Connections opened before they are needed: for <link rel=preconnect>
++    // and Link: headers naming the hosts a page will load from (the network
++    // process also opens one to the page being navigated to while its web
++    // process starts). The curl backend has them on Haiku; off by default
++    // only because the build-wide switch is. SUMMIT_PRECONNECT=0 turns all
++    // of them off.
++    const char* preconnect = std::getenv("SUMMIT_PRECONNECT");
++    const bool preconnectEnabled = !preconnect || std::strcmp(preconnect, "0");
++    preferences.setLinkPreconnect(preconnectEnabled);
++    preferences.setLinkPreconnectEarlyHintsEnabled(preconnectEnabled);
++    // LinkLoader and the network cache already implement rel=prefetch. Enable
++    // it for native pages as well; extension privacy.network overrides still
++    // take precedence through WebPageProxy's per-page preferences store.
++    const char* prefetch = std::getenv("SUMMIT_PREFETCH");
++    preferences.setLinkPrefetchEnabled(!prefetch || std::strcmp(prefetch, "0"));
++    // navigator.storage (estimate, persist), on by default for GTK and WPE;
++    // web apps and extensions (OneTab) call it unguarded.
++    preferences.setStorageAPIEnabled(true);
++    preferences.setStorageAPIEstimateEnabled(true);
++    // The Push API (Summit #148): PushManager on service worker registrations
++    // and push events in service workers, as in Safari and Firefox. The
++    // network process keeps the subscriptions and the connection to the push
++    // service (WebPushServiceHaiku); private windows have neither, so
++    // subscribe() fails there, as in Firefox. SUMMIT_WEB_PUSH=0 hides it.
++    if (const char* push = std::getenv("SUMMIT_WEB_PUSH"); !push || std::strcmp(push, "0"))
++        preferences.setPushAPIEnabled(true);
++    // Origin private file system (navigator.storage.getDirectory, sync access
++    // handles in workers, createWritable), on by default for Cocoa, GTK and
++    // WPE (Summit #146): SQLite-in-WebAssembly apps and web editors keep
++    // their data there. Stored with the site's data in the network process.
++    // SUMMIT_OPFS=0 hides it.
++    if (const char* opfs = std::getenv("SUMMIT_OPFS"); !opfs || std::strcmp(opfs, "0")) {
++        preferences.setFileSystemEnabled(true);
++        preferences.setAccessHandleEnabled(true);
++        preferences.setFileSystemWritableStreamEnabled(true);
++        preferences.setFileSystemHandleSerializationEnabled(true);
++    }
++    // Features Safari ships whose defaults name only Cocoa or GTK/WPE
++    // (Summit #147): scoped custom element registries, element.currentCSSZoom,
++    // font-variant-emoji and ManagedMediaSource.
++    preferences.setScopedCustomElementRegistryEnabled(!summitPreferenceOff("scoped"));
++    preferences.setEnableElementCurrentCSSZoom(!summitPreferenceOff("zoom"));
++    preferences.setCSSFontVariantEmojiEnabled(!summitPreferenceOff("emoji"));
++#if ENABLE(PREDEFINED_COLOR_SPACE_DISPLAY_P3)
++    // Canvas and ImageData colorSpace "display-p3" (Safari 15.2), drawn by
++    // Skia; the screen is still treated as sRGB.
++    preferences.setCanvasColorSpaceEnabled(!summitPreferenceOff("p3"));
++#endif
++#if ENABLE(WEBGPU)
++    // navigator.gpu (#158) on Dawn over Vulkan, in the web process
++    // (WebCore/Modules/WebGPU/Dawn). Without a Vulkan driver requestAdapter()
++    // resolves to null.
++    preferences.setWebGPUEnabled(!summitPreferenceOff("webgpu"));
++#endif
++    // <input type=checkbox switch> (Safari 17.4), drawn by the Adwaita
++    // toggle button control (ToggleButtonAdwaita::drawSwitch).
++    preferences.setSwitchControlEnabled(!summitPreferenceOff("switch"));
++    // Keyboard scrolling (arrows, Page Up/Down, Space) through WebCore's
++    // KeyboardScrollingAnimator, as on the Mac: it animates the scroll and
++    // pages to snap positions past the view in scroll-snap containers
++    // (#181; the old path stopped short of Safari's position).
++    preferences.setEventHandlerDrivenSmoothKeyboardScrollingEnabled(!summitPreferenceOff("keyscroll"));
++    // HTTPS-First (#160), as Chrome, Firefox and Safari do: http:// pages are
++    // tried over https first and loaded over http when the host has no
++    // usable HTTPS (ResourceErrorCurl.cpp). IP addresses and localhost are
++    // never upgraded. Off with SUMMIT_HTTPS_FIRST=0 or the host's page
++    // setting httpsFirst (BWebKitView::SetPageSettings).
++    if (const char* httpsFirst = std::getenv("SUMMIT_HTTPS_FIRST"); !httpsFirst || std::strcmp(httpsFirst, "0"))
++        preferences.setHTTPSByDefaultEnabled(true);
++    // cookieStore (get, set, delete and change events; Safari 18.4), on the
++    // curl cookie jar (NetworkStorageSessionCurl.cpp reports its changes).
++    // SUMMIT_COOKIE_STORE=0 hides it.
++    if (const char* cookieStore = std::getenv("SUMMIT_COOKIE_STORE"); !cookieStore || std::strcmp(cookieStore, "0"))
++        preferences.setCookieStoreAPIEnabled(true);
++#if ENABLE(MEDIA_SOURCE)
++    preferences.setManagedMediaSourceEnabled(!summitPreferenceOff("mms"));
++#endif
++    // DataTransfer.items, on by default for the other ports: editors (GitHub's
++    // among them) take pasted and dropped images from it.
++    preferences.setDataTransferItemsEnabled(true);
++    preferences.setAltitudeAngleEnabled(true);
++    preferences.setAzimuthAngleEnabled(true);
++    preferences.setInputTypeColorEnabled(true);
++#if ENABLE(PDFJS)
++    preferences.setPDFJSViewerEnabled(true);
++#endif
++    preferences.setDataListElementEnabled(true);
++    preferences.setSelectShowPickerEnabled(true);
++    preferences.setInputTypeDateEnabled(true);
++    preferences.setInputTypeMonthEnabled(true);
++    preferences.setInputTypeWeekEnabled(true);
++    preferences.setInputTypeTimeEnabled(true);
++    preferences.setInputTypeDateTimeLocalEnabled(true);
++    // Background tabs: slow their timers down (more the longer they stay
++    // hidden) and pause their CSS animations, as Safari does; GTK enables the
++    // same. Hidden tabs ran every 10 ms timer at full rate, which with dozens
++    // of tabs of ad and analytics scripts is a steady cost. Pages playing
++    // audio are exempt in WebCore. Extension background pages have their own
++    // preferences and are not throttled. SUMMIT_HIDDEN_PAGE_THROTTLING=0 turns
++    // it off.
++    if (const char* throttling = std::getenv("SUMMIT_HIDDEN_PAGE_THROTTLING"); !throttling || std::strcmp(throttling, "0")) {
++        preferences.setHiddenPageDOMTimerThrottlingEnabled(true);
++        preferences.setHiddenPageDOMTimerThrottlingAutoIncreases(true);
++        preferences.setHiddenPageCSSAnimationSuspensionEnabled(true);
++    }
++#if ENABLE(OFFSCREEN_CANVAS)
++    // SUMMIT_OFFSCREEN_CANVAS=0 hides OffscreenCanvas again.
++    if (const char* offscreen = std::getenv("SUMMIT_OFFSCREEN_CANVAS"); !offscreen || std::strcmp(offscreen, "0")) {
++        preferences.setOffscreenCanvasEnabled(true);
++        preferences.setOffscreenCanvasInWorkersEnabled(true);
++#if ENABLE(WEBGL)
++        preferences.setAllowWebGLInWorkers(true);
++#endif
++    }
++#endif
++#if ENABLE(WEB_AUTHN)
++    // Passkeys reach this port through a password manager, which can only extend
++    // Web Authentication when the page exposes it. Summit has no authenticator of
++    // its own; see UIProcess/WebAuthentication/haiku.
++    preferences.setWebAuthenticationEnabled(true);
++#endif
++    // Opt-in diagnostics: page and content-script console messages go to stderr.
++    if (const char* trace = std::getenv("SUMMIT_TRACE_PAGE_CONSOLE"); trace && !std::strcmp(trace, "1"))
++        preferences.setLogsPageMessagesToSystemConsoleEnabled(true);
++    // navigator.permissions: answered from the host's decisions (queryPermission).
++    preferences.setPermissionsAPIEnabled(true);
++#if ENABLE(MEDIA_STREAM)
++    // Camera, microphone and screen capture (platform/mediastream/haiku), asked
++    // of the host (decidePolicyForUserMediaPermissionRequest).
++    preferences.setMediaDevicesEnabled(true);
++    preferences.setScreenCaptureEnabled(true);
++#if USE(LIBWEBRTC)
++    preferences.setPeerConnectionEnabled(true);
++    // RTCRtpScriptTransform (end-to-end encrypted calls), Cocoa-only by
++    // default (Summit #147).
++    preferences.setWebRTCEncodedTransformEnabled(!summitPreferenceOff("rtc"));
++#endif
++#if ENABLE(MEDIA_RECORDER)
++    preferences.setMediaRecorderEnabled(true);
++#endif
++    // Media capture on plain http://localhost pages and file: URLs is for
++    // testing: SUMMIT_INSECURE_MEDIA_CAPTURE=1.
++    if (const char* insecure = std::getenv("SUMMIT_INSECURE_MEDIA_CAPTURE"); insecure && !std::strcmp(insecure, "1"))
++        preferences.setMediaCaptureRequiresSecureConnection(false);
++#endif
++    // SUMMIT_COMPOSITING_BORDERS=1: WebKit's compositing debug borders and
++    // repaint counters, as WEBKIT_SHOW_COMPOSITING_DEBUG_VISUALS does on GTK.
++    if (const char* borders = std::getenv("SUMMIT_COMPOSITING_BORDERS"); borders && !std::strcmp(borders, "1")) {
++        preferences.setCompositingBordersVisible(true);
++        preferences.setCompositingRepaintCountersVisible(true);
++    }
++}
++
++} // namespace WebKit
+diff --git a/Source/WebKit/Platform/summit/SummitWebPagePreferences.h b/Source/WebKit/Platform/summit/SummitWebPagePreferences.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..36d23b0de3f0b8dbc7e6bf295f652f8a3752d197
+--- /dev/null
++++ b/Source/WebKit/Platform/summit/SummitWebPagePreferences.h
+@@ -0,0 +1,20 @@
++/*
++ * Copyright (C) 2026 air/OS contributors. SPDX-License-Identifier: BSD-2-Clause
++ */
++
++#pragma once
++
++namespace WebKit {
++
++class WebPreferences;
++
++// The preferences Summit gives every web page, on air/OS (WebView.cpp) and
++// Android (WebKitWebView.cpp): the web features it ships beyond the port
++// defaults, each with its SUMMIT_* switch. One list, so that both systems
++// show the web the same features (and score the same in Interop).
++void applySummitWebPagePreferences(WebPreferences&);
++
++// Whether SUMMIT_PREF_OFF (a comma-separated list) names this preference.
++bool summitPreferenceOff(const char* name);
++
++} // namespace WebKit
 diff --git a/Source/WebKit/PlatformGTK.cmake b/Source/WebKit/PlatformGTK.cmake
 index ba7f7450916014f7347c014f758e529a160703f3..67793de0a3d349cd7333f12397e3348ea7245a93 100644
 --- a/Source/WebKit/PlatformGTK.cmake
@@ -128172,10 +128460,10 @@ index ba7f7450916014f7347c014f758e529a160703f3..67793de0a3d349cd7333f12397e3348e
      ${WEBKIT_DIR}/UIProcess/API/glib/WebKitHitTestResult.h.in
 diff --git a/Source/WebKit/PlatformHaiku.cmake b/Source/WebKit/PlatformHaiku.cmake
 new file mode 100644
-index 0000000000000000000000000000000000000000..51ef8cd9a5ecb7066f403bdcf0968940b66872fa
+index 0000000000000000000000000000000000000000..30565eea5dee292caa12f661f81882682eb9695a
 --- /dev/null
 +++ b/Source/WebKit/PlatformHaiku.cmake
-@@ -0,0 +1,470 @@
+@@ -0,0 +1,473 @@
 +include(Headers.cmake)
 +include(Platform/Curl.cmake)
 +
@@ -128198,6 +128486,9 @@ index 0000000000000000000000000000000000000000..51ef8cd9a5ecb7066f403bdcf0968940
 +configure_file(UIProcess/API/haiku/WebKitBuildInfoHaiku.h.in ${DERIVED_SOURCES_HAIKU_API_DIR}/WebKitBuildInfoHaiku.h @ONLY)
 +
 +list(APPEND WebKit_SOURCES
++    # The preferences Summit gives web pages, shared with Android.
++    Platform/summit/SummitWebPagePreferences.cpp
++
 +    NetworkProcess/NetworkDataTaskDataURL.cpp
 +    NetworkProcess/Classifier/WebResourceLoadStatisticsStore.cpp
 +    # Web Push (Summit #148): subscriptions and the push service connection.
@@ -128647,7 +128938,7 @@ index 0000000000000000000000000000000000000000..51ef8cd9a5ecb7066f403bdcf0968940
 +    set_source_files_properties(NetworkProcess/webtransport/haiku/WebTransportQuicConnectionHaiku.cpp PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
 +endif ()
 diff --git a/Source/WebKit/PlatformWPE.cmake b/Source/WebKit/PlatformWPE.cmake
-index d7af1df57c6a15668529d012456a8e550015697f..17e0221c9bebe5c64cfd6ac361f8fcecf006c86a 100644
+index d7af1df57c6a15668529d012456a8e550015697f..12d3d90330dc5716c327542faf42be20c76ed7da 100644
 --- a/Source/WebKit/PlatformWPE.cmake
 +++ b/Source/WebKit/PlatformWPE.cmake
 @@ -8,6 +8,11 @@ include(InspectorGResources.cmake)
@@ -128670,6 +128961,16 @@ index d7af1df57c6a15668529d012456a8e550015697f..17e0221c9bebe5c64cfd6ac361f8fcec
      ${WEBKIT_DIR}/UIProcess/API/glib/WebKitGeolocationManager.h.in
      ${WEBKIT_DIR}/UIProcess/API/glib/WebKitGeolocationPermissionRequest.h.in
      ${WEBKIT_DIR}/UIProcess/API/glib/WebKitHitTestResult.h.in
+@@ -488,6 +494,9 @@ endif ()
+ 
+ if (ANDROID)
+     list(APPEND WebKit_PRIVATE_LIBRARIES intl)
++    # Summit for Android: the preferences Summit gives web pages, as on air/OS.
++    list(APPEND WebKit_SOURCES Platform/summit/SummitWebPagePreferences.cpp)
++    list(APPEND WebKit_PRIVATE_INCLUDE_DIRECTORIES "${WEBKIT_DIR}/Platform/summit")
+ endif ()
+ 
+ if (USE_ATK)
 diff --git a/Source/WebKit/Scripts/generate-browser-command-codes.py b/Source/WebKit/Scripts/generate-browser-command-codes.py
 new file mode 100644
 index 0000000000000000000000000000000000000000..f56daafdb22609fc799a893b787b57e85b7987e4
@@ -137130,6 +137431,38 @@ index 56b8f77cf6cff36f45b52cf47dfbd0dcf1fb55e0..5e5d8a93db182819bde5e9ed4222fec6
  };
  
  WebKitNavigationAction* webkitNavigationActionCreate(Ref<API::NavigationAction>&&);
+diff --git a/Source/WebKit/UIProcess/API/glib/WebKitNavigationClient.cpp b/Source/WebKit/UIProcess/API/glib/WebKitNavigationClient.cpp
+index e0a38b76bdc7a0005296f393bf8c4651412ae076..decae2f2d2c05b731b1b9b892421fe9abdca5c0e 100644
+--- a/Source/WebKit/UIProcess/API/glib/WebKitNavigationClient.cpp
++++ b/Source/WebKit/UIProcess/API/glib/WebKitNavigationClient.cpp
+@@ -32,6 +32,9 @@
+ #include "WebKitURIResponsePrivate.h"
+ #include "WebKitWebContextPrivate.h"
+ #include "WebKitWebViewPrivate.h"
++#if ENABLE(WK_WEB_EXTENSIONS) && USE(SUMMIT_EXTENSIONS)
++#include "SummitExtensionsWPE.h"
++#endif
+ #include <wtf/glib/GLibExtras.h>
+ #include <wtf/glib/GUniquePtr.h>
+ #include <wtf/text/CString.h>
+@@ -144,8 +147,16 @@ private:
+         webkitWebViewSetIsWebProcessResponsive(m_webView, false);
+     }
+ 
+-    void decidePolicyForNavigationAction(WebPageProxy&, Ref<API::NavigationAction>&& navigationAction, Ref<WebFramePolicyListenerProxy>&& listener) override
++    void decidePolicyForNavigationAction(WebPageProxy& page, Ref<API::NavigationAction>&& navigationAction, Ref<WebFramePolicyListenerProxy>&& listener) override
+     {
++#if ENABLE(WK_WEB_EXTENSIONS) && USE(SUMMIT_EXTENSIONS)
++        if (summitExtensionsRefuseNavigation(page, navigationAction.get())) {
++            listener->ignore();
++            return;
++        }
++#else
++        UNUSED_PARAM(page);
++#endif
+         WebKitPolicyDecisionType decisionType = navigationAction->targetFrame() ? WEBKIT_POLICY_DECISION_TYPE_NAVIGATION_ACTION : WEBKIT_POLICY_DECISION_TYPE_NEW_WINDOW_ACTION;
+         GRefPtr<WebKitPolicyDecision> decision = adoptGRef(webkitNavigationPolicyDecisionCreate(WTF::move(navigationAction), WTF::move(listener)));
+         webkitWebViewMakePolicyDecision(m_webView, decisionType, decision.get());
 diff --git a/Source/WebKit/UIProcess/API/glib/WebKitPrivate.cpp b/Source/WebKit/UIProcess/API/glib/WebKitPrivate.cpp
 index 5451b813c53f8ea4f6016493330305e147ebce28..3cbffbc157610006bbee55e69b1b1fb6044afd6d 100644
 --- a/Source/WebKit/UIProcess/API/glib/WebKitPrivate.cpp
@@ -137311,10 +137644,20 @@ index c31803950d4d66cc02796e2cd192d50bb31994e5..640849f11ec62305d51527982cce3b9f
  RefPtr<WebKit::WebExtension> webkitWebExtensionToImpl(WebKitWebExtension*);
  
 diff --git a/Source/WebKit/UIProcess/API/glib/WebKitWebView.cpp b/Source/WebKit/UIProcess/API/glib/WebKitWebView.cpp
-index 997b8ca09f58c40ae9180136cbd2e9cdcc669d2c..3e6d1c85c965c5551f76c02c5e0ad9849f717559 100644
+index 997b8ca09f58c40ae9180136cbd2e9cdcc669d2c..d8f9791e83135d3446e2d996a9102d7f61662adb 100644
 --- a/Source/WebKit/UIProcess/API/glib/WebKitWebView.cpp
 +++ b/Source/WebKit/UIProcess/API/glib/WebKitWebView.cpp
-@@ -139,9 +139,13 @@
+@@ -71,6 +71,9 @@
+ #include "WebKitWebResourcePrivate.h"
+ #include "WebKitWebViewInternal.h"
+ #include "WebKitWebViewPrivate.h"
++#if PLATFORM(WPE) && OS(ANDROID)
++#include "SummitWebPagePreferences.h"
++#endif
+ #include "WebKitWebViewSessionStatePrivate.h"
+ #include "WebKitWebsiteDataManagerPrivate.h"
+ #include "WebKitWebsitePoliciesPrivate.h"
+@@ -139,9 +142,13 @@
  #include "WebKitJavascriptResultPrivate.h"
  #endif
  
@@ -137329,7 +137672,7 @@ index 997b8ca09f58c40ae9180136cbd2e9cdcc669d2c..3e6d1c85c965c5551f76c02c5e0ad984
  
  using namespace WebKit;
  using namespace WebCore;
-@@ -271,7 +275,7 @@ enum {
+@@ -271,7 +278,7 @@ enum {
      PROP_PAGE_ICONS,
  #endif
  
@@ -137338,7 +137681,7 @@ index 997b8ca09f58c40ae9180136cbd2e9cdcc669d2c..3e6d1c85c965c5551f76c02c5e0ad984
      PROP_WEB_EXTENSION_CONTEXT,
  #endif
  
-@@ -464,7 +468,7 @@ struct _WebKitWebViewPrivate {
+@@ -464,7 +471,7 @@ struct _WebKitWebViewPrivate {
  #if ENABLE(WEBXR) && USE(OPENXR)
      bool isImmersiveModeEnabled;
  #endif
@@ -137347,7 +137690,7 @@ index 997b8ca09f58c40ae9180136cbd2e9cdcc669d2c..3e6d1c85c965c5551f76c02c5e0ad984
      GWeakPtr<WebKitWebExtensionContext> webExtensionContext;
  #endif
  };
-@@ -736,7 +740,7 @@ static WebKitFaviconDatabase* webkitWebViewGetFaviconDatabase(WebKitWebView* web
+@@ -736,7 +743,7 @@ static WebKitFaviconDatabase* webkitWebViewGetFaviconDatabase(WebKitWebView* web
  }
  #endif // PLATFORM(GTK) || ENABLE(2021_GLIB_API)
  
@@ -137356,7 +137699,18 @@ index 997b8ca09f58c40ae9180136cbd2e9cdcc669d2c..3e6d1c85c965c5551f76c02c5e0ad984
  WebKitWebExtensionContext* webkitWebViewGetWebExtensionContext(WebKitWebView *webView)
  {
      return webView->priv->webExtensionContext.get();
-@@ -916,7 +920,7 @@ static Ref<API::PageConfiguration> webkitWebViewCreatePageConfiguration(WebKitWe
+@@ -899,6 +906,10 @@ static Ref<API::PageConfiguration> webkitWebViewCreatePageConfiguration(WebKitWe
+     auto pageConfiguration = API::PageConfiguration::create();
+     pageConfiguration->setProcessPool(&webkitWebContextGetProcessPool(priv->context.get()));
+     pageConfiguration->setPreferences(webkitSettingsGetPreferences(priv->settings.get()));
++#if PLATFORM(WPE) && OS(ANDROID)
++    // Summit for Android: the web features Summit's pages have on air/OS.
++    applySummitWebPagePreferences(pageConfiguration->preferences());
++#endif
+     pageConfiguration->preferences().setAllowTestOnlyIPC(pageConfiguration->allowTestOnlyIPC());
+     pageConfiguration->preferences().setUsesSingleWebProcess(pageConfiguration->processPool().usesSingleWebProcess());
+     pageConfiguration->setRelatedPage(priv->relatedView ? &webkitWebViewGetPage(priv->relatedView) : nullptr);
+@@ -916,7 +927,7 @@ static Ref<API::PageConfiguration> webkitWebViewCreatePageConfiguration(WebKitWe
          break;
      }
  
@@ -137365,20 +137719,22 @@ index 997b8ca09f58c40ae9180136cbd2e9cdcc669d2c..3e6d1c85c965c5551f76c02c5e0ad984
      if (WebKitWebExtensionContext *ctx = webkitWebViewGetWebExtensionContext(webView); priv->webExtensionMode != WEBKIT_WEB_EXTENSION_MODE_NONE && ctx) {
          RefPtr<WebExtensionContext> context = webkitWebExtensionContextToImpl(ctx);
          pageConfiguration->setCrossOriginAccessControlCheckEnabled(false);
-@@ -942,6 +946,12 @@ static Ref<API::PageConfiguration> webkitWebViewCreatePageConfiguration(WebKitWe
+@@ -942,6 +953,14 @@ static Ref<API::PageConfiguration> webkitWebViewCreatePageConfiguration(WebKitWe
  
      pageConfiguration->setDefaultWebsitePolicies(webkitWebsitePoliciesGetWebsitePolicies(priv->websitePolicies.get()));
  
 +#if ENABLE(WK_WEB_EXTENSIONS) && USE(SUMMIT_EXTENSIONS)
 +    // Summit: pages get the extensions once the embedder started them.
-+    if (RefPtr controller = summitExtensionsController(webkitWebsiteDataManagerGetDataStore(manager)))
++    if (RefPtr controller = summitExtensionsController(webkitWebsiteDataManagerGetDataStore(manager))) {
 +        pageConfiguration->setWebExtensionController(WTF::move(controller));
++        summitExtensionsConfigurePage(pageConfiguration.get());
++    }
 +#endif
 +
      return pageConfiguration;
  }
  
-@@ -1051,7 +1061,7 @@ static void webkitWebViewConstructed(GObject* object)
+@@ -1051,7 +1070,7 @@ static void webkitWebViewConstructed(GObject* object)
      }
  #endif
  
@@ -137387,7 +137743,7 @@ index 997b8ca09f58c40ae9180136cbd2e9cdcc669d2c..3e6d1c85c965c5551f76c02c5e0ad984
      if (!priv->websitePolicies && priv->webExtensionMode != WEBKIT_WEB_EXTENSION_MODE_NONE)
          priv->websitePolicies = adoptGRef(webkit_website_policies_new_with_policies("autoplay", WEBKIT_AUTOPLAY_ALLOW, nullptr));
  #endif
-@@ -1195,7 +1205,7 @@ static void webkitWebViewSetProperty(GObject* object, guint propId, const GValue
+@@ -1195,7 +1214,7 @@ static void webkitWebViewSetProperty(GObject* object, guint propId, const GValue
      case PROP_DEFAULT_CONTENT_SECURITY_POLICY:
          webView->priv->defaultContentSecurityPolicy = UTF8CString::unsafeFromUTF8(g_value_get_string(value));
          break;
@@ -137396,7 +137752,7 @@ index 997b8ca09f58c40ae9180136cbd2e9cdcc669d2c..3e6d1c85c965c5551f76c02c5e0ad984
      case PROP_WEB_EXTENSION_CONTEXT:
          webView->priv->webExtensionContext.reset(static_cast<WebKitWebExtensionContext*>(g_value_get_object(value)));
          break;
-@@ -1327,7 +1337,7 @@ static void webkitWebViewGetProperty(GObject* object, guint propId, GValue* valu
+@@ -1327,7 +1346,7 @@ static void webkitWebViewGetProperty(GObject* object, guint propId, GValue* valu
          g_value_set_boxed(value, webkit_web_view_get_page_icons(webView));
          break;
  #endif
@@ -137405,7 +137761,7 @@ index 997b8ca09f58c40ae9180136cbd2e9cdcc669d2c..3e6d1c85c965c5551f76c02c5e0ad984
      case PROP_WEB_EXTENSION_CONTEXT:
          g_value_set_object(value, webkitWebViewGetWebExtensionContext(webView));
          break;
-@@ -1926,7 +1936,7 @@ static void webkit_web_view_class_init(WebKitWebViewClass* webViewClass)
+@@ -1926,7 +1945,7 @@ static void webkit_web_view_class_init(WebKitWebViewClass* webViewClass)
          FALSE,
          WEBKIT_PARAM_READABLE);
  
@@ -164199,10 +164555,10 @@ index 0000000000000000000000000000000000000000..369006fd93a6a0de8fa0bd1926b7e254
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && USE(SUMMIT_EXTENSIONS)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextBackgroundHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextBackgroundHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..7c867a344fd8a566468519e4e1f74d2d6ba3db13
+index 0000000000000000000000000000000000000000..29fd85b2ecf90d82a6d88640a20f272b2b2dd59e
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextBackgroundHaiku.cpp
-@@ -0,0 +1,460 @@
+@@ -0,0 +1,468 @@
 +/*
 + * Copyright (C) 2022-2025 Apple Inc. All rights reserved.
 + * Copyright (C) 2026 KunanyiOS contributors.
@@ -164391,6 +164747,14 @@ index 0000000000000000000000000000000000000000..7c867a344fd8a566468519e4e1f74d2d
 +    auto family = packageFamily(uniqueIdentifier);
 +    if (family == ExtensionPackageFamily::Other)
 +        return { };
++#if OS(ANDROID)
++    // Android: the mobile browsers' user agents, so that packages built for
++    // Firefox for Android and Chrome for Android take their mobile paths (uBlock
++    // Origin's one-column popup, for one).
++    if (family == ExtensionPackageFamily::Chrome)
++        return "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Mobile Safari/537.36"_s;
++    return "Mozilla/5.0 (Android 15; Mobile; rv:140.0) Gecko/140.0 Firefox/140.0"_s;
++#endif
 +    // Keep the platform token of the standard user agent, e.g. "(Macintosh; Intel Haiku/x86_64)".
 +    auto standard = WebCore::standardUserAgent();
 +    auto start = standard.find('(');
@@ -173992,10 +174356,10 @@ index 0000000000000000000000000000000000000000..1f5def2889eaf933a68c6bc922ecac05
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && USE(SUMMIT_EXTENSIONS)
 diff --git a/Source/WebKit/UIProcess/Extensions/wpe/ExtensionActionPopupWPE.cpp b/Source/WebKit/UIProcess/Extensions/wpe/ExtensionActionPopupWPE.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..38ccfff419f551ae50b5c4648d7d082b291a0c75
+index 0000000000000000000000000000000000000000..c7ad90786c54a8bd54e5a167b4a691bde21b8670
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/wpe/ExtensionActionPopupWPE.cpp
-@@ -0,0 +1,85 @@
+@@ -0,0 +1,154 @@
 +/*
 + * Copyright (C) 2026 air/OS contributors. SPDX-License-Identifier: BSD-2-Clause
 + */
@@ -174012,14 +174376,89 @@ index 0000000000000000000000000000000000000000..38ccfff419f551ae50b5c4648d7d082b
 +#include "WebExtensionTab.h"
 +#include "WebExtensionUtilities.h"
 +#include "WebExtensionWindow.h"
++#include "WebPageProxy.h"
 +#include "WebKitBrowserCommandCodes.h"
 +
 +namespace WebKit {
 +
 +// The action popup's part of WebExtensionContext on WPE; Haiku's is in
-+// haiku/ExtensionActionPopupHaiku.cpp. Until the Android app shows popups
-+// (FIXME (Summit, Android)), clicking an action with a popup opens the popup's
-+// page in a new tab next to the page, as Firefox for Android used to.
++// haiku/ExtensionActionPopupHaiku.cpp. The app shows the popup (see
++// ExtensionActionPopupWPE.h).
++
++static constexpr uint64_t actionListenerTargetWPE = 2;
++
++Ref<ExtensionActionPopupHaiku> ExtensionActionPopupHaiku::create(WebExtensionContext& context, WebExtensionAction& action, WebExtensionTab& tab)
++{
++    return adoptRef(*new ExtensionActionPopupHaiku(context, action, tab));
++}
++
++ExtensionActionPopupHaiku::ExtensionActionPopupHaiku(WebExtensionContext& context, WebExtensionAction& action, WebExtensionTab& tab)
++    : m_context(context)
++    , m_action(action)
++    , m_tab(tab)
++    , m_url(URL { context.baseURL(), action.popupPath() })
++{
++}
++
++ExtensionActionPopupHaiku::~ExtensionActionPopupHaiku() = default;
++
++bool ExtensionActionPopupHaiku::start()
++{
++    RefPtr context = m_context.get();
++    RefPtr tabPage = m_tab->nativePage();
++    if (!context || !tabPage)
++        return false;
++    NativeBrowserCommand message(summitPopupShowWPE);
++    return message.AddString("extension_identifier", context->uniqueIdentifier()) == B_OK
++        && message.AddString("url", m_url.string()) == B_OK
++        && message.AddString("title", m_action->label()) == B_OK
++        && message.AddString("page_identifier", String::number(tabPage->identifier().toUInt64())) == B_OK
++        && NativeBrowserTarget { actionListenerTargetWPE }.SendMessage(&message) == B_OK;
++}
++
++bool ExtensionActionPopupHaiku::attach(WebExtensionContext& context, WebPageProxy& page)
++{
++    RefPtr popup = context.m_nativeActionPopup;
++    if (!popup || popup->m_closed || popup->m_page)
++        return false;
++    popup->m_page = &page;
++    context.addPopupPage(page, popup->m_action);
++    return true;
++}
++
++void ExtensionActionPopupHaiku::detach()
++{
++    m_closed = true;
++    RefPtr context = m_context.get();
++    if (RefPtr page = std::exchange(m_page, nullptr); page && context)
++        context->m_popupPageActionMap.remove(*page);
++    if (context && context->m_nativeActionPopup == this)
++        context->m_nativeActionPopup = nullptr;
++}
++
++void ExtensionActionPopupHaiku::closedByEmbedder(WebExtensionContext& context)
++{
++    if (RefPtr popup = context.m_nativeActionPopup)
++        popup->detach();
++}
++
++void ExtensionActionPopupHaiku::close()
++{
++    if (m_closed)
++        return;
++    Ref protectedThis { *this };
++    detach();
++    if (RefPtr context = m_context.get()) {
++        NativeBrowserCommand message(summitPopupCloseWPE);
++        if (message.AddString("extension_identifier", context->uniqueIdentifier()) == B_OK)
++            NativeBrowserTarget { actionListenerTargetWPE }.SendMessage(&message);
++    }
++}
++
++bool ExtensionActionPopupHaiku::isForTab(const WebExtensionTab& tab) const
++{
++    return m_tab.ptr() == &tab;
++}
 +
 +void WebExtensionContext::actionOpenPopup(WebPageProxyIdentifier, std::optional<WebExtensionWindowIdentifier>,
 +    std::optional<WebExtensionTabIdentifier>, CompletionHandler<void(std::expected<void, WebExtensionError>&&)>&& completion)
@@ -174029,7 +174468,7 @@ index 0000000000000000000000000000000000000000..38ccfff419f551ae50b5c4648d7d082b
 +
 +void WebExtensionContext::closeNativeActionPopup()
 +{
-+    if (auto popup = std::exchange(m_nativeActionPopup, nullptr))
++    if (RefPtr popup = m_nativeActionPopup)
 +        popup->close();
 +}
 +
@@ -174065,17 +174504,11 @@ index 0000000000000000000000000000000000000000..38ccfff419f551ae50b5c4648d7d082b
 +        fireActionClickedEventIfNeeded(target.get());
 +        return;
 +    }
-+    NativeBrowserCommand message(B_WEBKIT_BROWSER_COMMAND);
-+    URL popupURL { baseURL(), action->popupPath() };
-+    bool complete = message.AddUInt32("command", B_WEBKIT_BROWSER_OPEN_TAB) == B_OK
-+        && message.AddString("url", popupURL.string()) == B_OK
-+        && message.AddBool("active", true) == B_OK
-+        && message.AddInt32("index", -1) == B_OK
-+        && addNativeBrowserCommandTab(message, *target, "opener", "opener_page_identifier");
-+    if (RefPtr window = complete ? target->window() : nullptr)
-+        addNativeBrowserCommandWindow(message, *window);
-+    if (complete)
-+        sendNativeBrowserCommand(WTF::move(message), "action"_s, [](NativeBrowserCommandResult&&) { });
++    closeNativeActionPopup();
++    Ref popup = ExtensionActionPopupHaiku::create(*this, action, *target);
++    m_nativeActionPopup = popup.copyRef();
++    if (!popup->start())
++        closeNativeActionPopup();
 +}
 +
 +} // namespace WebKit
@@ -174083,10 +174516,10 @@ index 0000000000000000000000000000000000000000..38ccfff419f551ae50b5c4648d7d082b
 +#endif
 diff --git a/Source/WebKit/UIProcess/Extensions/wpe/ExtensionActionPopupWPE.h b/Source/WebKit/UIProcess/Extensions/wpe/ExtensionActionPopupWPE.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..b5a6c3c30481a1d6ae21a4006fe5cedd140413ac
+index 0000000000000000000000000000000000000000..43208bb9dc25d32fe46ec7caeb2e5d5574c41491
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/wpe/ExtensionActionPopupWPE.h
-@@ -0,0 +1,59 @@
+@@ -0,0 +1,64 @@
 +/*
 + * Copyright (C) 2026 air/OS contributors. SPDX-License-Identifier: BSD-2-Clause
 + */
@@ -174100,6 +174533,7 @@ index 0000000000000000000000000000000000000000..b5a6c3c30481a1d6ae21a4006fe5cedd
 +#include <wtf/CompletionHandler.h>
 +#include <wtf/RefCountedAndCanMakeWeakPtr.h>
 +#include <wtf/URL.h>
++#include <wtf/WeakPtr.h>
 +
 +namespace WebKit {
 +
@@ -174109,38 +174543,42 @@ index 0000000000000000000000000000000000000000..b5a6c3c30481a1d6ae21a4006fe5cedd
 +class WebPageProxy;
 +
 +// Summit: an extension's action popup. On Haiku the engine shows popups itself
-+// (ExtensionActionPopupHaiku.cpp); on Android the app will show them.
-+// FIXME (Summit, Android): until it does, a popup fails to open and the
-+// action's onClicked handling applies.
++// (ExtensionActionPopupHaiku.cpp); on Android the app shows them in a sheet of
++// its own: the engine asks it to (an event to the action listener,
++// summitPopupShowWPE), the app makes a page for the popup (the "pageFor"
++// request with purpose "popup") and hands it back ("attachPopup"), which makes
++// it the action's popup for the tab, as on Haiku. Either side may close it.
++static constexpr uint32_t summitPopupShowWPE = 'wxps';
++static constexpr uint32_t summitPopupCloseWPE = 'wxpc';
++
 +class ExtensionActionPopupHaiku final : public RefCountedAndCanMakeWeakPtr<ExtensionActionPopupHaiku> {
 +public:
 +    using PresentationCompletionHandler = CompletionHandler<void(std::expected<void, WebExtensionError>&&)>;
 +
-+    static Ref<ExtensionActionPopupHaiku> create(WebExtensionContext&, WebExtensionAction&, WebExtensionTab&) { return adoptRef(*new ExtensionActionPopupHaiku); }
++    static Ref<ExtensionActionPopupHaiku> create(WebExtensionContext&, WebExtensionAction&, WebExtensionTab&);
++    ~ExtensionActionPopupHaiku();
 +    static void preload(WebExtensionContext&, WebExtensionTab&) { }
++    // The app's page for the shown popup of this extension; false when none is waiting for it.
++    static bool attach(WebExtensionContext&, WebPageProxy&);
++    // The app closed the popup (the person dismissed the sheet).
++    static void closedByEmbedder(WebExtensionContext&);
 +
-+    bool start() { return false; }
-+    void present() { fail("Popups are not supported here yet"_s); }
-+    bool isPreloaded() const { return false; }
-+    bool isPreloadedFor(const WebExtensionAction&, const WebExtensionTab&) const { return false; }
-+    void setPresentationCompletionHandler(PresentationCompletionHandler&& handler) { m_presentationCompletion = WTF::move(handler); }
-+    void close() { }
-+    void validate() { }
-+    bool isForTab(const WebExtensionTab&) const { return false; }
-+    bool isCurrent() const { return false; }
-+    WebPageProxy* page() const { return nullptr; }
-+    bool allowsNavigation(const URL&) const { return false; }
-+    void documentLoaded() { }
-+    void fail(const String& error)
-+    {
-+        if (m_presentationCompletion)
-+            m_presentationCompletion(makeUnexpected(error));
-+    }
-+    void openInTab(const URL&) { }
++    // Asks the app to show the popup.
++    bool start();
++    void close();
++    bool isForTab(const WebExtensionTab&) const;
++    WebPageProxy* page() const { return m_page.get(); }
 +
 +private:
-+    ExtensionActionPopupHaiku() = default;
-+    PresentationCompletionHandler m_presentationCompletion;
++    ExtensionActionPopupHaiku(WebExtensionContext&, WebExtensionAction&, WebExtensionTab&);
++    void detach();
++
++    WeakPtr<WebExtensionContext> m_context;
++    Ref<WebExtensionAction> m_action;
++    Ref<WebExtensionTab> m_tab;
++    RefPtr<WebPageProxy> m_page;
++    URL m_url;
++    bool m_closed { false };
 +};
 +
 +} // namespace WebKit
@@ -174568,10 +175006,10 @@ index 0000000000000000000000000000000000000000..714e6e4bde757d6847d3835a65165ae6
 +#endif
 diff --git a/Source/WebKit/UIProcess/Extensions/wpe/SummitExtensionsWPE.cpp b/Source/WebKit/UIProcess/Extensions/wpe/SummitExtensionsWPE.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..c475eb6411a439ed7f0b48942d586c0835f524d4
+index 0000000000000000000000000000000000000000..bc1692eb7b920cf1c0c60060d6e47c6df942ddb7
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/wpe/SummitExtensionsWPE.cpp
-@@ -0,0 +1,214 @@
+@@ -0,0 +1,324 @@
 +/*
 + * Copyright (C) 2026 air/OS contributors. SPDX-License-Identifier: BSD-2-Clause
 + */
@@ -174582,12 +175020,20 @@ index 0000000000000000000000000000000000000000..c475eb6411a439ed7f0b48942d586c08
 +#if ENABLE(WK_WEB_EXTENSIONS) && USE(SUMMIT_EXTENSIONS) && !PLATFORM(HAIKU)
 +
 +#include "BrowserCommandBrokerHaiku.h"
++#include "ExtensionActionPopupWPE.h"
 +#include "BrowserTabRegistryHaiku.h"
 +#include "ExtensionPackageRegistryHaiku.h"
++#include "APINavigationAction.h"
++#include "APIPageConfiguration.h"
++#include "APIWebsitePolicies.h"
++#include "WebExtensionContext.h"
 +#include "WebExtensionController.h"
++#include "WebPreferences.h"
 +#include "WebExtensionControllerConfiguration.h"
 +#include "WebKitBrowserCommandCodes.h"
 +#include "WebKitNetworkSessionPrivate.h"
++#include "WebKitWebViewPrivate.h"
++#include "WebPageProxy.h"
 +#include "WebKitWebsiteDataManagerPrivate.h"
 +#include "WebsiteDataStore.h"
 +#include <wtf/JSONValues.h>
@@ -174620,6 +175066,9 @@ index 0000000000000000000000000000000000000000..c475eb6411a439ed7f0b48942d586c08
 +    RefPtr<WebsiteDataStore> dataStore;
 +    RefPtr<WebExtensionController> controller;
 +    std::shared_ptr<ExtensionPackageRegistryHaiku> packages;
++    // The extension whose page the embedder makes next ("pageFor").
++    RefPtr<WebExtensionContext> nextPageExtension;
++    bool nextPageIsPopup { false };
 +};
 +
 +static SummitExtensionsHost& host()
@@ -174632,6 +175081,64 @@ index 0000000000000000000000000000000000000000..c475eb6411a439ed7f0b48942d586c08
 +{
 +    auto& h = host();
 +    return h.dataStore == &store ? h.controller.get() : nullptr;
++}
++
++void summitExtensionsConfigurePage(API::PageConfiguration& configuration)
++{
++    RefPtr context = std::exchange(host().nextPageExtension, nullptr);
++    bool popup = std::exchange(host().nextPageIsPopup, false);
++    if (!context || !context->isLoaded())
++        return;
++    // As BWebKitContext::CreateExtensionView: the extension's own page
++    // (options or another of its pages shown in a tab), or its action popup
++    // (as ExtensionActionPopupHaiku makes one).
++    RefPtr extensionConfiguration = context->webViewConfiguration(popup ? WebExtensionContext::WebViewPurpose::Popup : WebExtensionContext::WebViewPurpose::Tab);
++    if (!extensionConfiguration)
++        return;
++    configuration.setContentSecurityPolicyModeForExtension(extensionConfiguration->contentSecurityPolicyModeForExtension());
++    configuration.setCORSDisablingPatterns(Vector<String> { extensionConfiguration->corsDisablingPatterns() });
++    configuration.setCrossOriginAccessControlCheckEnabled(false);
++    configuration.setProcessDisplayName(String { extensionConfiguration->processDisplayName() });
++    configuration.setRequiredWebExtensionBaseURL(URL { extensionConfiguration->requiredWebExtensionBaseURL() });
++    configuration.setShouldRelaxThirdPartyCookieBlocking(WebCore::ShouldRelaxThirdPartyCookieBlocking::Yes);
++    configuration.setMaskedURLSchemes({ });
++    // A copy: the view's policies object may be shared with other views.
++    Ref policies = configuration.defaultWebsitePolicies().copy();
++    policies->setAutoplayPolicy(WebsiteAutoplayPolicy::Allow);
++    if (auto userAgent = extensionConfiguration->defaultWebsitePolicies().customUserAgent(); !userAgent.isEmpty())
++        policies->setCustomUserAgent(String { userAgent });
++    configuration.setDefaultWebsitePolicies(WTF::move(policies));
++    // The extension page's own preferences (as webViewConfiguration's), on a
++    // copy of the view's, which belong to its WebKitSettings.
++    Ref preferences = configuration.preferences().copy();
++    Ref extensionPreferences = extensionConfiguration->preferences();
++    preferences->setLogsPageMessagesToSystemConsoleEnabled(extensionPreferences->logsPageMessagesToSystemConsoleEnabled());
++    preferences->setRequestIdleCallbackEnabled(true);
++    preferences->setStorageAPIEnabled(true);
++    preferences->setStorageAPIEstimateEnabled(true);
++    preferences->setJavaScriptCanAccessClipboard(extensionPreferences->javaScriptCanAccessClipboard());
++    configuration.setPreferences(WTF::move(preferences));
++}
++
++bool summitExtensionsRefuseNavigation(WebPageProxy& page, API::NavigationAction& action)
++{
++    // As WebView::decidePolicyForNavigationAction on Haiku: a page made for an
++    // extension (cross-origin checks off) shows only that extension's pages.
++    // A web page it goes to (1Password's sign-in page) belongs in a normal
++    // page, which the embedder is asked to make.
++    const auto& base = page.configuration().requiredWebExtensionBaseURL();
++    if (base.isEmpty() || !action.targetFrame() || !action.targetFrame()->isMainFrame())
++        return false;
++    const auto& url = action.request().url();
++    if (protocolHostAndPortAreEqual(base, url))
++        return false;
++    if (url.protocolIsInHTTPFamily()) {
++        NativeBrowserCommand message(B_WEBKIT_EXTERNAL_NAVIGATION_REQUESTED);
++        message.AddString("url", url.string());
++        message.AddString("page_identifier", String::number(page.identifier().toUInt64()));
++        NativeBrowserTarget { browserTarget }.SendMessage(&message);
++    }
++    return true;
 +}
 +
 +static void initialize(WebsiteDataStore& store, const String& storageDirectory)
@@ -174743,6 +175250,39 @@ index 0000000000000000000000000000000000000000..c475eb6411a439ed7f0b48942d586c08
 +        if (!result)
 +            return "{\"error\":\"bad window\"}"_s;
 +        return makeString("{\"window\":\""_s, *result, "\"}"_s);
++    } else if (op == "pageFor"_s) {
++        // The next page the embedder makes shows this URL: an extension's
++        // page gets that extension's configuration. Answers its identity.
++        URL url { request.getString("url"_s) };
++        h.nextPageExtension = nullptr;
++        h.nextPageIsPopup = request.getString("purpose"_s) == "popup"_s;
++        for (Ref context : h.packages->loadedContexts()) {
++            if (url.isValid() && context->isURLForThisExtension(url)) {
++                h.nextPageExtension = context.copyRef();
++                return makeString("{\"extension\":"_s, JSON::Value::create(context->uniqueIdentifier())->toJSONString(), '}');
++            }
++        }
++        return "{}"_s;
++    } else if (op == "attachPopup"_s || op == "popupClosed"_s) {
++        // The app's page for the popup it was asked to show (made after
++        // "pageFor" with purpose "popup"), or the person closed it.
++        RefPtr<WebExtensionContext> context;
++        for (Ref candidate : h.packages->loadedContexts()) {
++            if (candidate->uniqueIdentifier() == request.getString("extension"_s))
++                context = candidate.ptr();
++        }
++        if (!context)
++            return "{\"error\":\"no extension\"}"_s;
++        if (op == "popupClosed"_s) {
++            ExtensionActionPopupHaiku::closedByEmbedder(*context);
++            return "{}"_s;
++        }
++        auto page = numberFrom(request, "page"_s);
++        for (Ref candidate : h.controller->allPages()) {
++            if (candidate->identifier().toUInt64() == page)
++                return ExtensionActionPopupHaiku::attach(*context, candidate) ? "{}"_s : "{\"error\":\"no popup\"}"_s;
++        }
++        return "{\"error\":\"no page\"}"_s;
 +    } else if (op == "respond"_s) {
 +        // BWebKitContext::RespondToBrowserCommand(WithData).
 +        BrowserCommandBrokerHaiku::Result result;
@@ -174774,6 +175314,14 @@ index 0000000000000000000000000000000000000000..c475eb6411a439ed7f0b48942d586c08
 +    initialize(webkitWebsiteDataManagerGetDataStore(webkit_network_session_get_website_data_manager(session)), String::fromUTF8(storageDirectory));
 +}
 +
++// The identifier browser commands and the tab lists name a page by (its
++// WebPageProxyIdentifier, as BWebView::PageIdentifier() on Haiku; not
++// webkit_web_view_get_page_id(), the web process's page).
++WEBKIT_API guint64 webkit_summit_extensions_page_identifier(WebKitWebView* webView)
++{
++    return webView ? webkitWebViewGetPage(webView).identifier().toUInt64() : 0;
++}
++
 +// Handles a request (JSON, see above). Returns a JSON answer to free with g_free().
 +WEBKIT_API char* webkit_summit_extensions_request(const char* json)
 +{
@@ -174788,10 +175336,10 @@ index 0000000000000000000000000000000000000000..c475eb6411a439ed7f0b48942d586c08
 +#endif
 diff --git a/Source/WebKit/UIProcess/Extensions/wpe/SummitExtensionsWPE.h b/Source/WebKit/UIProcess/Extensions/wpe/SummitExtensionsWPE.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..2e8dd5572bc9cb3466046374db4aae9c827ffdaf
+index 0000000000000000000000000000000000000000..befaadbbf2c6069b2d0bd29cc4dad1ece5b67cba
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/wpe/SummitExtensionsWPE.h
-@@ -0,0 +1,20 @@
+@@ -0,0 +1,34 @@
 +/*
 + * Copyright (C) 2026 air/OS contributors. SPDX-License-Identifier: BSD-2-Clause
 + */
@@ -174800,14 +175348,28 @@ index 0000000000000000000000000000000000000000..2e8dd5572bc9cb3466046374db4aae9c
 +
 +#if ENABLE(WK_WEB_EXTENSIONS) && USE(SUMMIT_EXTENSIONS) && !PLATFORM(HAIKU)
 +
++namespace API {
++class NavigationAction;
++class PageConfiguration;
++}
++
 +namespace WebKit {
 +
 +class WebExtensionController;
++class WebPageProxy;
 +class WebsiteDataStore;
 +
 +// The controller of Summit's WebExtensions for pages of this data store, once
 +// the embedder started them (webkit_summit_extensions_initialize()).
 +WebExtensionController* summitExtensionsController(WebsiteDataStore&);
++
++// Gives the page being made the configuration of an extension's own page,
++// when the embedder named an extension URL for it ("pageFor" request).
++void summitExtensionsConfigurePage(API::PageConfiguration&);
++
++// Whether a page made for an extension must not go where the action leads
++// (another site); a web page is offered to the embedder for a normal page.
++bool summitExtensionsRefuseNavigation(WebPageProxy&, API::NavigationAction&);
 +
 +} // namespace WebKit
 +
@@ -191510,10 +192072,10 @@ index 0000000000000000000000000000000000000000..c9a119d02f85b7c5ad8fe9153bfc9604
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/haiku/WebView.cpp b/Source/WebKit/UIProcess/haiku/WebView.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..b240941014a2deb76c110fbb39277e75adbcf547
+index 0000000000000000000000000000000000000000..6a9a7b6c3b8c4226ed4a5983b85cf720143b6ce8
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/haiku/WebView.cpp
-@@ -0,0 +1,4000 @@
+@@ -0,0 +1,3784 @@
 +/*
 + * Copyright (C) 2013 Intel Corporation. All rights reserved.
 + *
@@ -191540,6 +192102,7 @@ index 0000000000000000000000000000000000000000..b240941014a2deb76c110fbb39277e75
 + */
 +
 +#include "config.h"
++#include "SummitWebPagePreferences.h"
 +#include "WebExtensionCookieStoreIdentifier.h"
 +#include "FrameInfoHaiku.h"
 +#include "WebViewPrivate.h"
@@ -193524,15 +194087,6 @@ index 0000000000000000000000000000000000000000..b240941014a2deb76c110fbb39277e75
 +
 +// SUMMIT_PREF_OFF=name,name...: turn single Safari-gap preferences (#147)
 +// off again, for comparing their cost.
-+static bool summitPreferenceOffHaiku(const char* name)
-+{
-+    const char* list = std::getenv("SUMMIT_PREF_OFF");
-+    if (!list)
-+        return false;
-+    std::string names = std::string(",") + list + ",";
-+    return names.find(std::string(",") + name + ",") != std::string::npos;
-+}
-+
 +// Every WebView, for focusedWebPageForInputHaiku (main thread only).
 +static Vector<WebView*>& liveWebViewsHaiku()
 +{
@@ -193694,207 +194248,12 @@ index 0000000000000000000000000000000000000000..b240941014a2deb76c110fbb39277e75
 +    configuration->preferences().setForceCompositingMode(false);
 +    configuration->preferences().setThreadedScrollingEnabled(false);
 +#endif
-+    // Allow repeatable CPU/GPU Canvas 2D comparisons without changing the
-+    // browser's normal preference. The generated preference defaults to true
-+    // for Skia ports, so an unset variable preserves the shipping behavior.
-+    if (const char* canvasAcceleration = std::getenv("SUMMIT_CANVAS_ACCELERATION"))
-+        configuration->preferences().setCanvasUsesAcceleratedDrawing(std::strcmp(canvasAcceleration, "0"));
-+    // navigator.wakeLock: a screen lock keeps the screen on through the browser
-+    // (ScreenAwakeRequestsHaiku) until it is released or the page is hidden.
-+    // SUMMIT_SCREEN_WAKE_LOCK=0 reports the API as absent.
-+    const char* wakeLock = std::getenv("SUMMIT_SCREEN_WAKE_LOCK");
-+    configuration->preferences().setScreenWakeLockAPIEnabled(!wakeLock || std::strcmp(wakeLock, "0"));
-+#if ENABLE(FULLSCREEN_API)
-+    configuration->preferences().setFullScreenEnabled(true);
-+#endif
-+    // The Navigation API, on in Chrome, Safari and WebKitGTK; WebKit leaves it
-+    // off for other ports. Without it Reddit falls back to its polyfill, which
-+    // misses a Back whose history entry the page rewrote with replaceState
-+    // past it: the address went back to the feed and the post stayed (#132).
-+    // SUMMIT_NAVIGATION_API=0 turns it off.
-+    const char* navigationAPI = std::getenv("SUMMIT_NAVIGATION_API");
-+    const bool navigationAPIEnabled = !navigationAPI || std::strcmp(navigationAPI, "0");
-+    configuration->preferences().setNavigationAPIEnabled(navigationAPIEnabled);
-+    configuration->preferences().setNavigationAPIPrecommitHandlerEnabled(navigationAPIEnabled);
-+    // navigator.clipboard, which every other browser has: copy buttons
-+    // (AWS's Cloudscape, GitHub, docs sites) call writeText() and fail
-+    // without it (#136). A write needs a click or key press; a read of what
-+    // another site or program copied asks with a Paste menu at the element
-+    // (requestDOMPasteAccess). SUMMIT_ASYNC_CLIPBOARD=0 turns it off.
-+    const char* asyncClipboard = std::getenv("SUMMIT_ASYNC_CLIPBOARD");
-+    const bool asyncClipboardEnabled = !asyncClipboard || std::strcmp(asyncClipboard, "0");
-+    configuration->preferences().setAsyncClipboardAPIEnabled(asyncClipboardEnabled);
-+    configuration->preferences().setAsyncClipboardRichContentEnabled(asyncClipboardEnabled);
-+    configuration->preferences().setDOMPasteAccessRequestsEnabled(asyncClipboardEnabled);
-+    // navigator.share() and canShare(), with files, as in Safari (Summit
-+    // #153): sites show their own Share buttons only when it is there. The
-+    // host shows the share menu (BWebKitView::SetShareRequests).
-+    // SUMMIT_WEB_SHARE=0 hides it.
-+    const char* webShare = std::getenv("SUMMIT_WEB_SHARE");
-+    const bool webShareEnabled = !webShare || std::strcmp(webShare, "0");
-+    configuration->preferences().setWebShareEnabled(webShareEnabled);
-+    configuration->preferences().setWebShareFileAPIEnabled(webShareEnabled);
-+    // Chrome and Firefox ship requestIdleCallback, and sites and extensions built for
-+    // them call it unconditionally. WebKit's implementation is complete but off by default.
-+    // SUMMIT_REQUEST_IDLE_CALLBACK=0 turns it off, to tell its cost apart.
-+    const char* idleCallbacks = std::getenv("SUMMIT_REQUEST_IDLE_CALLBACK");
-+    configuration->preferences().setRequestIdleCallbackEnabled(!idleCallbacks || std::strcmp(idleCallbacks, "0"));
-+    // requestVideoFrameCallback, which Chrome and Firefox ship: three.js
-+    // uploads a video texture only when the callback says a new frame came,
-+    // and without it every playing video in every animation frame (getartcraft.com:
-+    // four 640x360 pictures, 60 times a second, for videos of 24 to 30).
-+    // SUMMIT_VIDEO_FRAME_CALLBACK=0 turns it off.
-+    const char* videoFrameCallback = std::getenv("SUMMIT_VIDEO_FRAME_CALLBACK");
-+    configuration->preferences().setRequestVideoFrameCallbackEnabled(!videoFrameCallback || std::strcmp(videoFrameCallback, "0"));
-+    // Muted videos that started themselves pause while nothing of them is on
-+    // screen and resume when they come back, as on iOS: CNN's front page
-+    // plays four at once, most of them below the fold, and took two cores.
-+    // SUMMIT_PAUSE_INVISIBLE_AUTOPLAY=0 lets them play.
-+    const char* pauseInvisible = std::getenv("SUMMIT_PAUSE_INVISIBLE_AUTOPLAY");
-+    configuration->preferences().setInvisibleAutoplayNotPermitted(!pauseInvisible || std::strcmp(pauseInvisible, "0"));
-+    // Block pop-ups: window.open() needs a click or key press, as in other browsers.
-+    configuration->preferences().setJavaScriptCanOpenWindowsAutomatically(false);
-+    // Developer extras keep a page's console messages (and failed loads) for
-+    // developer tools opened later, as other browsers' tools show them;
-+    // SUMMIT_DEVELOPER_EXTRAS=0 keeps them off until the tools attach.
-+    const char* developerExtras = getenv("SUMMIT_DEVELOPER_EXTRAS");
-+    configuration->preferences().setDeveloperExtrasEnabled(!developerExtras || std::strcmp(developerExtras, "0"));
-+    // Connections opened before they are needed: for <link rel=preconnect>
-+    // and Link: headers naming the hosts a page will load from (the network
-+    // process also opens one to the page being navigated to while its web
-+    // process starts). The curl backend has them on Haiku; off by default
-+    // only because the build-wide switch is. SUMMIT_PRECONNECT=0 turns all
-+    // of them off.
-+    const char* preconnect = std::getenv("SUMMIT_PRECONNECT");
-+    const bool preconnectEnabled = !preconnect || std::strcmp(preconnect, "0");
-+    configuration->preferences().setLinkPreconnect(preconnectEnabled);
-+    configuration->preferences().setLinkPreconnectEarlyHintsEnabled(preconnectEnabled);
-+    // LinkLoader and the network cache already implement rel=prefetch. Enable
-+    // it for native pages as well; extension privacy.network overrides still
-+    // take precedence through WebPageProxy's per-page preferences store.
-+    const char* prefetch = std::getenv("SUMMIT_PREFETCH");
-+    configuration->preferences().setLinkPrefetchEnabled(!prefetch || std::strcmp(prefetch, "0"));
-+    // navigator.storage (estimate, persist), on by default for GTK and WPE;
-+    // web apps and extensions (OneTab) call it unguarded.
-+    configuration->preferences().setStorageAPIEnabled(true);
-+    configuration->preferences().setStorageAPIEstimateEnabled(true);
-+    // The Push API (Summit #148): PushManager on service worker registrations
-+    // and push events in service workers, as in Safari and Firefox. The
-+    // network process keeps the subscriptions and the connection to the push
-+    // service (WebPushServiceHaiku); private windows have neither, so
-+    // subscribe() fails there, as in Firefox. SUMMIT_WEB_PUSH=0 hides it.
-+    if (const char* push = std::getenv("SUMMIT_WEB_PUSH"); !push || std::strcmp(push, "0"))
-+        configuration->preferences().setPushAPIEnabled(true);
-+    // Origin private file system (navigator.storage.getDirectory, sync access
-+    // handles in workers, createWritable), on by default for Cocoa, GTK and
-+    // WPE (Summit #146): SQLite-in-WebAssembly apps and web editors keep
-+    // their data there. Stored with the site's data in the network process.
-+    // SUMMIT_OPFS=0 hides it.
-+    if (const char* opfs = std::getenv("SUMMIT_OPFS"); !opfs || std::strcmp(opfs, "0")) {
-+        configuration->preferences().setFileSystemEnabled(true);
-+        configuration->preferences().setAccessHandleEnabled(true);
-+        configuration->preferences().setFileSystemWritableStreamEnabled(true);
-+        configuration->preferences().setFileSystemHandleSerializationEnabled(true);
-+    }
-+    // Features Safari ships whose defaults name only Cocoa or GTK/WPE
-+    // (Summit #147): scoped custom element registries, element.currentCSSZoom,
-+    // font-variant-emoji and ManagedMediaSource.
-+    configuration->preferences().setScopedCustomElementRegistryEnabled(!summitPreferenceOffHaiku("scoped"));
-+    configuration->preferences().setEnableElementCurrentCSSZoom(!summitPreferenceOffHaiku("zoom"));
-+    configuration->preferences().setCSSFontVariantEmojiEnabled(!summitPreferenceOffHaiku("emoji"));
-+#if ENABLE(PREDEFINED_COLOR_SPACE_DISPLAY_P3)
-+    // Canvas and ImageData colorSpace "display-p3" (Safari 15.2), drawn by
-+    // Skia; the screen is still treated as sRGB.
-+    configuration->preferences().setCanvasColorSpaceEnabled(!summitPreferenceOffHaiku("p3"));
-+#endif
-+#if ENABLE(WEBGPU)
-+    // navigator.gpu (#158) on Dawn over Vulkan, in the web process
-+    // (WebCore/Modules/WebGPU/Dawn). Without a Vulkan driver requestAdapter()
-+    // resolves to null.
-+    configuration->preferences().setWebGPUEnabled(!summitPreferenceOffHaiku("webgpu"));
-+#endif
-+    // <input type=checkbox switch> (Safari 17.4), drawn by the Adwaita
-+    // toggle button control (ToggleButtonAdwaita::drawSwitch).
-+    configuration->preferences().setSwitchControlEnabled(!summitPreferenceOffHaiku("switch"));
-+    // Keyboard scrolling (arrows, Page Up/Down, Space) through WebCore's
-+    // KeyboardScrollingAnimator, as on the Mac: it animates the scroll and
-+    // pages to snap positions past the view in scroll-snap containers
-+    // (#181; the old path stopped short of Safari's position).
-+    configuration->preferences().setEventHandlerDrivenSmoothKeyboardScrollingEnabled(!summitPreferenceOffHaiku("keyscroll"));
-+    // HTTPS-First (#160), as Chrome, Firefox and Safari do: http:// pages are
-+    // tried over https first and loaded over http when the host has no
-+    // usable HTTPS (ResourceErrorCurl.cpp). IP addresses and localhost are
-+    // never upgraded. Off with SUMMIT_HTTPS_FIRST=0 or the host's page
-+    // setting httpsFirst (BWebKitView::SetPageSettings).
-+    if (const char* httpsFirst = std::getenv("SUMMIT_HTTPS_FIRST"); !httpsFirst || std::strcmp(httpsFirst, "0"))
-+        configuration->preferences().setHTTPSByDefaultEnabled(true);
-+    // cookieStore (get, set, delete and change events; Safari 18.4), on the
-+    // curl cookie jar (NetworkStorageSessionCurl.cpp reports its changes).
-+    // SUMMIT_COOKIE_STORE=0 hides it.
-+    if (const char* cookieStore = std::getenv("SUMMIT_COOKIE_STORE"); !cookieStore || std::strcmp(cookieStore, "0"))
-+        configuration->preferences().setCookieStoreAPIEnabled(true);
-+#if ENABLE(MEDIA_SOURCE)
-+    configuration->preferences().setManagedMediaSourceEnabled(!summitPreferenceOffHaiku("mms"));
-+#endif
-+    // DataTransfer.items, on by default for the other ports: editors (GitHub's
-+    // among them) take pasted and dropped images from it.
-+    configuration->preferences().setDataTransferItemsEnabled(true);
-+    configuration->preferences().setAltitudeAngleEnabled(true);
-+    configuration->preferences().setAzimuthAngleEnabled(true);
-+    configuration->preferences().setInputTypeColorEnabled(true);
-+#if ENABLE(PDFJS)
-+    configuration->preferences().setPDFJSViewerEnabled(true);
-+#endif
-+    configuration->preferences().setDataListElementEnabled(true);
-+    configuration->preferences().setSelectShowPickerEnabled(true);
-+    configuration->preferences().setInputTypeDateEnabled(true);
-+    configuration->preferences().setInputTypeMonthEnabled(true);
-+    configuration->preferences().setInputTypeWeekEnabled(true);
-+    configuration->preferences().setInputTypeTimeEnabled(true);
-+    configuration->preferences().setInputTypeDateTimeLocalEnabled(true);
-+    // Background tabs: slow their timers down (more the longer they stay
-+    // hidden) and pause their CSS animations, as Safari does; GTK enables the
-+    // same. Hidden tabs ran every 10 ms timer at full rate, which with dozens
-+    // of tabs of ad and analytics scripts is a steady cost. Pages playing
-+    // audio are exempt in WebCore. Extension background pages have their own
-+    // preferences and are not throttled. SUMMIT_HIDDEN_PAGE_THROTTLING=0 turns
-+    // it off.
-+    if (const char* throttling = std::getenv("SUMMIT_HIDDEN_PAGE_THROTTLING"); !throttling || std::strcmp(throttling, "0")) {
-+        configuration->preferences().setHiddenPageDOMTimerThrottlingEnabled(true);
-+        configuration->preferences().setHiddenPageDOMTimerThrottlingAutoIncreases(true);
-+        configuration->preferences().setHiddenPageCSSAnimationSuspensionEnabled(true);
-+    }
-+#if ENABLE(OFFSCREEN_CANVAS)
-+    // SUMMIT_OFFSCREEN_CANVAS=0 hides OffscreenCanvas again.
-+    if (const char* offscreen = std::getenv("SUMMIT_OFFSCREEN_CANVAS"); !offscreen || std::strcmp(offscreen, "0")) {
-+        configuration->preferences().setOffscreenCanvasEnabled(true);
-+        configuration->preferences().setOffscreenCanvasInWorkersEnabled(true);
-+#if ENABLE(WEBGL)
-+        configuration->preferences().setAllowWebGLInWorkers(true);
-+#endif
-+    }
-+#endif
-+#if ENABLE(WEB_AUTHN)
-+    // Passkeys reach this port through a password manager, which can only extend
-+    // Web Authentication when the page exposes it. Summit has no authenticator of
-+    // its own; see UIProcess/WebAuthentication/haiku.
-+    configuration->preferences().setWebAuthenticationEnabled(true);
-+#endif
-+    // Opt-in diagnostics: page and content-script console messages go to stderr.
-+    if (const char* trace = std::getenv("SUMMIT_TRACE_PAGE_CONSOLE"); trace && !std::strcmp(trace, "1"))
-+        configuration->preferences().setLogsPageMessagesToSystemConsoleEnabled(true);
-+    // navigator.permissions: answered from the host's decisions (queryPermission).
-+    configuration->preferences().setPermissionsAPIEnabled(true);
++    // The preferences Summit gives web pages on every system
++    // (Platform/summit/SummitWebPagePreferences.cpp), then the ones that
++    // depend on this one.
++    applySummitWebPagePreferences(configuration->preferences());
 +#if ENABLE(MEDIA_STREAM)
-+    // Camera, microphone and screen capture (platform/mediastream/haiku), asked
-+    // of the host (decidePolicyForUserMediaPermissionRequest).
-+    configuration->preferences().setMediaDevicesEnabled(true);
-+    configuration->preferences().setScreenCaptureEnabled(true);
 +#if USE(LIBWEBRTC)
-+    configuration->preferences().setPeerConnectionEnabled(true);
-+    // RTCRtpScriptTransform (end-to-end encrypted calls), Cocoa-only by
-+    // default (Summit #147).
-+    configuration->preferences().setWebRTCEncodedTransformEnabled(!summitPreferenceOffHaiku("rtc"));
 +    // Host candidates hidden behind random .local names need an mDNS
 +    // responder to answer for them. air/OS has one (mdns_server); stock Haiku
 +    // has none, so neither this machine nor the other peer could resolve
@@ -193902,9 +194261,6 @@ index 0000000000000000000000000000000000000000..b240941014a2deb76c110fbb39277e75
 +    // did before mDNS candidates. SUMMIT_WEBRTC_MDNS=0 does the same on air/OS.
 +    if (!isMDNSResponderAvailable())
 +        configuration->preferences().setICECandidateFilteringEnabled(false);
-+#endif
-+#if ENABLE(MEDIA_RECORDER)
-+    configuration->preferences().setMediaRecorderEnabled(true);
 +#endif
 +    // SpeechRecognition (Summit #159) on the system's recogniser, a Whisper
 +    // model the Neural Kit runs on this machine, through the microphone
@@ -193916,19 +194272,9 @@ index 0000000000000000000000000000000000000000..b240941014a2deb76c110fbb39277e75
 +    {
 +        const char* recognition = std::getenv("SUMMIT_RECOGNITION");
 +        bool enabled = recognition && *recognition ? !!std::strcmp(recognition, "0") : WebCore::SpeechRecognizer::platformRecognizerAvailable();
-+        configuration->preferences().setSpeechRecognitionEnabled(enabled && !summitPreferenceOffHaiku("recognition"));
++        configuration->preferences().setSpeechRecognitionEnabled(enabled && !summitPreferenceOff("recognition"));
 +    }
-+    // Media capture on plain http://localhost pages and file: URLs is for
-+    // testing: SUMMIT_INSECURE_MEDIA_CAPTURE=1.
-+    if (const char* insecure = std::getenv("SUMMIT_INSECURE_MEDIA_CAPTURE"); insecure && !std::strcmp(insecure, "1"))
-+        configuration->preferences().setMediaCaptureRequiresSecureConnection(false);
 +#endif
-+    // SUMMIT_COMPOSITING_BORDERS=1: WebKit's compositing debug borders and
-+    // repaint counters, as WEBKIT_SHOW_COMPOSITING_DEBUG_VISUALS does on GTK.
-+    if (const char* borders = std::getenv("SUMMIT_COMPOSITING_BORDERS"); borders && !std::strcmp(borders, "1")) {
-+        configuration->preferences().setCompositingBordersVisible(true);
-+        configuration->preferences().setCompositingRepaintCountersVisible(true);
-+    }
 +    auto& pool = configuration->processPool();
 +    const auto& features = configuration->windowFeatures();
 +    m_state->scriptSizedWindow = features && features->wantsPopup();
@@ -231827,7 +232173,7 @@ index 11766a98414863026a09ccea0dbbdd432db4444f..e913f215435115a30dc394b851cc83c4
          m_textManipulationIncludesSubframes = false;
      else if (m_textManipulationIncludesSubframes)
 diff --git a/Source/WebKit/WebProcess/WebPage/WebPage.h b/Source/WebKit/WebProcess/WebPage/WebPage.h
-index 5dfb080fb516a2c8bd2ec72245babd8c28d926bf..ff41b0d4067f92846b37037301dc7c9c5874d35d 100644
+index 5dfb080fb516a2c8bd2ec72245babd8c28d926bf..86bdbdca29f4666a7c689e9b4272e71ed08f79c5 100644
 --- a/Source/WebKit/WebProcess/WebPage/WebPage.h
 +++ b/Source/WebKit/WebProcess/WebPage/WebPage.h
 @@ -25,6 +25,10 @@
@@ -231892,7 +232238,7 @@ index 5dfb080fb516a2c8bd2ec72245babd8c28d926bf..ff41b0d4067f92846b37037301dc7c9c
      WebExtensionControllerProxy* webExtensionControllerProxy() const
      {
 -#if PLATFORM(COCOA)
-+#if PLATFORM(COCOA) || PLATFORM(HAIKU)
++#if PLATFORM(COCOA) || USE(SUMMIT_EXTENSIONS)
          return m_webExtensionController.get();
  #else
          return nullptr;

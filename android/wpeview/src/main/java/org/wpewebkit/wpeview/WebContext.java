@@ -499,6 +499,13 @@ public class WebContext {
         return webContext;
     }
     @NonNull
+    /**
+     * Summit: the engine's WebKitNetworkSession of this context, for the app's
+     * own calls into the engine (Summit's WebExtensions). Valid while the
+     * context lives.
+     */
+    public long getNetworkSessionHandle() { return networkSession.getNativePtr(); }
+
     WebKitNetworkSession getWebKitNetworkSession() {
         return networkSession;
     }

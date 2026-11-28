@@ -28,6 +28,6 @@ endif ()
 add_library(summit_crypto SHARED IMPORTED)
 set_target_properties(summit_crypto PROPERTIES IMPORTED_LOCATION "${SUMMIT_CRYPTO}")
 
-add_library(summit SHARED SummitCoreJni.cpp)
+add_library(summit SHARED SummitCoreJni.cpp SummitExtensionsJni.cpp)
 target_link_libraries(summit PRIVATE summit_core summit_crypto log)
 target_link_options(summit PRIVATE "-Wl,-z,max-page-size=16384")
