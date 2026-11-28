@@ -20,7 +20,7 @@ summit_android_arch() {
         *) echo "unknown Android architecture: $1 (arm64 or x86_64)" >&2; return 1 ;;
     esac
     SUMMIT_DIST="$SUMMIT_CERBERO_HOME/dist/$CERBERO_DIST"
-    SUMMIT_ENGINE_BUILD="$SUMMIT_ANDROID_ROOT/build/engine-$SUMMIT_ARCH"
+    SUMMIT_ENGINE_BUILD="${SUMMIT_ENGINE_BUILD_DIR:-$SUMMIT_ANDROID_ROOT/build/engine-$SUMMIT_ARCH}"
 }
 
 summit_cerbero() {
