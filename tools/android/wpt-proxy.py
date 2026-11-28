@@ -17,6 +17,7 @@ import asyncio
 import sys
 
 WPT_SUFFIXES = ("web-platform.test",)
+VERBOSE = False
 
 
 def target_host(host):
@@ -51,6 +52,8 @@ async def handle(client_reader, client_writer):
         return
     lines = head.decode("latin-1").split("\r\n")
     method, target, version = (lines[0].split(" ", 2) + ["", ""])[:3]
+    if VERBOSE:
+        print("wpt-proxy: %s %s" % (method, target), flush=True)
     try:
         if method == "CONNECT":
             host, _, port = target.rpartition(":")
@@ -82,7 +85,10 @@ async def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--port", type=int, default=8899)
     parser.add_argument("--bind", default="127.0.0.1", help="the emulator's 10.0.2.2 is this host's 127.0.0.1")
+    parser.add_argument("--verbose", action="store_true", help="log every request")
     args = parser.parse_args()
+    global VERBOSE
+    VERBOSE = args.verbose
     server = await asyncio.start_server(handle, args.bind, args.port, limit=1 << 20)
     print("wpt-proxy: listening on %s:%d" % (args.bind, args.port), flush=True)
     async with server:

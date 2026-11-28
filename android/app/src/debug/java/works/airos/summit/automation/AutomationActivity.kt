@@ -82,6 +82,9 @@ class AutomationActivity : Activity() {
     } catch (e: Exception) {
       Log.e(TAG, "cannot start WebDriver", e)
     }
+    // As air/OS's test profile (tools/interop2026/make-profile.py, httpsFirst
+    // off): tests load http:// pages on purpose.
+    android.system.Os.setenv("SUMMIT_HTTPS_FIRST", "0", true)
     WebContext.enableRemoteInspector(inspectorPort, false)
     context = WebContext(applicationContext, true)
     context.setClient(automationClient)
