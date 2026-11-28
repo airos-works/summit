@@ -82,6 +82,17 @@ close.href = offer.dismiss;
 close.title = 'Close';
 close.setAttribute('aria-label', 'Close');
 close.appendChild(build(['svg', { viewBox: '0 0 16 16', 'aria-hidden': 'true' }, [['path', { d: 'M4 4l8 8M12 4l-8 8' }]]]));
+// Touch screens (Summit for Android): store pages may take a touch before it
+// becomes a click, so the links also answer the end of a touch, once.
+for (const link of [action, close]) {
+    link.addEventListener('pointerup', event => {
+        if (event.pointerType !== 'touch' || link.dataset.followed) return;
+        link.dataset.followed = '1';
+        event.preventDefault();
+        location.href = link.href;
+    });
+    link.addEventListener('click', event => { if (link.dataset.followed) event.preventDefault(); });
+}
 card.append(logo, text, action, close);
 root.appendChild(card);
 document.documentElement.appendChild(host);

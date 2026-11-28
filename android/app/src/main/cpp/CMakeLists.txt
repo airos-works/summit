@@ -28,6 +28,14 @@ endif ()
 add_library(summit_crypto SHARED IMPORTED)
 set_target_properties(summit_crypto PROPERTIES IMPORTED_LOCATION "${SUMMIT_CRYPTO}")
 
+# libcurl, for the extension stores (core/ExtensionStoreDownload), as on air/OS.
+set(SUMMIT_CURL "${SUMMIT_IMPORTED}/lib/${ANDROID_ABI}/libcurl.so")
+if (NOT EXISTS "${SUMMIT_CURL}")
+    message(FATAL_ERROR "no libcurl in ${SUMMIT_IMPORTED}: run tools/android/stage-engine.py")
+endif ()
+add_library(summit_curl SHARED IMPORTED)
+set_target_properties(summit_curl PROPERTIES IMPORTED_LOCATION "${SUMMIT_CURL}")
+
 add_library(summit SHARED SummitCoreJni.cpp SummitExtensionsJni.cpp)
-target_link_libraries(summit PRIVATE summit_core summit_crypto log)
+target_link_libraries(summit PRIVATE summit_core summit_crypto summit_curl log)
 target_link_options(summit PRIVATE "-Wl,-z,max-page-size=16384")

@@ -47,6 +47,7 @@ BUILD_INCLUDES = [
     ("xkbcommon", "xkbcommon"),
     # Summit's core (libsummit) uses the engine's OpenSSL.
     ("openssl", "openssl"),
+    ("curl", "curl"),
 ]
 
 # GStreamer plugins Summit ships. Video and audio decoding goes to the
@@ -68,8 +69,9 @@ GST_PLUGINS = [
     "webrtc", "nice", "dtls", "srtp", "rtp", "rtpmanager", "sctp", "openh264", "inter",
 ]
 
-# Libraries that are dlopen'ed rather than NEEDED.
-EXTRA_ROOTS = ["libWPEWebDriver.so"]
+# Libraries that are dlopen'ed rather than NEEDED, and libcurl, which the app's
+# libsummit links for the extension stores (core/ExtensionStoreDownload).
+EXTRA_ROOTS = ["libWPEWebDriver.so", "libcurl.so"]
 
 
 def read_elf(path):

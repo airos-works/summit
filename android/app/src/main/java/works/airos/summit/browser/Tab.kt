@@ -34,6 +34,9 @@ class Tab(val id: Long, val private: Boolean, url: String, title: String = "") {
   /** Asks sites for their desktop layout (the desktop user agent). */
   /** Whether the page was made for an extension's own pages (it shows no others). */
   var extensionPage = false
+  /** The stores' card (Extensions.updateStoreOffer): shown on this page, or dismissed for this address. */
+  var storeOfferShown = false
+  var storeOfferDismissed = ""
   var desktopSite by mutableStateOf(false)
 
   var page: WebPage? = null

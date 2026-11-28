@@ -327,6 +327,13 @@ class Browser private constructor(private val appContext: Context) {
           SummitCore.visit(url, tab.title)
           extensions.historyVisited(url)
         }
+        tab.storeOfferShown = false
+        extensions.updateStoreOffer(tab)
+      }
+
+      // The stores' card's links (summit-extension:…) are the browser's to act on.
+      override fun shouldOverrideUrlLoading(page: WebPage, request: org.wpewebkit.wpeview.WPEResourceRequest): Boolean {
+        return extensions.storeOfferChosen(tab, request.url.toString())
       }
 
       override fun doUpdateVisitedHistory(page: WebPage, url: String, isReload: Boolean) {
@@ -359,6 +366,8 @@ class Browser private constructor(private val appContext: Context) {
 
       override fun onReceivedTitle(page: WebPage, title: String) {
         tab.title = title
+        // The card names the extension from the store page's title.
+        if (!tab.loading) extensions.updateStoreOffer(tab)
         tab.canGoBack = page.canGoBack()
         tab.canGoForward = page.canGoForward()
       }

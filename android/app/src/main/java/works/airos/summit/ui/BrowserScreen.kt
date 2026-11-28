@@ -85,6 +85,8 @@ fun BrowserScreen(browser: Browser, onExit: () -> Unit, onFullscreen: (Boolean) 
   val fullscreen = browser.fullscreen
   LaunchedEffect(fullscreen) { onFullscreen(fullscreen) }
   var panel by remember { mutableStateOf(Panel.Page) }
+  // The stores' card's Manage Extension.
+  LaunchedEffect(browser) { browser.extensions.showExtensions = { panel = Panel.Extensions } }
   var menuOpen by remember { mutableStateOf(false) }
   var editing by remember { mutableStateOf(false) }
 

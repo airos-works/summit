@@ -1,4 +1,6 @@
 #pragma once
+// Shared by air/OS (src/ui) and Android (SummitExtensionsJni.cpp): portable
+// C++ over libcurl and OpenSSL.
 #include "core/ExtensionCatalog.h"
 #include "core/ExtensionStore.h"
 #include <atomic>

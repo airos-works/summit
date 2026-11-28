@@ -179,18 +179,25 @@ How it fits together on WPE:
   (Firefox for Android, Chrome for Android), so packages take their mobile
   layouts.
 
+- The stores: on an extension's page in the Chrome Web Store or on Firefox
+  Add-ons the app shows air/OS's card (`core/StoreOffer`); Install downloads
+  the package with `core/ExtensionStoreDownload` (libcurl, staged for the
+  app; Android's trusted roots from the Conscrypt APEX) and checks it as
+  air/OS's installer does (the item's identity; a CRX3 signature for the
+  Chrome Web Store) before the approval dialog.
+- History and bookmarks for extensions are `core/ExtensionBrowserData`, which
+  air/OS's window uses too.
+
 Working on the emulator with uBlock Origin 1.77.4: installing from its XPI
 (approval dialog), loading at startup, blocking (webRequest, surrogates,
 cosmetic filtering), the badge count, the popup in a sheet with its mobile
 layout, and its dashboard in a tab. Still to do:
 
-1. The stores' "Add to Summit" card (`core/StoreOffer`) and installing from
-   the stores' pages.
-2. The Haiku-only parts, each marked `FIXME (Summit, Android)`: notifications,
+1. The Haiku-only parts, each marked `FIXME (Summit, Android)`: notifications,
    `tabs.captureVisibleTab`, debugger input, `cookies.onChanged` on libsoup,
    idle state, opening downloads. Native messaging has
    no Android counterpart.
-3. Safari web extensions (`.appex` bundles) as on air/OS.
+2. Safari web extensions (`.appex` bundles) as on air/OS.
 
 ## Status and plan
 

@@ -1,4 +1,4 @@
-#include "ExtensionStoreDownload.h"
+#include "core/ExtensionStoreDownload.h"
 #include <curl/curl.h>
 #include <nlohmann/json.hpp>
 #include <openssl/evp.h>
@@ -58,6 +58,12 @@ void Get(const std::string& url, Transfer& transfer)
     curl_easy_setopt(handle, CURLOPT_LOW_SPEED_TIME, 30L);
     curl_easy_setopt(handle, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(handle, CURLOPT_FAILONERROR, 1L);
+#ifdef __ANDROID__
+    // Android's trusted roots (libcurl has no default there): the updatable
+    // Conscrypt copy (Android 14 and later), else the system's.
+    curl_easy_setopt(handle, CURLOPT_CAPATH, access("/apex/com.android.conscrypt/cacerts", R_OK) == 0
+        ? "/apex/com.android.conscrypt/cacerts" : "/system/etc/security/cacerts");
+#endif
     curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, Write);
     curl_easy_setopt(handle, CURLOPT_WRITEDATA, &transfer);
     curl_easy_setopt(handle, CURLOPT_XFERINFOFUNCTION, Progress);

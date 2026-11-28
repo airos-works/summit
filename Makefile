@@ -50,11 +50,11 @@ $(BUILD)/vendor/cld2/%.o: vendor/cld2/%.cc
 	mkdir -p $(dir $@)
 	$(CXX) $(CPPFLAGS) $(filter-out -Wall -Wextra,$(CXXFLAGS)) -MMD -MP -c $< -o $@
 $(BUILD)/summit_tests: $(CORE_OBJ) $(BUILD)/tests/CoreTests.o
-	$(CXX) -o $@ $^ -lcrypto
+	$(CXX) -o $@ $^ -lcrypto -lcurl
 $(BUILD)/summit_devtools_tests: $(CORE_OBJ) $(BUILD)/tests/DevToolsTests.o
-	$(CXX) -o $@ $^ -lcrypto
+	$(CXX) -o $@ $^ -lcrypto -lcurl
 $(BUILD)/summit_page_language_tests: $(CORE_OBJ) $(BUILD)/tests/PageLanguageTests.o
-	$(CXX) -o $@ $^ -lcrypto
+	$(CXX) -o $@ $^ -lcrypto -lcurl
 check: $(BUILD)/summit_tests $(BUILD)/summit_devtools_tests $(BUILD)/summit_page_language_tests
 	$(BUILD)/summit_tests
 	$(BUILD)/summit_devtools_tests

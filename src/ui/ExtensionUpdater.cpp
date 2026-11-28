@@ -1,7 +1,7 @@
 #include "ExtensionUpdater.h"
 #if SUMMIT_MODERN_WEBKIT
 #include "ExtensionInstaller.h"
-#include "ExtensionStoreDownload.h"
+#include "core/ExtensionStoreDownload.h"
 #include "ExtensionTiming.h"
 #include "core/ExtensionIdentity.h"
 #include "core/ExtensionUpdate.h"

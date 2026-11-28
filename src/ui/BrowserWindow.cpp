@@ -24,7 +24,7 @@
 #include "PageSourceWindow.h"
 #include "DownloadList.h"
 #include "DownloadsPanel.h"
-#include "ExtensionStoreDownload.h"
+#include "core/ExtensionStoreDownload.h"
 #include "FrameHistory.h"
 #include "McpService.h"
 #include "UpdateChecker.h"

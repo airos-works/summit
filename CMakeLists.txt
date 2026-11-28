@@ -136,7 +136,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Haiku")
     find_program(HAIKU_RC rc REQUIRED)
     find_program(HAIKU_XRES xres REQUIRED)
     add_executable(Summit src/main.cpp src/ui/BrowserWindow.cpp src/ui/BookmarkEditor.cpp src/ui/BookmarkImport.cpp src/ui/Chrome.cpp src/ui/ExtensionPermissionPrompt.cpp src/ui/ExtensionController.cpp src/ui/ExtensionInstaller.cpp src/ui/ExtensionManager.cpp
-        src/ui/ExtensionStoreDownload.cpp src/ui/CertificateInfoWindow.cpp src/ui/ReaderMode.cpp src/ui/PageTranslation.cpp src/ui/BrowserWindowTranslation.cpp
+        src/core/ExtensionStoreDownload.cpp src/ui/CertificateInfoWindow.cpp src/ui/ReaderMode.cpp src/ui/PageTranslation.cpp src/ui/BrowserWindowTranslation.cpp
         src/ui/ProtocolHandlers.cpp src/ui/FaviconCache.cpp src/ui/PreferencesWindow.cpp src/ui/DefaultBrowser.cpp src/ui/SharedProfile.cpp src/ui/Containers.cpp src/ui/DirectWindowRescue.cpp
         src/ui/AddressSuggestions.cpp src/ui/SitePermissions.cpp src/ui/Location.cpp
         src/ui/SourceView.cpp src/ui/DevToolsWindow.cpp src/ui/DevToolsNetwork.cpp src/ui/DevToolsConsole.cpp src/ui/DevToolsStorage.cpp src/ui/DevToolsElements.cpp src/ui/DevToolsSources.cpp src/ui/DevToolsPerformance.cpp src/ui/PageSourceWindow.cpp

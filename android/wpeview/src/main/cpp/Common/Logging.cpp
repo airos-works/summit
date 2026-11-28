@@ -60,7 +60,8 @@ bool Logging::pipeStdoutToLogcat() noexcept
                         --readSize;
 
                     buf[readSize] = '\0';
-                    logDebug(buf);
+                    // The text is not a format: a '%' in it (a page's console message) would crash.
+                    logDebug("%s", buf);
                 }
 
                 close(pfd[0]);

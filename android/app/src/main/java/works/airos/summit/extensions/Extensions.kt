@@ -32,6 +32,13 @@ object ExtensionsNative {
   @JvmStatic external fun discardStaged()
   @JvmStatic external fun forget(identifier: String): String
   @JvmStatic external fun identity(manifest: String, localIdentity: String, verifiedCRX: String): String
+  @JvmStatic external fun storeItem(url: String): String
+  @JvmStatic external fun storeItemName(title: String): String
+  @JvmStatic external fun storeOfferScript(offer: String): String
+  @JvmStatic external fun parseStoreOfferLink(url: String): String
+  @JvmStatic external fun resolveFirefoxItem(url: String): String
+  @JvmStatic external fun downloadStoreItem(url: String, temporaryDirectory: String): String
+  @JvmStatic external fun cancelStoreDownload()
 
   /** Engine events (JSON), on the main thread. */
   @JvmStatic fun onEvent(json: String) {
@@ -133,18 +140,44 @@ class Extensions(private val context: Context, private val browser: Browser) {
       return
     }
     val staged = JSONObject(ExtensionsNative.stage(source.absolutePath))
-    val path = staged.optString("staged")
-    val pkg = staged.optString("package")
-    val order = staged.optLong("order")
-    if (path.isEmpty()) {
+    if (staged.optString("staged").isEmpty()) {
       status = "Could not read the package: ${staged.optString("error")}"
       return
     }
     status = "Checking ${source.name}…"
+    prepareStaged(staged)
+  }
+
+  /**
+   * A staged package (stage() or downloadStoreItem()) checked by the engine and
+   * offered for approval. A store's package must be the item its page shows,
+   * and a Chrome Web Store package must carry a valid CRX3 signature, as
+   * air/OS's ExtensionInstaller requires.
+   */
+  private fun prepareStaged(staged: JSONObject) {
+    val path = staged.optString("staged")
+    val pkg = staged.optString("package")
+    val order = staged.optLong("order")
+    val expectedIdentity = staged.optString("expectedIdentity")
+    val store = staged.optString("store")
     call(JSONObject().put("op", "prepare").put("path", path)) { reply ->
+      fun refuse(message: String) {
+        call(JSONObject().put("op", "discard").put("token", reply.string("token")))
+        ExtensionsNative.discardStaged()
+        status = message
+      }
       if (reply.error() != 0) {
         ExtensionsNative.discardStaged()
         status = "Not a valid extension: ${reply.string("description").ifEmpty { "error ${reply.error()}" }}"
+        return@call
+      }
+      val identity = ExtensionsNative.identity(reply.string("manifest_json"), "summit-$pkg", reply.string("verified_crx_id"))
+      if (expectedIdentity.isNotEmpty() && identity != expectedIdentity) {
+        refuse("The downloaded extension's identity does not match the selected store item.")
+        return@call
+      }
+      if (store == "Chrome Web Store" && reply.string("verified_crx_id").isEmpty()) {
+        refuse("The Chrome Web Store package does not have a valid CRX3 signature.")
         return@call
       }
       status = null
@@ -188,6 +221,8 @@ class Extensions(private val context: Context, private val browser: Browser) {
       if (error.isNotEmpty()) Log.w(TAG, "recording ${p.name}: $error")
       reloadCatalog()
       installed.firstOrNull { it.identifier == identifier }?.loaded = true
+      // The stores' cards now offer to manage it.
+      browser.tabs.forEach { updateStoreOffer(it) }
       status = "${p.name} was added"
       refreshActions()
     }
@@ -248,6 +283,98 @@ class Extensions(private val context: Context, private val browser: Browser) {
     }
     call(JSONObject().put("op", "setWindowTabs").put("window", WINDOW.toString()).put("pages", pages)
       .put("active", active.toString()).put("focused", true))
+  }
+
+  // ---------------------------------------------------------------- the stores
+
+  /** The secret the store card's links carry, so that only they count (core/StoreOffer). */
+  private val storeOfferToken = java.util.UUID.randomUUID().toString().replace("-", "") // hex, as ParseStoreOfferLink wants
+  /** Firefox Add-ons slugs and their add-on IDs (null while being looked up). */
+  private val firefoxItems = HashMap<String, JSONObject?>()
+  private val storeWorker = java.util.concurrent.Executors.newSingleThreadExecutor()
+
+  /**
+   * After a page loaded: on an extension's page in the Chrome Web Store or on
+   * Firefox Add-ons, the card air/OS's Summit shows (Install, or Manage once
+   * installed); elsewhere none.
+   */
+  fun updateStoreOffer(tab: Tab) {
+    val page = tab.page ?: return
+    if (!ready || tab.private) return
+    val item = ExtensionsNative.storeItem(tab.url).takeIf { it.isNotEmpty() }?.let { JSONObject(it) }
+    if (item == null || tab.storeOfferDismissed == tab.url) {
+      if (tab.storeOfferShown) page.evaluateJavascript(ExtensionsNative.storeOfferScript(""), null)
+      tab.storeOfferShown = false
+      return
+    }
+    var name = ExtensionsNative.storeItemName(tab.title)
+    var identity = item.optString("identifier")
+    if (item.optString("store") == "firefox") {
+      val slug = identity
+      if (!firefoxItems.containsKey(slug)) {
+        firefoxItems[slug] = null
+        val url = tab.url
+        storeWorker.execute {
+          val resolved = JSONObject(ExtensionsNative.resolveFirefoxItem(url))
+          if (resolved.has("error")) Log.w(TAG, "Firefox Add-ons item $slug: ${resolved.optString("error")}")
+          handler.post {
+            firefoxItems[slug] = resolved
+            browser.tabs.filter { it.url == url }.forEach { updateStoreOffer(it) }
+          }
+        }
+      }
+      val resolved = firefoxItems[slug] ?: return
+      if (resolved.has("error") || !resolved.optBoolean("extension", true)) return
+      identity = resolved.optString("identifier")
+      name = resolved.optString("name").ifEmpty { name }
+    }
+    val installedItem = installed.firstOrNull { it.identifier == identity }
+    val offer = JSONObject().put("name", name.ifEmpty { installedItem?.name.orEmpty() })
+      .put("installed", installedItem != null).put("disabled", false).put("token", storeOfferToken)
+    page.evaluateJavascript(ExtensionsNative.storeOfferScript(offer.toString()), null)
+    tab.storeOfferShown = true
+  }
+
+  /** A link of the card (summit-extension:ACTION?token=…); true when it was one, handled. */
+  fun storeOfferChosen(tab: Tab, url: String): Boolean {
+    if (!url.startsWith("summit-extension:")) return false
+    val choice = ExtensionsNative.parseStoreOfferLink(url).takeIf { it.isNotEmpty() }?.let { JSONObject(it) } ?: return true
+    if (choice.optString("token") != storeOfferToken || !tab.storeOfferShown) {
+      Log.w(TAG, "store card link ignored (token ${choice.optString("token") == storeOfferToken}, shown ${tab.storeOfferShown})")
+      return true
+    }
+    when (choice.optString("action")) {
+      "dismiss" -> {
+        tab.storeOfferDismissed = tab.url
+        updateStoreOffer(tab)
+      }
+      "install" -> installFromStore(tab.url)
+      else -> showExtensions?.invoke()
+    }
+    return true
+  }
+
+  /** Opens the Extensions screen (the app sets it). */
+  var showExtensions: (() -> Unit)? = null
+
+  /** Downloads the extension a store page shows and offers it for approval, as a package from a file. */
+  fun installFromStore(pageUrl: String) {
+    if (!ready) return
+    status = "Downloading the extension…"
+    val temporary = File(context.cacheDir, "extension-downloads").absolutePath
+    storeWorker.execute {
+      val staged = JSONObject(ExtensionsNative.downloadStoreItem(pageUrl, temporary))
+      Log.i(TAG, "store download of $pageUrl: ${staged.toString().take(300)}")
+      handler.post {
+        if (staged.optString("staged").isEmpty()) {
+          status = staged.optString("error").ifEmpty { "The extension could not be downloaded." }
+          android.widget.Toast.makeText(context, status, android.widget.Toast.LENGTH_LONG).show()
+          return@post
+        }
+        status = "Checking the extension…"
+        prepareStaged(staged)
+      }
+    }
   }
 
   // ---------------------------------------------------------------- history and bookmarks

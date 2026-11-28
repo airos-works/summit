@@ -3,7 +3,7 @@
 #include "core/ExtensionIdentity.h"
 #include "core/Protocol.h"
 #include "core/ExtensionUpdate.h"
-#include "ExtensionStoreDownload.h"
+#include "core/ExtensionStoreDownload.h"
 #include <WebKit/WebKitContext.h>
 #include <MessageRunner.h>
 #include <OS.h>

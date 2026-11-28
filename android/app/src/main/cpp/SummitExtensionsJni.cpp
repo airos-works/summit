@@ -5,12 +5,16 @@
 // as air/OS's Summit keeps it). Kotlin: works.airos.summit.extensions.ExtensionsNative.
 #include "core/ExtensionCatalog.h"
 #include "core/ExtensionIdentity.h"
+#include "core/ExtensionStore.h"
+#include "core/ExtensionStoreDownload.h"
+#include "core/StoreOffer.h"
 
 #include <android/log.h>
 #include <dlfcn.h>
 #include <jni.h>
 #include <nlohmann/json.hpp>
 
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -252,4 +256,105 @@ SUMMIT_EXT_JNI(jstring, identity)(JNIEnv* env, jclass, jstring manifestJson, jst
     if (manifest.is_discarded())
         manifest = json::object();
     return ToJava(env, summit::ExtensionIdentity(manifest, ToString(env, localIdentity), ToString(env, verifiedCRX)));
+}
+
+// ---------------------------------------------------------------- the stores
+// The Chrome Web Store's and Firefox Add-ons' extension pages, with the card
+// air/OS's Summit puts on them (core/StoreOffer, core/ExtensionStoreDownload).
+
+namespace {
+
+std::optional<summit::ExtensionStoreItem> StoreItem(JNIEnv* env, jstring url)
+{
+    return summit::ParseExtensionStoreURL(ToString(env, url));
+}
+
+std::atomic<bool> gStoreCancelled { false };
+
+} // namespace
+
+// {"store": "chrome"|"firefox", "identifier"} for an extension's store page, or "".
+SUMMIT_EXT_JNI(jstring, storeItem)(JNIEnv* env, jclass, jstring url)
+{
+    auto item = StoreItem(env, url);
+    if (!item)
+        return ToJava(env, "");
+    json result = { { "store", item->store == summit::ExtensionStoreItem::Store::Chrome ? "chrome" : "firefox" },
+        { "identifier", item->identifier } };
+    return ToJava(env, result.dump());
+}
+
+// The extension's name from the store page's title.
+SUMMIT_EXT_JNI(jstring, storeItemName)(JNIEnv* env, jclass, jstring title)
+{
+    return ToJava(env, summit::StoreItemNameFromTitle(ToString(env, title)));
+}
+
+// The script that shows the card ({"name", "installed", "disabled", "token"}) or, given "", removes it.
+SUMMIT_EXT_JNI(jstring, storeOfferScript)(JNIEnv* env, jclass, jstring offerJson)
+{
+    json in = json::parse(ToString(env, offerJson), nullptr, false);
+    if (!in.is_object())
+        return ToJava(env, summit::StoreOfferScript(nullptr));
+    summit::StoreOffer offer { in.value("name", ""), in.value("installed", false), in.value("disabled", false), in.value("token", "") };
+    return ToJava(env, summit::StoreOfferScript(&offer));
+}
+
+// {"action", "token"} for one of the card's links, or "".
+SUMMIT_EXT_JNI(jstring, parseStoreOfferLink)(JNIEnv* env, jclass, jstring url)
+{
+    auto choice = summit::ParseStoreOfferLink(ToString(env, url));
+    return ToJava(env, choice ? json({ { "action", choice->action }, { "token", choice->token } }).dump() : std::string());
+}
+
+// A Firefox Add-ons page's add-on: {"identifier", "name", "extension"} or {"error"}. Blocks for the network.
+SUMMIT_EXT_JNI(jstring, resolveFirefoxItem)(JNIEnv* env, jclass, jstring url)
+{
+    auto item = StoreItem(env, url);
+    if (!item || item->store != summit::ExtensionStoreItem::Store::Firefox)
+        return ToJava(env, json({ { "error", "not a Firefox Add-ons extension page" } }).dump());
+    std::string identifier, name, error;
+    bool extension = true;
+    if (!summit::ResolveFirefoxStoreItem(*item, identifier, name, extension, error))
+        return ToJava(env, json({ { "error", error } }).dump());
+    return ToJava(env, json({ { "identifier", identifier }, { "name", name }, { "extension", extension } }).dump());
+}
+
+// Downloads the store page's extension and stages it, as stage() a file:
+// {"staged", "package", "order", "expectedIdentity", "store"} or {"error"}.
+// Blocks for the network; cancelStoreDownload() stops it.
+SUMMIT_EXT_JNI(jstring, downloadStoreItem)(JNIEnv* env, jclass, jstring url, jstring temporaryDirectory)
+{
+    auto item = StoreItem(env, url);
+    if (!item)
+        return ToJava(env, json({ { "error", "not an extension's store page" } }).dump());
+    summit::ExtensionCatalog* catalog = nullptr;
+    {
+        std::lock_guard lock(gCatalogLock);
+        catalog = gCatalog.get();
+    }
+    if (!catalog)
+        return ToJava(env, json({ { "error", "no catalog" } }).dump());
+    gStoreCancelled = false;
+    std::string expectedIdentity, error;
+    std::filesystem::path temporary = ToString(env, temporaryDirectory);
+    std::error_code ignored;
+    std::filesystem::create_directories(temporary, ignored);
+    auto staged = summit::DownloadStoreExtension(*item, temporary, *catalog, gStoreCancelled, expectedIdentity, error);
+    if (!staged)
+        return ToJava(env, json({ { "error", error.empty() ? "The extension could not be downloaded." : error } }).dump());
+    std::lock_guard lock(gCatalogLock);
+    std::vector<summit::InstalledExtension> entries;
+    std::string ignoredError;
+    gCatalog->Load(entries, ignoredError);
+    gStaged = std::move(staged);
+    json result = { { "staged", gStaged->Path().string() }, { "package", gStaged->Path().parent_path().filename().string() },
+        { "order", summit::ExtensionCatalog::NextInstallationOrder(entries) }, { "expectedIdentity", expectedIdentity },
+        { "store", item->store == summit::ExtensionStoreItem::Store::Chrome ? "Chrome Web Store" : "Firefox Add-ons" } };
+    return ToJava(env, result.dump());
+}
+
+SUMMIT_EXT_JNI(void, cancelStoreDownload)(JNIEnv*, jclass)
+{
+    gStoreCancelled = true;
 }
