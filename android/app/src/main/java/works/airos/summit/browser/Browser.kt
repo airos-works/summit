@@ -642,6 +642,9 @@ class Browser private constructor(private val appContext: Context) {
     }
   }
 
+  /** Asks Android for what a web permission needs ("notifications", ...), as for a site. */
+  fun requestSystemPermission(permission: String, done: (Boolean) -> Unit = {}) = grantSystem(listOf(permission), done)
+
   private fun grantSystem(permissions: List<String>, done: (Boolean) -> Unit) {
     val system = permissions.mapNotNull {
       when (it) {

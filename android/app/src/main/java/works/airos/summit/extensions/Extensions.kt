@@ -64,6 +64,8 @@ class Extensions(private val context: Context, private val browser: Browser) {
     // ExtensionActionPopupWPE.h: summitPopupShowWPE ('wxps'), summitPopupCloseWPE ('wxpc').
     private val POPUP_SHOW = fourCharCode("wxps")
     private val POPUP_CLOSE = fourCharCode("wxpc")
+    // ExtensionActionPopupWPE.h: summitNotificationWPE ('wxno').
+    private val NOTIFICATION = fourCharCode("wxno")
     private fun fourCharCode(code: String): Long = code.fold(0L) { value, c -> (value shl 8) or c.code.toLong() }
     private const val REPLY_TARGET = "3"
     // The app has one browser window.
@@ -96,6 +98,11 @@ class Extensions(private val context: Context, private val browser: Browser) {
   private var nextRequest = 1L
   private val replies = HashMap<Long, (JSONObject) -> Unit>()
   private val handler = Handler(Looper.getMainLooper())
+  private val notifications = ExtensionNotifications(context) { extension, notification, button ->
+    val request = JSONObject().put("op", "notificationClicked").put("extension", extension).put("notification", notification)
+    if (button != null) request.put("button", button)
+    if (ready) call(request)
+  }
 
   /** Starts extensions for the session; call before the first page is made with it. */
   fun start(sessionHandle: Long) {
@@ -221,6 +228,8 @@ class Extensions(private val context: Context, private val browser: Browser) {
       if (error.isNotEmpty()) Log.w(TAG, "recording ${p.name}: $error")
       reloadCatalog()
       installed.firstOrNull { it.identifier == identifier }?.loaded = true
+      // Its chrome.notifications are Android notifications, which need the person's leave.
+      if ("notifications" in p.permissions) browser.requestSystemPermission("notifications")
       // The stores' cards now offer to manage it.
       browser.tabs.forEach { updateStoreOffer(it) }
       status = "${p.name} was added"
@@ -501,6 +510,7 @@ class Extensions(private val context: Context, private val browser: Browser) {
       ACTION_TARGET -> when (event.optLong("what")) {
         POPUP_SHOW -> handler.post { showPopup(fields) }
         POPUP_CLOSE -> handler.post { if (popup?.extension == fields.string("extension_identifier")) destroyPopup() }
+        NOTIFICATION -> handler.post { notifications.handle(fields) { fields.string(it) } }
         else -> handler.post { refreshActions() }
       }
       BROWSER_TARGET -> when (event.optLong("what")) {

@@ -203,7 +203,7 @@ Working on the emulator with uBlock Origin 1.77.4: installing from its XPI
 cosmetic filtering), the badge count, the popup in a sheet with its mobile
 layout, and its dashboard in a tab. Still to do:
 
-1. The Haiku-only parts, each marked `FIXME (Summit, Android)`: notifications,
+1. The Haiku-only parts, each marked `FIXME (Summit, Android)`:
    `tabs.captureVisibleTab`, debugger input, `cookies.onChanged` on libsoup,
    idle state, opening downloads. Native messaging has
    no Android counterpart.
@@ -264,8 +264,7 @@ Next, in order:
    emulator's provider never gave a page, is unverified).
 2. Interop parity (#306): WebDriver input on WPE views (scroll-snap input
    tests), HTTP/2 in the soup backend, the full Interop 2024-2026 lists.
-3. The FIXMEs of the extension implementation on Android (notifications,
-   captureVisibleTab, debugger input, cookies.onChanged, idle, opening
+3. The FIXMEs of the extension implementation on Android (captureVisibleTab, debugger input, cookies.onChanged, idle, opening
    downloads); Safari web extensions; sensors (`docs/sensors.md`).
 4. Media: MSE playback on YouTube; WebRTC capture.
 5. Performance: browserbench.org (Speedometer 3.1, JetStream, MotionMark)
