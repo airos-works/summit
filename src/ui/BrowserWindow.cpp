@@ -24,6 +24,7 @@
 #include "PageSourceWindow.h"
 #include "DownloadList.h"
 #include "DownloadsPanel.h"
+#include "core/ExtensionBrowserData.h"
 #include "core/ExtensionStoreDownload.h"
 #include "FrameHistory.h"
 #include "McpService.h"
@@ -3147,12 +3148,8 @@ void BrowserWindow::BrowserCommand(const BMessage& message)
             return;
         case B_WEBKIT_BROWSER_DETECT_LANGUAGE: {
             // i18n.detectLanguage, with the detector page translation uses.
-            const auto detected = DetectTextLanguages(message.GetString("text", ""));
-            auto languages = nlohmann::json::array();
-            for (const auto& [language, percentage] : detected.languages)
-                languages.push_back({{"language", language}, {"percentage", percentage}});
-            const nlohmann::json answer = {{"isReliable", detected.reliable}, {"languages", languages}};
-            fWebKitContext->RespondToBrowserCommandWithData(identifier, B_OK, answer.dump().c_str());
+            const auto answer = ExtensionDetectLanguageAnswer(message.GetString("text", ""));
+            fWebKitContext->RespondToBrowserCommandWithData(identifier, B_OK, answer.c_str());
             return;
         }
         case B_WEBKIT_BROWSER_SET_READER: {

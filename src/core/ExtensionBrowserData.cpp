@@ -4,7 +4,9 @@
 // so that both answer extensions alike.
 #include "core/ExtensionBrowserData.h"
 
+#include "core/Address.h"
 #include "core/HistoryVisits.h"
+#include "core/PageLanguage.h"
 #include <algorithm>
 #include <cctype>
 #include <ctime>
@@ -371,6 +373,59 @@ BrowserDataAnswer ExtensionBookmarksCommand(ProfileStore& store, const std::stri
     } else
         return BrowserDataAnswer::Failure(BrowserDataAnswer::Status::NotSupported);
     return answer;
+}
+
+ExtensionSearch ExtensionSearchCommand(const std::string& method, const std::string& argumentText)
+{
+    ExtensionSearch search;
+    const auto arguments = nlohmann::json::parse(argumentText.empty() ? std::string("{}") : argumentText, nullptr, false);
+    if (arguments.is_discarded() || !arguments.is_object()) {
+        search.answer = BrowserDataAnswer::Failure(BrowserDataAnswer::Status::BadValue);
+        return search;
+    }
+    auto fail = [&](const char* error) {
+        search.answer.status = BrowserDataAnswer::Status::BadValue;
+        search.answer.error = error;
+        return search;
+    };
+    const auto& current = CurrentSearchEngine();
+    if (method == "get") {
+        auto engines = nlohmann::json::array();
+        for (const auto& engine : SearchEngines()) {
+            const std::string prefix = engine.prefix;
+            engines.push_back({{"name", engine.name}, {"isDefault", engine.id == current.id},
+                {"favIconUrl", prefix.substr(0, prefix.find('/', 8)) + "/favicon.ico"}});
+        }
+        search.answer.data = engines.dump();
+        return search;
+    }
+    if (method != "query" && method != "search") {
+        search.answer = BrowserDataAnswer::Failure(BrowserDataAnswer::Status::NotSupported);
+        return search;
+    }
+    // Firefox names the engine as search.get() does; Summit's ids work too.
+    const SearchEngine* engine = &current;
+    if (arguments.contains("engine")) {
+        const std::string name = LowerText(arguments.value("engine", std::string()));
+        engine = nullptr;
+        for (const auto& each : SearchEngines())
+            if (name == LowerText(each.name) || name == each.id) engine = &each;
+        if (!engine) return fail("No search engine with that name.");
+    }
+    const std::string text = Trim(arguments.value("text", std::string()));
+    if (text.empty()) return fail("The search text is empty.");
+    search.url = engine->prefix + PercentEncode(text);
+    search.disposition = arguments.value("disposition", std::string("CURRENT_TAB"));
+    return search;
+}
+
+std::string ExtensionDetectLanguageAnswer(std::string_view text)
+{
+    const auto detected = DetectTextLanguages(text);
+    auto languages = nlohmann::json::array();
+    for (const auto& [language, percentage] : detected.languages)
+        languages.push_back({{"language", language}, {"percentage", percentage}});
+    return nlohmann::json({{"isReliable", detected.reliable}, {"languages", languages}}).dump();
 }
 
 std::vector<BookmarkChangeReporter::Event> BookmarkChangeReporter::Changes(const Bookmarks& bookmarks)

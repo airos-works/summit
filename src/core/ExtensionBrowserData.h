@@ -8,6 +8,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -61,6 +62,18 @@ BrowserDataAnswer ExtensionHistoryCommand(ProfileStore&, const std::string& meth
 // chrome.bookmarks (getTree, get, getChildren, getSubTree, getRecent, search,
 // create, move, update, remove, removeTree).
 BrowserDataAnswer ExtensionBookmarksCommand(ProfileStore&, const std::string& method, const std::string& arguments);
+
+// browser.search and chrome.search: "get" answers the engines; "query" and
+// "search" name the address to open and where ("CURRENT_TAB", "NEW_TAB",
+// "NEW_WINDOW"), which the browser then opens and answers with null.
+struct ExtensionSearch {
+    BrowserDataAnswer answer;
+    std::string url;
+    std::string disposition;
+};
+ExtensionSearch ExtensionSearchCommand(const std::string& method, const std::string& arguments);
+// i18n.detectLanguage's answer (JSON) for text, with the detector page translation uses.
+std::string ExtensionDetectLanguageAnswer(std::string_view text);
 
 // What extensions see of each bookmark node, for comparing two states.
 struct BookmarkEntry {

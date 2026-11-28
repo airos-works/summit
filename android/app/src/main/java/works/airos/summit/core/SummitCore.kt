@@ -30,6 +30,8 @@ object SummitCore {
   @JvmStatic external fun browserData(kind: String, method: String, arguments: String): String
   @JvmStatic external fun bookmarkChanges(): String
   @JvmStatic external fun historyItem(url: String): String
+  @JvmStatic external fun extensionSearch(method: String, arguments: String): String
+  @JvmStatic external fun detectLanguage(text: String): String
   @JvmStatic external fun bookmarks(): String
   @JvmStatic external fun readingList(): String
   @JvmStatic external fun addToReadingList(url: String, title: String)

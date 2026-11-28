@@ -101983,7 +101983,7 @@ index 0000000000000000000000000000000000000000..6b5fc0f78f205ca35494521f2ebefe65
 +
 +} // namespace WebCore
 diff --git a/Source/WebCore/platform/network/curl/CurlContext.cpp b/Source/WebCore/platform/network/curl/CurlContext.cpp
-index 2e6a2537f3e283d7cb7f2081c8549f0256ee4e71..3ef6043910795b4d3e3bf6a6310386aceb543a07 100644
+index 2e6a2537f3e283d7cb7f2081c8549f0256ee4e71..6b68b24c4b798397d210fcd8de545d1e60f58162 100644
 --- a/Source/WebCore/platform/network/curl/CurlContext.cpp
 +++ b/Source/WebCore/platform/network/curl/CurlContext.cpp
 @@ -26,6 +26,20 @@
@@ -102288,8 +102288,21 @@ index 2e6a2537f3e283d7cb7f2081c8549f0256ee4e71..3ef6043910795b4d3e3bf6a6310386ac
      long altSvcCtrl = CURLALTSVC_H1;
      altSvcCtrl |= CurlContext::singleton().isHttp2Enabled() ? CURLALTSVC_H2 : 0;
      altSvcCtrl |= CurlContext::singleton().isHttp3Enabled() ? CURLALTSVC_H3 : 0;
+@@ -688,6 +946,12 @@ void CurlHandle::setReadCallbackFunction(curl_read_callback callbackFunc, void*
+     curl_easy_setopt(m_handle, CURLOPT_READDATA, userData);
+ }
+ 
++void CurlHandle::setSeekCallbackFunction(curl_seek_callback callbackFunc, void* userData)
++{
++    curl_easy_setopt(m_handle, CURLOPT_SEEKFUNCTION, callbackFunc);
++    curl_easy_setopt(m_handle, CURLOPT_SEEKDATA, userData);
++}
++
+ void CurlHandle::setSslCtxCallbackFunction(curl_ssl_ctx_callback callbackFunc, void* userData)
+ {
+     curl_easy_setopt(m_handle, CURLOPT_SSL_CTX_DATA, userData);
 diff --git a/Source/WebCore/platform/network/curl/CurlContext.h b/Source/WebCore/platform/network/curl/CurlContext.h
-index 757359cf3b1e1890fc906497907c4fe5ed00e6a0..64c53227332a8fbf991f9ab6bec64d6e74327661 100644
+index 757359cf3b1e1890fc906497907c4fe5ed00e6a0..86c89fccb2cb6cf86abb53c2ecaf3691abd4cb0b 100644
 --- a/Source/WebCore/platform/network/curl/CurlContext.h
 +++ b/Source/WebCore/platform/network/curl/CurlContext.h
 @@ -30,6 +30,7 @@
@@ -102346,6 +102359,14 @@ index 757359cf3b1e1890fc906497907c4fe5ed00e6a0..64c53227332a8fbf991f9ab6bec64d6e
  
      Seconds m_dnsCacheTimeout { Seconds::fromMinutes(5) };
      Seconds m_connectTimeout { 30.0 };
+@@ -294,6 +318,7 @@ public:
+     void setHeaderCallbackFunction(curl_write_callback, void*);
+     void setWriteCallbackFunction(curl_write_callback, void*);
+     void setReadCallbackFunction(curl_read_callback, void*);
++    void setSeekCallbackFunction(curl_seek_callback, void*);
+     void setSslCtxCallbackFunction(curl_ssl_ctx_callback, void*);
+     void setDebugCallbackFunction(curl_debug_callback, void*);
+ 
 diff --git a/Source/WebCore/platform/network/curl/CurlDownload.cpp b/Source/WebCore/platform/network/curl/CurlDownload.cpp
 new file mode 100644
 index 0000000000000000000000000000000000000000..5fa759dc4891001a7857599fbe9500f9f6cda5a3
@@ -102682,7 +102703,7 @@ index 0000000000000000000000000000000000000000..da71c185bfa5f93bf68ba7a513f48393
 +
 +#endif
 diff --git a/Source/WebCore/platform/network/curl/CurlFormDataStream.cpp b/Source/WebCore/platform/network/curl/CurlFormDataStream.cpp
-index af5d3258c41b738fbff6743deeb3c92c3938b1e3..f3878af6eda9f2174e796b051ac91c4cebee5d50 100644
+index af5d3258c41b738fbff6743deeb3c92c3938b1e3..c956aaebfa6e33b54066350d7f1eb62cfe2e48ee 100644
 --- a/Source/WebCore/platform/network/curl/CurlFormDataStream.cpp
 +++ b/Source/WebCore/platform/network/curl/CurlFormDataStream.cpp
 @@ -38,6 +38,7 @@
@@ -102693,7 +102714,26 @@ index af5d3258c41b738fbff6743deeb3c92c3938b1e3..f3878af6eda9f2174e796b051ac91c4c
  #include <wtf/MainThread.h>
  
  namespace WebCore {
-@@ -90,8 +91,14 @@ unsigned long long CurlFormDataStream::totalSize()
+@@ -63,6 +64,18 @@ void CurlFormDataStream::clean()
+     m_fileHandle = { };
+ }
+ 
++bool CurlFormDataStream::rewind()
++{
++    if (isPendingStream())
++        return false;
++    m_fileHandle = { };
++    m_elementPosition = 0;
++    m_dataOffset = 0;
++    m_totalReadSize = 0;
++    m_wouldBlock = false;
++    return true;
++}
++
+ const Vector<uint8_t>* CurlFormDataStream::getPostData()
+ {
+     if (!m_formData)
+@@ -90,8 +103,14 @@ unsigned long long CurlFormDataStream::totalSize()
      return m_totalSize;
  }
  
@@ -102708,7 +102748,7 @@ index af5d3258c41b738fbff6743deeb3c92c3938b1e3..f3878af6eda9f2174e796b051ac91c4c
      if (!m_formData)
          return std::nullopt;
  
-@@ -115,9 +122,21 @@ std::optional<size_t> CurlFormDataStream::read(char* buffer, size_t size)
+@@ -115,9 +134,21 @@ std::optional<size_t> CurlFormDataStream::read(char* buffer, size_t size)
              }, [] (const FormDataElement::EncodedBlobData&) -> std::optional<size_t> {
                  ASSERT_NOT_REACHED();
                  return std::nullopt;
@@ -102733,7 +102773,7 @@ index af5d3258c41b738fbff6743deeb3c92c3938b1e3..f3878af6eda9f2174e796b051ac91c4c
              }
          );
  
-@@ -125,6 +144,9 @@ std::optional<size_t> CurlFormDataStream::read(char* buffer, size_t size)
+@@ -125,6 +156,9 @@ std::optional<size_t> CurlFormDataStream::read(char* buffer, size_t size)
              return std::nullopt;
  
          totalReadBytes += *readBytes;
@@ -102744,11 +102784,16 @@ index af5d3258c41b738fbff6743deeb3c92c3938b1e3..f3878af6eda9f2174e796b051ac91c4c
  
      m_totalReadSize += totalReadBytes;
 diff --git a/Source/WebCore/platform/network/curl/CurlFormDataStream.h b/Source/WebCore/platform/network/curl/CurlFormDataStream.h
-index 2290fd7b85a5bdb4e711c36dc8a61d5f55073f75..accebc382c7680b5f1b1404c77abb7ee738019b8 100644
+index 2290fd7b85a5bdb4e711c36dc8a61d5f55073f75..25dc3eab1d1e74ef42a7b35bdfb8b27d1bdc4cd7 100644
 --- a/Source/WebCore/platform/network/curl/CurlFormDataStream.h
 +++ b/Source/WebCore/platform/network/curl/CurlFormDataStream.h
-@@ -45,6 +45,13 @@ public:
+@@ -43,8 +43,18 @@ public:
+     unsigned long long totalSize();
+ 
      std::optional<size_t> read(char*, size_t);
++    // Back to the start, so curl can send the body again (an HTTP/2 stream the
++    // server refused, a 307/308 redirect). A streamed body cannot be.
++    bool rewind();
      unsigned long long totalReadSize() { return m_totalReadSize; }
  
 +    // A body that is a ReadableStream (fetch upload streaming, #178): it has
@@ -102761,7 +102806,7 @@ index 2290fd7b85a5bdb4e711c36dc8a61d5f55073f75..accebc382c7680b5f1b1404c77abb7ee
  private:
      std::optional<size_t> readFromFile(const FormDataElement::EncodedFileData&, char*, size_t);
      std::optional<size_t> readFromData(const Vector<uint8_t>&, char*, size_t);
-@@ -60,6 +67,7 @@ private:
+@@ -60,6 +70,7 @@ private:
  
      FileSystem::FileHandle m_fileHandle;
      size_t m_dataOffset { 0 };
@@ -102770,7 +102815,7 @@ index 2290fd7b85a5bdb4e711c36dc8a61d5f55073f75..accebc382c7680b5f1b1404c77abb7ee
  
  } // namespace WebCore
 diff --git a/Source/WebCore/platform/network/curl/CurlRequest.cpp b/Source/WebCore/platform/network/curl/CurlRequest.cpp
-index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..63e12ee65c968b1aefb13e80ef10bc93bf736763 100644
+index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..736701dba0cbf857de5a143dd3ae1ce3b9367146 100644
 --- a/Source/WebCore/platform/network/curl/CurlRequest.cpp
 +++ b/Source/WebCore/platform/network/curl/CurlRequest.cpp
 @@ -25,6 +25,7 @@
@@ -103341,8 +103386,8 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..63e12ee65c968b1aefb13e80ef10bc93
  {
 -    ensureOnMainThread(WTF::move(task));
 +    ensureOnMainThread(std::move(task));
- }
- 
++}
++
 +#if PLATFORM(HAIKU)
 +void CurlRequest::watchDownloadStallsHaiku(Seconds stallTimeout)
 +{
@@ -103355,9 +103400,9 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..63e12ee65c968b1aefb13e80ef10bc93
 +        if (!isCompletedOrCancelled() && m_curlHandle)
 +            m_curlHandle->setTimeout(stallTimeout);
 +    });
-+}
+ }
 +#endif
-+
+ 
  void CurlRequest::runOnWorkerThreadIfRequired(Function<void()>&& task)
  {
      if (isMainThread())
@@ -103790,7 +103835,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..63e12ee65c968b1aefb13e80ef10bc93
      m_formDataStream.clean();
      m_multipartHandle = nullptr;
      m_curlHandle = nullptr;
-@@ -553,7 +1343,9 @@ void CurlRequest::appendAcceptLanguageHeaderIfNeeded(HTTPHeaderMap& header)
+@@ -553,10 +1343,13 @@ void CurlRequest::appendAcceptLanguageHeaderIfNeeded(HTTPHeaderMap& header)
  
  void CurlRequest::setupPUT()
  {
@@ -103801,7 +103846,11 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..63e12ee65c968b1aefb13e80ef10bc93
  
      m_curlHandle->enableHttpPutRequest(totalSize);
      m_curlHandle->setReadCallbackFunction(willSendDataCallback, this);
-@@ -564,7 +1356,7 @@ void CurlRequest::setupPUT()
++    m_curlHandle->setSeekCallbackFunction(willRewindDataCallback, this);
+ 
+     // Disable a "Expect: 100-continue" header
+     m_curlHandle->removeRequestHeader("Expect"_s);
+@@ -564,10 +1357,11 @@ void CurlRequest::setupPUT()
  
  void CurlRequest::setupPOST()
  {
@@ -103810,7 +103859,11 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..63e12ee65c968b1aefb13e80ef10bc93
  
      m_curlHandle->enableHttpPostRequest(totalSize);
      m_curlHandle->setReadCallbackFunction(willSendDataCallback, this);
-@@ -632,6 +1424,88 @@ void CurlRequest::completeDidReceiveResponse()
++    m_curlHandle->setSeekCallbackFunction(willRewindDataCallback, this);
+ 
+     // Override the default POST Content-Type: header
+     if (!m_request.hasHTTPHeader(HTTPHeaderName::ContentType) && !totalSize)
+@@ -632,6 +1426,88 @@ void CurlRequest::completeDidReceiveResponse()
          responseCompletionHandler();
  }
  
@@ -103899,7 +103952,7 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..63e12ee65c968b1aefb13e80ef10bc93
  NetworkLoadMetrics CurlRequest::networkLoadMetrics()
  {
      ASSERT(m_curlHandle);
-@@ -653,6 +1527,57 @@ NetworkLoadMetrics CurlRequest::networkLoadMetrics()
+@@ -653,6 +1529,57 @@ NetworkLoadMetrics CurlRequest::networkLoadMetrics()
      return WTF::move(*networkLoadMetrics);
  }
  
@@ -103957,8 +104010,26 @@ index 92ba6b6e9eef3ac9232fa1049e30ced84a241c23..63e12ee65c968b1aefb13e80ef10bc93
  std::optional<long long> CurlRequest::getContentLength()
  {
      for (const auto& header : m_response.headers) {
+@@ -668,6 +1595,17 @@ std::optional<long long> CurlRequest::getContentLength()
+     return std::nullopt;
+ }
+ 
++// curl sends a body again from the start when a reused connection or an HTTP/2
++// stream fails before the answer, and on 307/308 redirects. Without this it
++// fails the request ("Send failed since rewinding of the data stream failed").
++int CurlRequest::willRewindDataCallback(void* userData, curl_off_t offset, int origin)
++{
++    auto& request = *static_cast<CurlRequest*>(userData);
++    if (origin != SEEK_SET || offset || request.isCompletedOrCancelled() || !request.m_formDataStream.rewind())
++        return CURL_SEEKFUNC_CANTSEEK;
++    return CURL_SEEKFUNC_OK;
++}
++
+ size_t CurlRequest::willSendDataCallback(char* ptr, size_t blockSize, size_t numberOfBlocks, void* userData)
+ {
+     return static_cast<CurlRequest*>(userData)->willSendData(ptr, blockSize, numberOfBlocks);
 diff --git a/Source/WebCore/platform/network/curl/CurlRequest.h b/Source/WebCore/platform/network/curl/CurlRequest.h
-index 3b060605bbff32f845804a848610eca23dea834c..75ccb1ce361778903d3bb434142a7c90ee98052a 100644
+index 3b060605bbff32f845804a848610eca23dea834c..309cdec4d74fe3dd5f329077f7221e9b408c1d32 100644
 --- a/Source/WebCore/platform/network/curl/CurlRequest.h
 +++ b/Source/WebCore/platform/network/curl/CurlRequest.h
 @@ -32,16 +32,24 @@
@@ -104047,7 +104118,7 @@ index 3b060605bbff32f845804a848610eca23dea834c..75ccb1ce361778903d3bb434142a7c90
  
      int didReceiveDebugInfo(curl_infotype, std::span<const char>);
  
-@@ -126,15 +161,33 @@ private:
+@@ -126,15 +161,34 @@ private:
      bool needToInvokeDidCancelTransfer() const { return m_didNotifyResponse && !m_didReturnFromNotify && m_mustInvokeCancelTransfer; }
      void invokeDidReceiveResponseForFile(const URL&);
      void invokeDidReceiveResponse(const CurlResponse&, Function<void()>&& completionHandler = { });
@@ -104070,6 +104141,7 @@ index 3b060605bbff32f845804a848610eca23dea834c..75ccb1ce361778903d3bb434142a7c90
 +
      // Callback functions for curl
      static size_t willSendDataCallback(char*, size_t, size_t, void*);
++    static int willRewindDataCallback(void*, curl_off_t, int);
      static size_t didReceiveHeaderCallback(char*, size_t, size_t, void*);
      static size_t didReceiveDataCallback(char*, size_t, size_t, void*);
      static int didReceiveDebugInfoCallback(CURL*, curl_infotype, char*, size_t, void*);
@@ -104081,7 +104153,7 @@ index 3b060605bbff32f845804a848610eca23dea834c..75ccb1ce361778903d3bb434142a7c90
  
  
      CurlRequestClient* m_client { };
-@@ -149,23 +202,71 @@ private:
+@@ -149,23 +203,71 @@ private:
      bool m_shouldDisableServerTrustEvaluation { false };
      CurlHandle::LocalhostAlias m_localhostAlias { CurlHandle::LocalhostAlias::Disable };
  
@@ -175055,10 +175127,10 @@ index 0000000000000000000000000000000000000000..714e6e4bde757d6847d3835a65165ae6
 +#endif
 diff --git a/Source/WebKit/UIProcess/Extensions/wpe/SummitExtensionsWPE.cpp b/Source/WebKit/UIProcess/Extensions/wpe/SummitExtensionsWPE.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..e4c5659ed0a0956c6e7f046ca08c0801e6375c13
+index 0000000000000000000000000000000000000000..a933a8f0ca149b6e3f4806e8f8db2bb44aef62e8
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/wpe/SummitExtensionsWPE.cpp
-@@ -0,0 +1,347 @@
+@@ -0,0 +1,357 @@
 +/*
 + * Copyright (C) 2026 air/OS contributors. SPDX-License-Identifier: BSD-2-Clause
 + */
@@ -175332,6 +175404,16 @@ index 0000000000000000000000000000000000000000..e4c5659ed0a0956c6e7f046ca08c0801
 +                return ExtensionActionPopupHaiku::attach(*context, candidate) ? "{}"_s : "{\"error\":\"no popup\"}"_s;
 +        }
 +        return "{\"error\":\"no page\"}"_s;
++    } else if (op == "setTabDiscarded"_s) {
++        // BWebKitContext::SetBrowserTabDiscarded: a tab without a live page
++        // (the app's placeholder) keeps its address and title for extensions.
++        auto page = numberFrom(request, "page"_s);
++        if (!page)
++            return "{\"error\":\"no page\"}"_s;
++        std::optional<BrowserTabRegistryHaiku::DiscardedTab> tab;
++        if (request.getBoolean("discarded"_s).value_or(false))
++            tab = BrowserTabRegistryHaiku::DiscardedTab { request.getString("url"_s), request.getString("title"_s) };
++        h.controller->nativeBrowserTabs()->setDiscarded(ObjectIdentifier<WebPageProxyIdentifierType>(page), WTF::move(tab));
 +    } else if (op == "historyChanged"_s) {
 +        // BWebKitContext::NotifyHistoryChanged: "visited" or "removed", with
 +        // the history item or what was removed (core/ExtensionBrowserData).
@@ -212275,7 +212357,7 @@ index 0000000000000000000000000000000000000000..a498055ffb3ffeeed99ba7f7860dafb9
 +
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && USE(SUMMIT_EXTENSIONS)
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIRuntime.cpp b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIRuntime.cpp
-index 81412a7ab5e7f5845d4d19a813c2552c1cf361d6..0017d50ab81f6b941319e1c921aa69df6fbf0478 100644
+index 81412a7ab5e7f5845d4d19a813c2552c1cf361d6..5a0989688071974a4e11d6be1e75ef19f83e6ede 100644
 --- a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIRuntime.cpp
 +++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIRuntime.cpp
 @@ -30,6 +30,8 @@
@@ -212570,7 +212652,7 @@ index 81412a7ab5e7f5845d4d19a813c2552c1cf361d6..0017d50ab81f6b941319e1c921aa69df
      WebProcess::singleton().sendWithAsyncReply(Messages::WebExtensionContext::RuntimeConnectNative(applicationID, port->channelIdentifier(), webPageProxyIdentifier), [=, this, protectedThis = Ref { *this }, globalContext = JSRetainPtr { JSContextGetGlobalContext(context) }](std::expected<void, WebExtensionError>&& result) {
          if (result)
              return;
-@@ -406,6 +555,12 @@ RefPtr<WebExtensionAPIPort> WebExtensionAPIRuntime::connectNative(WebPageProxyId
+@@ -406,11 +555,22 @@ RefPtr<WebExtensionAPIPort> WebExtensionAPIRuntime::connectNative(WebPageProxyId
          port->setError(globalContext.get(), protect(runtime())->reportError(result.error(), globalContext.get()));
          port->disconnect();
      }, extensionContext().identifier());
@@ -212583,15 +212665,43 @@ index 81412a7ab5e7f5845d4d19a813c2552c1cf361d6..0017d50ab81f6b941319e1c921aa69df
  #endif
  
      return port;
-@@ -446,7 +601,6 @@ void WebExtensionAPIWebPageRuntime::sendMessage(WebPage& page, WebFrame& frame,
+ }
+ 
++#if PLATFORM(HAIKU)
++// Chrome's runtime.lastError when no extension with that ID takes the page's message.
++static constexpr auto webPageMessageNotDeliveredErrorHaiku = "Could not establish connection. Receiving end does not exist."_s;
++#endif
++
+ void WebExtensionAPIWebPageRuntime::sendMessage(WebPage& page, WebFrame& frame, const String& extensionID, const String& messageJSON, RefPtr<JSON::Value> options, Ref<WebExtensionCallbackHandler>&& callback, String& outExceptionString)
+ {
+     // Documentation: https://developer.mozilla.org/docs/Mozilla/Add-ons/WebExtensions/API/runtime/sendMessage
+@@ -440,22 +600,31 @@ void WebExtensionAPIWebPageRuntime::sendMessage(WebPage& page, WebFrame& frame,
+     if (!destinationExtensionContext) {
+         // Respond after a random delay to prevent the page from easily detecting if extensions are not installed.
+         callAfterRandomDelay([callback = WTF::move(callback)]() {
++#if PLATFORM(HAIKU)
++            // As Chrome answers: sites try several extension IDs in turn and go
++            // on at this error (claude.ai's sign-in for Claude in Chrome); an
++            // empty answer reads as the first one having accepted.
++            callback->reportError(webPageMessageNotDeliveredErrorHaiku);
++#else
+             callback->call();
++#endif
+         });
+ 
          return;
      }
  
 -#if PLATFORM(COCOA)
      WebProcess::singleton().sendWithAsyncReply(Messages::WebExtensionContext::RuntimeWebPageSendMessage(extensionID, messageJSON, senderParameters), [protectedThis = Ref { *this }, callback = WTF::move(callback)](std::expected<String, WebExtensionError>&& result) {
          if (!result) {
++#if PLATFORM(HAIKU)
++            callback->reportError(webPageMessageNotDeliveredErrorHaiku);
++#else
              callback->call();
-@@ -455,7 +609,6 @@ void WebExtensionAPIWebPageRuntime::sendMessage(WebPage& page, WebFrame& frame,
++#endif
+             return;
+         }
  
          callback->call(fromJSON(callback->globalContext(), JSON::Value::parseJSON(result.value())));
      }, destinationExtensionContext->identifier());
@@ -212599,7 +212709,7 @@ index 81412a7ab5e7f5845d4d19a813c2552c1cf361d6..0017d50ab81f6b941319e1c921aa69df
  }
  
  RefPtr<WebExtensionAPIPort> WebExtensionAPIWebPageRuntime::connect(WebPage& page, WebFrame& frame, JSContextRef context, const String& extensionID, RefPtr<JSON::Value> options, String& outExceptionString)
-@@ -490,9 +643,7 @@ RefPtr<WebExtensionAPIPort> WebExtensionAPIWebPageRuntime::connect(WebPage& page
+@@ -490,9 +659,7 @@ RefPtr<WebExtensionAPIPort> WebExtensionAPIWebPageRuntime::connect(WebPage& page
          Ref port = WebExtensionAPIPort::create(*this, resolvedName);
  
          callAfterRandomDelay([=]() {
@@ -212609,7 +212719,7 @@ index 81412a7ab5e7f5845d4d19a813c2552c1cf361d6..0017d50ab81f6b941319e1c921aa69df
          });
  
          return port;
-@@ -500,7 +651,6 @@ RefPtr<WebExtensionAPIPort> WebExtensionAPIWebPageRuntime::connect(WebPage& page
+@@ -500,7 +667,6 @@ RefPtr<WebExtensionAPIPort> WebExtensionAPIWebPageRuntime::connect(WebPage& page
  
      Ref port = WebExtensionAPIPort::create(contentWorldType(), protect(runtime()), *destinationExtensionContext, page.webPageProxyIdentifier(), WebExtensionContentWorldType::Main, resolvedName);
  
@@ -212617,7 +212727,7 @@ index 81412a7ab5e7f5845d4d19a813c2552c1cf361d6..0017d50ab81f6b941319e1c921aa69df
      WebProcess::singleton().sendWithAsyncReply(Messages::WebExtensionContext::RuntimeWebPageConnect(extensionID, port->channelIdentifier(), resolvedName, senderParameters), [=, this, protectedThis = Ref { *this }, globalContext = JSRetainPtr { JSContextGetGlobalContext(context) }](std::expected<void, WebExtensionError>&& result) {
          if (result)
              return;
-@@ -508,7 +658,6 @@ RefPtr<WebExtensionAPIPort> WebExtensionAPIWebPageRuntime::connect(WebPage& page
+@@ -508,7 +674,6 @@ RefPtr<WebExtensionAPIPort> WebExtensionAPIWebPageRuntime::connect(WebPage& page
          port->setError(globalContext.get(), protect(runtime())->reportError(result.error(), globalContext.get()));
          port->disconnect();
      }, destinationExtensionContext->identifier());
@@ -212625,7 +212735,7 @@ index 81412a7ab5e7f5845d4d19a813c2552c1cf361d6..0017d50ab81f6b941319e1c921aa69df
  
      return port;
  }
-@@ -573,6 +722,24 @@ WebExtensionAPIEvent& WebExtensionAPIRuntime::onMessageExternal()
+@@ -573,6 +738,24 @@ WebExtensionAPIEvent& WebExtensionAPIRuntime::onMessageExternal()
      return *m_onMessageExternal;
  }
  
@@ -212650,7 +212760,7 @@ index 81412a7ab5e7f5845d4d19a813c2552c1cf361d6..0017d50ab81f6b941319e1c921aa69df
  bool WebExtensionContextProxy::matchesTarget(WebFrame& frame, const std::optional<WebExtensionMessageTargetParameters>& targetParameters)
  {
      if (!targetParameters)
-@@ -599,6 +766,125 @@ bool WebExtensionContextProxy::matchesTarget(WebFrame& frame, const std::optiona
+@@ -599,6 +782,125 @@ bool WebExtensionContextProxy::matchesTarget(WebFrame& frame, const std::optiona
      return true;
  }
  
@@ -212776,7 +212886,7 @@ index 81412a7ab5e7f5845d4d19a813c2552c1cf361d6..0017d50ab81f6b941319e1c921aa69df
  void WebExtensionContextProxy::dispatchRuntimeMessageEvent(WebExtensionContentWorldType contentWorldType, const String& messageJSON, const std::optional<WebExtensionMessageTargetParameters>& targetParameters, const WebExtensionMessageSenderParameters& senderParameters, bool userGesture, CompletionHandler<void(String&& replyJSON)>&& completionHandler)
  {
      switch (contentWorldType) {
-@@ -606,11 +892,11 @@ void WebExtensionContextProxy::dispatchRuntimeMessageEvent(WebExtensionContentWo
+@@ -606,11 +908,11 @@ void WebExtensionContextProxy::dispatchRuntimeMessageEvent(WebExtensionContentWo
  #if ENABLE(INSPECTOR_EXTENSIONS)
      case WebExtensionContentWorldType::Inspector:
  #endif
@@ -212790,7 +212900,7 @@ index 81412a7ab5e7f5845d4d19a813c2552c1cf361d6..0017d50ab81f6b941319e1c921aa69df
          return;
  
      case WebExtensionContentWorldType::Native:
-@@ -641,7 +927,13 @@ void WebExtensionContextProxy::internalDispatchRuntimeConnectEvent(WebExtensionC
+@@ -641,7 +943,13 @@ void WebExtensionContextProxy::internalDispatchRuntimeConnectEvent(WebExtensionC
              return;
  
          WebExtensionAPIEvent::ListenerVector listeners;
@@ -212805,7 +212915,7 @@ index 81412a7ab5e7f5845d4d19a813c2552c1cf361d6..0017d50ab81f6b941319e1c921aa69df
              listeners = namespaceObject.runtime().onConnectExternal().listeners();
          else
              listeners = namespaceObject.runtime().onConnect().listeners();
-@@ -715,7 +1007,7 @@ void WebExtensionContextProxy::dispatchRuntimeInstalledEvent(WebExtensionContext
+@@ -715,7 +1023,7 @@ void WebExtensionContextProxy::dispatchRuntimeInstalledEvent(WebExtensionContext
  
      details->setString(reasonKey, toWebAPI(installReason));
  

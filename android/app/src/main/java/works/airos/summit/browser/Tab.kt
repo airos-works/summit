@@ -34,6 +34,17 @@ class Tab(val id: Long, val private: Boolean, url: String, title: String = "") {
   /** Asks sites for their desktop layout (the desktop user agent). */
   /** Whether the page was made for an extension's own pages (it shows no others). */
   var extensionPage = false
+  /**
+   * While the tab has no live page (discarded, or restored and not shown yet):
+   * an empty page that never loads, so that extensions see the tab as on air/OS
+   * (whose discarded tabs keep an unloaded view). It becomes the tab's page when
+   * the tab is shown.
+   */
+  var placeholder: org.wpewebkit.wpeview.WebPage? = null
+  /** What extensions were last told of the tab's placeholder ("" when it has a live page). */
+  var reportedDiscarded = ""
+  /** When the tab's live page was made (SystemClock.uptimeMillis). */
+  var pageCreated = 0L
   /** The stores' card (Extensions.updateStoreOffer): shown on this page, or dismissed for this address. */
   var storeOfferShown = false
   var storeOfferDismissed = ""

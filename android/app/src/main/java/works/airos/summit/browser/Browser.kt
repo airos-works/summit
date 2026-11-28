@@ -52,6 +52,7 @@ import works.airos.summit.core.SummitCore
 class Browser private constructor(private val appContext: Context) {
   companion object {
     private const val EXTENSION_SCHEME = "webkit-extension:"
+    private const val NEW_PAGE_GRACE_MS = 30_000L
     private const val TAG = "Summit"
     const val BACKGROUND_DISCARD_MS = 5 * 60 * 1000L
     private const val PICTURE_WIDTH = 480
@@ -267,6 +268,12 @@ class Browser private constructor(private val appContext: Context) {
   /** Gives the page view the keyboard focus (from the address field); false when it could not take it. */
   fun focusPage(): Boolean = view?.requestFocus() == true
 
+  /** Moves a tab to index (-1 or past the end: the end), as tabs.move does. */
+  fun moveTab(tab: Tab, index: Int) {
+    if (!tabs.remove(tab)) return
+    tabs.add(if (index < 0) tabs.size else index.coerceAtMost(tabs.size), tab)
+  }
+
   /** A page for an extension's action popup, shown in a sheet rather than as a tab. */
   fun createPopupPage(url: String): WebPage {
     extensions.preparePage(url, popup = true)
@@ -298,8 +305,15 @@ class Browser private constructor(private val appContext: Context) {
     // An extension's own page (its popup or options in a tab) gets that
     // extension's configuration; private tabs' pages never do.
     tab.extensionPage = extensions.preparePage(if (tab.private) "" else tab.url)
-    val page = WebPage(contextFor(tab.private))
+    // The placeholder is a normal page: an extension's page needs one made for it.
+    val placeholder = tab.placeholder
+    tab.placeholder = null
+    val page = if (placeholder != null && !tab.extensionPage) placeholder else {
+      placeholder?.destroy()
+      WebPage(contextFor(tab.private))
+    }
     configure(tab, page)
+    tab.pageCreated = SystemClock.uptimeMillis()
     val state = tab.state
     tab.state = null
     if (state != null && page.restoreState(state)) {
@@ -479,7 +493,11 @@ class Browser private constructor(private val appContext: Context) {
 
   /** Discards the least recently shown pages beyond the budget. */
   private fun enforceBudget(keep: Tab) {
-    val live = tabs.filter { it.live && it !== keep }.sortedBy { it.lastShown }
+    // A page made in the last half minute (a tab an extension or link just
+    // opened in the background) is not discarded yet: whoever opened it is
+    // likely still working with it.
+    val now = SystemClock.uptimeMillis()
+    val live = tabs.filter { it.live && it !== keep && now - it.pageCreated >= NEW_PAGE_GRACE_MS }.sortedBy { it.lastShown }
     var excess = live.size + 1 - maxLivePages
     for (tab in live) {
       if (excess <= 0) break
@@ -497,9 +515,19 @@ class Browser private constructor(private val appContext: Context) {
     if (tab.playingAudio && tab.page != null) return
     if (view?.page === tab.page && tab.page != null) view?.setPage(null)
     destroyPage(tab, keepState = true)
+    // Extensions see the tab's placeholder from now on.
+    handler.post { extensions.syncTabs() }
+  }
+
+  /** The tab's placeholder page (see Tab.placeholder), for a tab without a live page. */
+  fun ensurePlaceholder(tab: Tab) {
+    if (tab.page != null || tab.placeholder != null || tab.private) return
+    extensions.preparePage("")
+    tab.placeholder = WebPage(contextFor(false))
   }
 
   private fun destroyPage(tab: Tab, keepState: Boolean) {
+    if (!keepState) tab.placeholder?.let { tab.placeholder = null; it.destroy() }
     val page = tab.page ?: return
     if (keepState) tab.state = runCatching { page.saveState() }.getOrNull()
     tab.page = null

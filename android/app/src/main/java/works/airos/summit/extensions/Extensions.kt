@@ -276,8 +276,18 @@ class Extensions(private val context: Context, private val browser: Browser) {
     val pages = JSONArray()
     var active = 0L
     for (tab in browser.tabs.filter { !it.private }) {
+      // Tabs without a live page are tabs too (Tab.placeholder).
+      browser.ensurePlaceholder(tab)
       val id = pageIdOf(tab)
       if (id == 0L) continue
+      // As air/OS's SetBrowserTabDiscarded: a placeholder shows the tab's address and title.
+      val discarded = if (tab.page == null) "$id\n${tab.url}\n${tab.title}" else ""
+      if (discarded != tab.reportedDiscarded) {
+        val reply = call(JSONObject().put("op", "setTabDiscarded").put("page", id.toString()).put("discarded", tab.page == null)
+          .put("url", tab.url).put("title", tab.title))
+        if (reply.has("error")) Log.w(TAG, "setTabDiscarded: ${reply.optString("error")}")
+        tab.reportedDiscarded = discarded
+      }
       pages.put(id.toString())
       if (tab === browser.selected) active = id
     }
@@ -458,7 +468,7 @@ class Extensions(private val context: Context, private val browser: Browser) {
     if (popup !== released) released.page.destroy()
   }
 
-  fun pageIdOf(tab: Tab): Long = tab.page?.engineHandle?.let { ExtensionsNative.pageId(it) } ?: 0
+  fun pageIdOf(tab: Tab): Long = (tab.page ?: tab.placeholder)?.engineHandle?.let { ExtensionsNative.pageId(it) } ?: 0
 
   fun refreshActions() {
     if (!ready) return
@@ -568,6 +578,53 @@ class Extensions(private val context: Context, private val browser: Browser) {
         forwardBookmarkEvents(answer.optJSONArray("bookmarkEvents"))
         respond(answer.optString("status", "B_ERROR"), error = answer.optString("error"), data = answer.optString("data"))
       }
+      // windows.create: Android's Summit has one window, so its pages open as tabs there.
+      BrowserCodes.BROWSER_OPEN_WINDOW -> {
+        val urls = fields.optJSONArray("url")?.let { a -> (0 until a.length()).map { a.optString(it) } }.orEmpty()
+          .filter { it.isNotEmpty() }.map { SummitCore.resolve(it).url }
+        var select = fields.bool("focused", true)
+        val created = (urls.ifEmpty { listOf("") }).map { url ->
+          browser.openTab(url, select).also { select = false }
+        }
+        respond("B_OK", created.map { pageIdOf(it) }.filter { it != 0L })
+        syncTabs()
+      }
+      BrowserCodes.BROWSER_CLOSE_WINDOW -> respond("B_NOT_ALLOWED", error = "Extensions cannot close the last browser window.")
+      BrowserCodes.BROWSER_FOCUS_WINDOW, BrowserCodes.BROWSER_SET_WINDOW_FRAME -> respond("B_OK")
+      BrowserCodes.BROWSER_MOVE_TAB -> {
+        val tab = pageTabs.firstOrNull()
+        if (tab == null) respond("B_ENTRY_NOT_FOUND", error = "The tab is not open in this window.")
+        else {
+          browser.moveTab(tab, fields.int("index", -1))
+          respond("B_OK")
+          syncTabs()
+        }
+      }
+      BrowserCodes.BROWSER_SEARCH -> {
+        val search = JSONObject(SummitCore.extensionSearch(fields.string("method"), fields.string("arguments").ifEmpty { "{}" }))
+        val url = search.optString("url")
+        if (url.isEmpty()) respond(search.optString("status", "B_ERROR"), error = search.optString("error"), data = search.optString("data"))
+        else {
+          when (search.optString("disposition")) {
+            "NEW_TAB", "NEW_WINDOW" -> browser.openTab(url, true)
+            else -> browser.go(url, pageTabs.firstOrNull() ?: browser.selected)
+          }
+          respond("B_OK", data = "null")
+          syncTabs()
+        }
+      }
+      BrowserCodes.BROWSER_DETECT_LANGUAGE -> respond("B_OK", data = SummitCore.detectLanguage(fields.string("text")))
+      // Chrome's favicon permission (chrome-extension://ID/_favicon/?pageUrl=): the icon tabs show.
+      BrowserCodes.BROWSER_FAVICON -> {
+        val pageUrl = fields.string("page_url")
+        val bitmap = browser.tabs.firstOrNull { it.url == pageUrl }?.page?.getFavicon(64)
+        val dataURL = bitmap?.let {
+          val out = java.io.ByteArrayOutputStream()
+          it.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, out)
+          "data:image/png;base64," + android.util.Base64.encodeToString(out.toByteArray(), android.util.Base64.NO_WRAP)
+        }.orEmpty()
+        respond("B_OK", data = JSONObject().put("dataURL", dataURL).toString())
+      }
       else -> respond("B_NOT_SUPPORTED", error = "not supported on Android yet")
     }
   }
@@ -578,7 +635,7 @@ private fun JSONObject.first(name: String): Any? = optJSONArray(name)?.opt(0)
 private fun JSONObject.string(name: String): String = first(name)?.toString() ?: ""
 private fun JSONObject.strings(name: String): List<String> =
   optJSONArray(name)?.let { a -> (0 until a.length()).map { a.optString(it) } } ?: emptyList()
-private fun JSONObject.int(name: String): Int = (first(name) as? Number)?.toInt() ?: string(name).toIntOrNull() ?: 0
+private fun JSONObject.int(name: String, default: Int = 0): Int = (first(name) as? Number)?.toInt() ?: string(name).toIntOrNull() ?: default
 private fun JSONObject.bool(name: String, default: Boolean = false): Boolean = first(name) as? Boolean ?: default
 private fun JSONObject.error(): Int = int("error")
 private fun JSONObject.objects(name: String): List<JSONObject> =

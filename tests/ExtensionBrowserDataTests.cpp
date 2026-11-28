@@ -99,6 +99,25 @@ int main()
         && nlohmann::json::parse(cleared.historyEvents[0].second)["allHistory"] == true);
     CHECK(ExtensionHistoryCommand(store, "addUrl", R"({"url": ""})").status == Status::BadValue);
 
+    // Search: the engines, and where a query goes.
+    auto engines = nlohmann::json::parse(ExtensionSearchCommand("get", "{}").answer.data);
+    CHECK(engines.is_array() && !engines.empty());
+    int defaults = 0;
+    for (const auto& engine : engines) defaults += engine.value("isDefault", false);
+    CHECK(defaults == 1);
+    auto query = ExtensionSearchCommand("query", R"({"text": "  summit browser "})");
+    CHECK(query.answer.status == Status::Ok && query.disposition == "CURRENT_TAB"
+        && query.url.find("summit") != std::string::npos && query.url.find(' ') == std::string::npos);
+    CHECK(ExtensionSearchCommand("search", R"({"text": "x", "disposition": "NEW_TAB"})").disposition == "NEW_TAB");
+    CHECK(ExtensionSearchCommand("query", R"({"text": "   "})").answer.status == Status::BadValue);
+    CHECK(ExtensionSearchCommand("query", R"({"text": "x", "engine": "no such engine"})").answer.status == Status::BadValue);
+    CHECK(ExtensionSearchCommand("other", "{}").answer.status == Status::NotSupported);
+
+    // i18n.detectLanguage.
+    auto detected = nlohmann::json::parse(ExtensionDetectLanguageAnswer(
+        "The quick brown fox jumps over the lazy dog while the browser loads the page in the background."));
+    CHECK(detected.contains("isReliable") && !detected["languages"].empty() && detected["languages"][0]["language"] == "en");
+
     std::cout << checks - failures << '/' << checks << " checks passed\n";
     return failures ? 1 : 0;
 }

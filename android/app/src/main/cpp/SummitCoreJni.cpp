@@ -493,3 +493,21 @@ SUMMIT_JNI(jstring, historyItem)(JNIEnv* env, jclass, jstring url)
     }
     return ToJava(env, "");
 }
+
+// browser.search (core/ExtensionBrowserData): {"status", "data", "error", "url", "disposition"}.
+SUMMIT_JNI(jstring, extensionSearch)(JNIEnv* env, jclass, jstring method, jstring arguments)
+{
+    std::lock_guard lock(gLock);
+    const auto search = summit::ExtensionSearchCommand(ToString(env, method), ToString(env, arguments));
+    const char* status = search.answer.status == summit::BrowserDataAnswer::Status::Ok ? "B_OK"
+        : search.answer.status == summit::BrowserDataAnswer::Status::BadValue ? "B_BAD_VALUE" : "B_NOT_SUPPORTED";
+    json result = {{"status", status}, {"data", search.answer.data}, {"error", search.answer.error}, {"url", search.url},
+        {"disposition", search.disposition}};
+    return ToJava(env, result.dump());
+}
+
+// i18n.detectLanguage's answer (JSON).
+SUMMIT_JNI(jstring, detectLanguage)(JNIEnv* env, jclass, jstring text)
+{
+    return ToJava(env, summit::ExtensionDetectLanguageAnswer(ToString(env, text)));
+}

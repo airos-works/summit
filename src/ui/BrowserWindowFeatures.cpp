@@ -1094,40 +1094,11 @@ void BrowserWindow::BookmarksCommand(const BMessage& message, uint64 identifier)
 
 void BrowserWindow::SearchCommand(const BMessage& message, uint64 identifier, Tab* tab)
 {
-    const std::string method = message.GetString("method", "");
-    const auto arguments = nlohmann::json::parse(message.GetString("arguments", "{}"), nullptr, false);
-    if (arguments.is_discarded() || !arguments.is_object()) { RespondToCommand(identifier, B_BAD_VALUE); return; }
-    const auto& current = CurrentSearchEngine();
-    if (method == "get") {
-        auto engines = nlohmann::json::array();
-        for (const auto& engine : SearchEngines()) {
-            const std::string prefix = engine.prefix;
-            engines.push_back({{"name", engine.name}, {"isDefault", engine.id == current.id},
-                {"favIconUrl", prefix.substr(0, prefix.find('/', 8)) + "/favicon.ico"}});
-        }
-        fWebKitContext->RespondToBrowserCommandWithData(identifier, B_OK, engines.dump().c_str());
-        return;
-    }
-    if (method != "query" && method != "search") { RespondToCommand(identifier, B_NOT_SUPPORTED); return; }
-    // Firefox names the engine as search.get() does; Summit's ids work too.
-    const SearchEngine* engine = &current;
-    if (arguments.contains("engine")) {
-        const std::string name = LowerText(arguments.value("engine", std::string()));
-        engine = nullptr;
-        for (const auto& each : SearchEngines())
-            if (name == LowerText(each.name) || name == each.id) engine = &each;
-        if (!engine) {
-            fWebKitContext->RespondToBrowserCommandWithData(identifier, B_BAD_VALUE, "null", "No search engine with that name.");
-            return;
-        }
-    }
-    const std::string text = Trim(arguments.value("text", std::string()));
-    if (text.empty()) {
-        fWebKitContext->RespondToBrowserCommandWithData(identifier, B_BAD_VALUE, "null", "The search text is empty.");
-        return;
-    }
-    const std::string url = engine->prefix + PercentEncode(text);
-    const std::string disposition = arguments.value("disposition", std::string("CURRENT_TAB"));
+    // The answer and the address are core/ExtensionBrowserData's, as on Android.
+    const auto search = ExtensionSearchCommand(message.GetString("method", ""), message.GetString("arguments", "{}"));
+    if (search.url.empty()) { RespondWithBrowserData(identifier, search.answer); return; }
+    const std::string& url = search.url;
+    const std::string& disposition = search.disposition;
     if (disposition == "NEW_WINDOW")
         RequestNewWindow({url}, false);
     else if (disposition == "NEW_TAB" || !(tab = tab ? tab : ActiveTab()))
