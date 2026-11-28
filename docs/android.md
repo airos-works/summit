@@ -222,6 +222,17 @@ compare with air/OS's.
 runners on the host: it starts the activity on the device or emulator, waits
 for WebDriver (port 8888 there) and forwards the host port to it with adb.
 
+WPT (Interop) runs: `tools/android/run-wpt.sh WPT_DIR OUT [tests or
+--include-file=LIST]`, on a wpt checkout with `tools/interop2026/wpt-summit.patch`
+(its `tools/*` part) and `tools/android/wpt-summit-android.patch` applied. It
+sets the display to 800x600 at 1x (the viewport tests expect; the automation
+window hides the system bars), and runs `tools/android/wpt-proxy.py`, through
+which the device reaches the host's wpt server: web-platform.test and its
+subdomains go to the host (the device has no hosts entries), passed to Summit
+as WebDriver's proxy capability. WebTransport (HTTP/3 over UDP) does not go
+through the proxy. WebDriver screenshots are painted in the web process on
+Android (the view has no snapshot there).
+
 ## Status and plan
 
 Done:

@@ -145097,7 +145097,7 @@ index 865206d7f0784ce1c1b0965ca788fa9371fe1a6e..f1c4ac24b9c50dba23d296c15552f0e5
  
      // The position within m_keyframes.
 diff --git a/Source/WebKit/UIProcess/Automation/WebAutomationSession.cpp b/Source/WebKit/UIProcess/Automation/WebAutomationSession.cpp
-index 599cc694a716da0c05e7104be0ec919146f99913..8d16e0520e18e7b70b5b7908cd9ea6b43e0aca9e 100644
+index 599cc694a716da0c05e7104be0ec919146f99913..2fee1d6dac77dd547db89da1f66d8748d1eb2c33 100644
 --- a/Source/WebKit/UIProcess/Automation/WebAutomationSession.cpp
 +++ b/Source/WebKit/UIProcess/Automation/WebAutomationSession.cpp
 @@ -54,6 +54,7 @@
@@ -145304,6 +145304,15 @@ index 599cc694a716da0c05e7104be0ec919146f99913..8d16e0520e18e7b70b5b7908cd9ea6b4
  void WebAutomationSession::takeScreenshot(const Inspector::Protocol::Automation::BrowsingContextHandle& handle, const Inspector::Protocol::Automation::FrameHandle& frameHandle, const Inspector::Protocol::Automation::NodeHandle& nodeHandle, std::optional<bool>&& optionalScrollIntoViewIfNeeded, std::optional<bool>&& optionalClipToViewport, CommandCallback<String>&& callback)
  {
      auto page = webPageProxyForHandle(handle);
+@@ -3142,7 +3204,7 @@ void WebAutomationSession::takeScreenshot(const Inspector::Protocol::Automation:
+     bool scrollIntoViewIfNeeded = optionalScrollIntoViewIfNeeded && *optionalScrollIntoViewIfNeeded;
+     bool clipToViewport = optionalClipToViewport && *optionalClipToViewport;
+ 
+-#if PLATFORM(COCOA) || (!PLATFORM(GTK) && !PLATFORM(WPE))
++#if PLATFORM(COCOA) || (!PLATFORM(GTK) && !PLATFORM(WPE)) || OS(ANDROID)
+     auto ipcCompletionHandler = [] (CommandCallback<String>&& callback) mutable {
+         return CompletionHandler<void(std::optional<ShareableBitmap::Handle>&&, String&&)> { [callback = WTF::move(callback)] (std::optional<ShareableBitmap::Handle>&& imageDataHandle, String&& errorType) mutable {
+             if (!errorType.isEmpty())
 @@ -3156,6 +3218,20 @@ void WebAutomationSession::takeScreenshot(const Inspector::Protocol::Automation:
          } };
      };
@@ -145325,6 +145334,18 @@ index 599cc694a716da0c05e7104be0ec919146f99913..8d16e0520e18e7b70b5b7908cd9ea6b4
  #if PLATFORM(COCOA)
      // We can only get viewport-bounded snapshots from the UIProcess (the on-screen window capture is physically clipped
      // to the visible viewport), so fall back to taking the snapshot in the WebProcess whenever we need pixels outside the
+@@ -3164,7 +3240,10 @@ void WebAutomationSession::takeScreenshot(const Inspector::Protocol::Automation:
+     if (!nodeHandle.isEmpty() || !clipToViewport)
+         return page->sendWithAsyncReplyToProcessContainingFrameWithoutDestinationIdentifier(frameID, Messages::WebAutomationSessionProxy::TakeScreenshot(page->webPageIDInProcessForFrame(frameID), frameID, nodeHandle, scrollIntoViewIfNeeded, clipToViewport), ipcCompletionHandler(WTF::move(callback)));
+ #endif
+-#if PLATFORM(GTK) || PLATFORM(COCOA) || PLATFORM(WPE)
++// Summit for Android: the view's snapshot is not available there (wpeview
++// presents through its own surfaces); the web process paints the screenshot,
++// as on the ports without one.
++#if (PLATFORM(GTK) || PLATFORM(COCOA) || PLATFORM(WPE)) && !OS(ANDROID)
+     Function<void(WebPageProxy&, std::optional<WebCore::IntRect>&&, CommandCallback<String>&&)> takeViewSnapshot = [](WebPageProxy& page, std::optional<WebCore::IntRect>&& rect, CommandCallback<String>&& callback) {
+         page.callAfterNextPresentationUpdate([page = protect(page), rect = WTF::move(rect), callback = WTF::move(callback)] () mutable {
+             RefPtr snapshot = page->takeViewSnapshot(WTF::move(rect), ForceSoftwareCapturingViewportSnapshot::Yes);
 diff --git a/Source/WebKit/UIProcess/Automation/haiku/WebAutomationSessionHaiku.cpp b/Source/WebKit/UIProcess/Automation/haiku/WebAutomationSessionHaiku.cpp
 new file mode 100644
 index 0000000000000000000000000000000000000000..d8db971013dac85e18ac70577aaa3042b8584179

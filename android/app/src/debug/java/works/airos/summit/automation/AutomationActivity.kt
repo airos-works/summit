@@ -67,6 +67,12 @@ class AutomationActivity : Activity() {
 
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
+    // The page has the whole display, so that its viewport is the display's
+    // size: tests expect 800x600 (wm size 800x600, wm density 160 for 1x).
+    window.setDecorFitsSystemWindows(false)
+    window.attributes = window.attributes.apply {
+      layoutInDisplayCutoutMode = android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+    }
     try {
       val type = WPEProcessType.WebDriverProcess
       val service = Class.forName("org.wpewebkit.wpe.services." + type.name + "Service")
@@ -85,6 +91,11 @@ class AutomationActivity : Activity() {
     (window.parent as? ViewGroup)?.removeView(window)
     setContentView(window)
     window.requestFocus()
+    // After the window has content (its insets controller comes with it).
+    this.window.insetsController?.let {
+      it.hide(android.view.WindowInsets.Type.systemBars())
+      it.systemBarsBehavior = android.view.WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+    }
   }
 
   private fun close(window: WebView) {
