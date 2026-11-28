@@ -36,18 +36,18 @@ runs WebPositive and other `BWebView` programs on Summit's engine
 <!-- airos-ci:latest-builds:start -->
 ## Latest builds
 
-Built automatically by air/OS CI from commit `38fa674` on 2026-11-28 ([all files](https://github.com/airos-works/summit/releases/tag/latest)).
+Built automatically by air/OS CI from commit `c30ee01` on 2026-11-28 ([all files](https://github.com/airos-works/summit/releases/tag/latest)).
 
 | Architecture | Package |
 |---|---|
-| arm64 | [summit-0.1.0.git20261128.0131-1-arm64.hpkg](https://github.com/airos-works/summit/releases/download/latest/summit-0.1.0.git20261128.0131-1-arm64.hpkg) |
-| arm64 | [summit_webkit-1.10.1.git20261128.0131-1-arm64.hpkg](https://github.com/airos-works/summit/releases/download/latest/summit_webkit-1.10.1.git20261128.0131-1-arm64.hpkg) |
-| arm64 | [summit_webkitlegacy-1.10.1.git20261128.0131-1-arm64.hpkg](https://github.com/airos-works/summit/releases/download/latest/summit_webkitlegacy-1.10.1.git20261128.0131-1-arm64.hpkg) |
-| x86_64 | [summit-0.1.0.git20261128.0131-1-x86_64.hpkg](https://github.com/airos-works/summit/releases/download/latest/summit-0.1.0.git20261128.0131-1-x86_64.hpkg) |
-| x86_64 | [summit_webkit-1.10.1.git20261128.0131-1-x86_64.hpkg](https://github.com/airos-works/summit/releases/download/latest/summit_webkit-1.10.1.git20261128.0131-1-x86_64.hpkg) |
-| x86_64 | [summit_webkitlegacy-1.10.1.git20261128.0131-1-x86_64.hpkg](https://github.com/airos-works/summit/releases/download/latest/summit_webkitlegacy-1.10.1.git20261128.0131-1-x86_64.hpkg) |
+| arm64 | [summit-0.1.0.git20261128.0600-1-arm64.hpkg](https://github.com/airos-works/summit/releases/download/latest/summit-0.1.0.git20261128.0600-1-arm64.hpkg) |
+| arm64 | [summit_webkit-1.10.1.git20261128.0600-1-arm64.hpkg](https://github.com/airos-works/summit/releases/download/latest/summit_webkit-1.10.1.git20261128.0600-1-arm64.hpkg) |
+| arm64 | [summit_webkitlegacy-1.10.1.git20261128.0600-1-arm64.hpkg](https://github.com/airos-works/summit/releases/download/latest/summit_webkitlegacy-1.10.1.git20261128.0600-1-arm64.hpkg) |
+| x86_64 | [summit-0.1.0.git20261128.0600-1-x86_64.hpkg](https://github.com/airos-works/summit/releases/download/latest/summit-0.1.0.git20261128.0600-1-x86_64.hpkg) |
+| x86_64 | [summit_webkit-1.10.1.git20261128.0600-1-x86_64.hpkg](https://github.com/airos-works/summit/releases/download/latest/summit_webkit-1.10.1.git20261128.0600-1-x86_64.hpkg) |
+| x86_64 | [summit_webkitlegacy-1.10.1.git20261128.0600-1-x86_64.hpkg](https://github.com/airos-works/summit/releases/download/latest/summit_webkitlegacy-1.10.1.git20261128.0600-1-x86_64.hpkg) |
 
-Install with `pkgman install <file>`, or copy the file into `/boot/system/packages`. Haiku SDK: x86_64 hrev60207-3019-gbdaa35bd50, arm64 hrev60207-3019-gbdaa35bd50.
+Install with `pkgman install <file>`, or copy the file into `/boot/system/packages`. Haiku SDK: x86_64 hrev60207-3020-ga6808861bf, arm64 hrev60207-3020-ga6808861bf.
 <!-- airos-ci:latest-builds:end -->
 
 <!-- airos-ci:haiku-builds:start -->
