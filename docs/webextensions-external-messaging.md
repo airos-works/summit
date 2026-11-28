@@ -87,3 +87,9 @@ extension's IDs (development builds first) until one accepts, and took the
 empty answer from the first missing one as success, so the sign-in page
 spun forever. Summit now answers as Chrome does, still after the random
 delay, also when the browser could not deliver the message.
+Pages also get `chrome.runtime.lastError` (the `browser`/`chrome` page
+object had only `sendMessage` and `connect`), which callback-style callers
+such as claude.ai read; without it the error still reached them as an empty
+answer. Checked on the laptop test copy: a message to a missing ID calls back
+with lastError "Could not establish connection. Receiving end does not
+exist.", one to Claude in Chrome answers `{success: true, exists: true}`.
