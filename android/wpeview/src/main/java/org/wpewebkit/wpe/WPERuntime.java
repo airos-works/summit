@@ -1,0 +1,223 @@
+/**
+ * Copyright (C) 2022 Igalia S.L. <info@igalia.com>
+ *   Author: Fernando Jimenez Moreno <fjimenez@igalia.com>
+ *   Author: Zan Dobersek <zdobersek@igalia.com>
+ *   Author: Imanol Fernandez <ifernandez@igalia.com>
+ *   Author: Loïc Le Page <llepage@igalia.com>
+ *   Author: Jani Hautakangas <jani@igalia.com>
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
+ */
+
+package org.wpewebkit.wpe;
+
+import android.content.Context;
+import android.content.Intent;
+import android.content.pm.ApplicationInfo;
+import android.os.ParcelFileDescriptor;
+import android.util.Log;
+
+import androidx.annotation.Keep;
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
+import androidx.annotation.UiThread;
+import androidx.annotation.WorkerThread;
+
+import org.wpewebkit.wpe.services.ServiceUtils;
+import org.wpewebkit.wpe.services.WPEServiceConnection;
+import org.wpewebkit.wpe.services.WPEServiceConnectionListener;
+
+import java.io.File;
+import java.util.ArrayList;
+import java.util.List;
+
+@UiThread
+public final class WPERuntime {
+    private static final String LOGTAG = "WPERuntime";
+
+    private static native void setupNativeEnvironment(@NonNull String[] envStringsArray);
+    private static native void setApplicationContext(Context context);
+    private native void nativeInit();
+    private native void nativeShut();
+
+    private static int inspectorPort = 0;
+    private static boolean useHttpInspector = true;
+
+    private static final WPERuntime singleton = new WPERuntime();
+
+    public static @NonNull WPERuntime getInstance() { return singleton; }
+
+    private WPERuntime() { Log.v(LOGTAG, "WPERuntime creation"); }
+
+    private Context applicationContext = null;
+
+    public @Nullable Context getApplicationContext() { return applicationContext; }
+
+    private WPEDisplay display = null;
+
+    /**
+     * Returns the WPEDisplay of the process, creating it on first use. Like WebKit's own
+     * {@code wpe_display_get_default()}, there is one per process, and every WebContext shares it.
+     *
+     * @throws IllegalStateException if the display cannot connect to EGL; a later call tries again.
+     */
+    public @NonNull WPEDisplay getDisplay() {
+        if (applicationContext == null)
+            throw new IllegalStateException("WPERuntime.initialize() must be called before getDisplay()");
+        if (display == null) {
+            WPEDisplay newDisplay = new WPEDisplay(applicationContext);
+            if (newDisplay.getNativePtr() == 0) {
+                newDisplay.destroy();
+                throw new IllegalStateException("The WPEDisplay could not connect to EGL");
+            }
+            display = newDisplay;
+        }
+        return display;
+    }
+
+    public static void enableRemoteInspector(int inspectorPort, boolean useHttpInspector) {
+        WPERuntime.inspectorPort = inspectorPort;
+        WPERuntime.useHttpInspector = useHttpInspector;
+    }
+
+    public void initialize(@NonNull Context context) {
+        if (applicationContext == null) {
+            applicationContext = context.getApplicationContext();
+            setApplicationContext(applicationContext);
+
+            ServiceUtils.installAssets(applicationContext, applicationContext.getAssets(), "injected-bundles", true);
+            ServiceUtils.installAssets(applicationContext, applicationContext.getAssets(), "mime", false);
+            // Every process loads the GIO modules, so they are copied here, before this process starts the others.
+            ServiceUtils.installAssets(applicationContext, applicationContext.getAssets(), "gio", true);
+
+            ApplicationInfo appInfo = applicationContext.getApplicationInfo();
+            List<String> envStrings = new ArrayList<>();
+            envStrings.add("GIO_EXTRA_MODULES");
+            envStrings.add(new File(context.getFilesDir(), "gio").getAbsolutePath());
+            envStrings.add("WEBKIT_INJECTED_BUNDLE_PATH");
+            envStrings.add(new File(context.getFilesDir(), "injected-bundles").getAbsolutePath());
+            // TODO: Move elsewhere than the injected bundle path.
+            envStrings.add("WEBKIT_INSPECTOR_RESOURCES_PATH");
+            envStrings.add(new File(context.getFilesDir(), "injected-bundles").getAbsolutePath());
+
+            String filesPath = context.getFilesDir().getAbsolutePath();
+            envStrings.add("XDG_DATA_DIRS");
+            envStrings.add(filesPath);
+
+            if (inspectorPort > 0) {
+                String inspectorAddress = "127.0.0.1:" + inspectorPort;
+                if (useHttpInspector) {
+                    envStrings.add("WEBKIT_INSPECTOR_HTTP_SERVER");
+                } else {
+                    envStrings.add("WEBKIT_INSPECTOR_SERVER");
+                }
+                envStrings.add(inspectorAddress);
+            }
+            setupNativeEnvironment(envStrings.toArray(new String[envStrings.size()]));
+            nativeInit();
+        }
+    }
+
+    protected final AuxiliaryProcessesContainer auxiliaryProcesses =
+        new AuxiliaryProcessesContainer(connection -> getApplicationContext().unbindService(connection));
+
+    private final WPEServiceConnectionListener serviceConnectionDelegate = new WPEServiceConnectionListener() {
+        public void onCleanExit(@NonNull WPEServiceConnection connection) {
+            Log.d(LOGTAG, "onCleanExit for process: " + connection.getPid());
+            auxiliaryProcesses.unregister(connection.getPid());
+        }
+
+        public void onServiceDisconnected(@NonNull WPEServiceConnection connection) {
+            Log.d(LOGTAG, "onServiceDisconnected for process: " + connection.getPid());
+            // Unbind the service to prevent restarting on crash,
+            // wpewebkit will restart the auxiliary process if needed
+            auxiliaryProcesses.unregister(connection.getPid());
+        }
+
+        public void onDisposedServiceConnected(@NonNull WPEServiceConnection connection) {
+            auxiliaryProcesses.onDisposedServiceConnected(connection);
+        }
+
+        public void onProcessGone(@NonNull WPEServiceConnection connection) {
+            auxiliaryProcesses.onProcessGone(connection);
+        }
+    };
+
+    /**
+     * This method is called directly from WebKit when a new auxiliary process needs to be created.
+     * <p>In order to safeguard the rest of the system and allow the application to remain responsive even if the
+     * user had loaded web page that infinite loops or otherwise hangs, the modern incarnation of WebKit uses
+     * multi-process architecture. Web pages are loaded in its own WebContent process. Multiple WebContent processes
+     * can share a browsing session, which lives in a shared network process. In addition to handling all network
+     * accesses, this process is also responsible for managing the disk cache and Web APIs that allow websites to
+     * store structured data such as Web Storage API and IndexedDB API.</p>
+     * <p>Because a WebContent process can Just-in-Time compile arbitrary JavaScript code loaded from the internet,
+     * meaning that it can write to memory that gets executed, this process is tightly sandboxed. It does not have
+     * access to any file system unless the user grants an access, and it does not have direct access to the
+     * underlying operating system’s clipboard, microphone, or video camera even though there are Web APIs that grant
+     * access to those features. Instead, UI process brokers such requests.</p>
+     * <p>Given that Android forbids the fork syscall on non-rooted devices, we cannot directly spawn child processes
+     * . Instead we use Android Services to host the logic of WebKit's auxiliary processes.</p>
+     * <p>The life cycle of all WebKit's auxiliary processes is managed by WebKit itself. We only proxy requests to
+     * spawn and terminate these processes/services.</p>
+     *
+     * @param pid The process identifier. This value is generated by WebKit and does not correspond to the actual
+     * system pid.
+     * @param type The type of service to launch. It can be Web (0), Network (1) or WebDriver (2).
+     * @param fd File descriptor used by WebKit for IPC.
+     */
+    @Keep
+    @WorkerThread
+    public void launchProcess(long pid, int type, int fd) {
+        WPEProcessType processType = WPEProcessType.fromValue(type);
+        Log.d(LOGTAG, "launchProcess " + processType.name() + " (pid: " + pid + ", fd: " + fd + ")");
+
+        int processSlot = auxiliaryProcesses.getFirstAvailableSlot(processType);
+        try {
+            Class<?> serviceClass =
+                Class.forName("org.wpewebkit.wpe.services.WPEServices$" + processType.name() + "Service" + processSlot);
+            ParcelFileDescriptor parcelFd = ParcelFileDescriptor.fromFd(fd);
+
+            Log.v(LOGTAG, "Launching service: " + processType.name());
+            Intent intent = new Intent(applicationContext, serviceClass);
+
+            WPEServiceConnection serviceConnection =
+                new WPEServiceConnection(pid, processType, parcelFd, serviceConnectionDelegate);
+            if (!applicationContext.bindService(intent, serviceConnection,
+                                                Context.BIND_AUTO_CREATE | Context.BIND_IMPORTANT)) {
+                // The service never connects, so it is not registered, as it would keep its slot, and no service takes
+                // the socket.
+                Log.e(LOGTAG, "Cannot bind " + serviceClass.getSimpleName());
+                serviceConnection.dispose();
+                applicationContext.unbindService(serviceConnection);
+                return;
+            }
+            auxiliaryProcesses.register(pid, serviceConnection);
+        } catch (Exception e) {
+            Log.e(LOGTAG, "Cannot launch auxiliary process", e);
+        }
+    }
+
+    /**
+     * Terminate the Service hosting the logic for a WebKit auxiliary process that matches the given pid.
+     * @param pid The process identifier. This value is generated by WebKit and does not correspond to the actual
+     * system pid.
+     */
+    @Keep
+    @WorkerThread
+    public void terminateProcess(long pid) {
+        auxiliaryProcesses.unregister(pid);
+    }
+}

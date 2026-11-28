@@ -1795,7 +1795,7 @@ index ce766df62ea10a67b37ca457c6a50026a304acd8..28930ea056e6d9fcb1dcd5c3ed43e3c6
  
  constexpr unsigned maximumRangesStackRecursion = 4500;
 diff --git a/Source/JavaScriptCore/runtime/LiteralParser.h b/Source/JavaScriptCore/runtime/LiteralParser.h
-index 462be10daefc5d3b69bbb77eef5209ae3a8c7710..8abfe0fdbef0b105156fb30688ad33047b4f0474 100644
+index 462be10daefc5d3b69bbb77eef5209ae3a8c7710..d5f8d50373247e26b46db14c3c5e8846803bc877 100644
 --- a/Source/JavaScriptCore/runtime/LiteralParser.h
 +++ b/Source/JavaScriptCore/runtime/LiteralParser.h
 @@ -218,7 +218,6 @@ private:
@@ -1819,6 +1819,15 @@ index 462be10daefc5d3b69bbb77eef5209ae3a8c7710..8abfe0fdbef0b105156fb30688ad3304
          inline const CharType* NODELETE currentTokenStart() const;
          inline const CharType* NODELETE currentTokenEnd() const;
          
+@@ -301,7 +306,7 @@ private:
+     class StackGuard;
+     JSValue parseRecursivelyEntry(VM&) requires (reviverMode == JSONReviverMode::Disabled);
+     JSValue evalRecursivelyEntry(VM&) requires (reviverMode == JSONReviverMode::Disabled);
+-    template<ParserMode> JSValue parseRecursively(VM&, uint8_t* stackLimit) requires (reviverMode == JSONReviverMode::Disabled);
++    template<ParserMode> JSValue parseRecursively(VM& vm, uint8_t* stackLimit) requires (reviverMode == JSONReviverMode::Disabled);
+     JSValue parse(VM&, ParserState, JSONRanges*);
+ 
+     JSValue parsePrimitiveValue(VM&);
 diff --git a/Source/JavaScriptCore/runtime/MachineContext.h b/Source/JavaScriptCore/runtime/MachineContext.h
 index 2ac8b24f00e624acb564a0e11fd2437b5f02a99c..94578295634cfe05af20ee169477506c530a3c81 100644
 --- a/Source/JavaScriptCore/runtime/MachineContext.h
@@ -5445,7 +5454,7 @@ index b6d135a1282843e5d5c81d4a56a6e6cd4d46379d..69905c855dd7e885d653ae23562cf9c3
    disableInLockdownMode: true
    sharedPreferenceForWebProcess: true
 diff --git a/Source/WTF/Scripts/generate-unified-source-bundles.py b/Source/WTF/Scripts/generate-unified-source-bundles.py
-index b05a9e9f30d4f91dad1bad6ae5a29b878ceb9387..f4376e3f7ef35322584ce9086fe83a07642e38c0 100644
+index b05a9e9f30d4f91dad1bad6ae5a29b878ceb9387..318a1998dd49ff97344487cfeda86d5552ae8404 100644
 --- a/Source/WTF/Scripts/generate-unified-source-bundles.py
 +++ b/Source/WTF/Scripts/generate-unified-source-bundles.py
 @@ -142,6 +142,7 @@ class BundleManager:
@@ -5512,6 +5521,18 @@ index b05a9e9f30d4f91dad1bad6ae5a29b878ceb9387..f4376e3f7ef35322584ce9086fe83a07
          log(args, "Not allowed to unify {}, building standalone".format(source_file.path))
          generated_sources.append(str(source_file))
      else:
+@@ -363,7 +378,10 @@ def main() -> None:
+         if args.mode in ('GenerateBundles', 'GenerateXCFilelists'):
+             process_file_for_unified_source_generation(source_file, args, bundle_managers, generated_sources, input_sources)
+             if args.mode == 'GenerateBundles' and args.print_bundled_sources \
+-                    and bundle_managers.get(source_file.bundle_manager_key) and source_file.unifiable:
++                    and bundle_managers.get(source_file.bundle_manager_key) \
++                    and (source_file.unifiable or source_file.derived):
++                # Derived sources that may not be unified get a bundle of
++                # their own (BundleManager.add_file); they are compiled there.
+                 bundled_members.append(source_file.bundled_source_form())
+         elif args.mode == 'PrintAllSources':
+             generated_sources.append(str(source_file))
 diff --git a/Source/WTF/wtf/Assertions.h b/Source/WTF/wtf/Assertions.h
 index ab9d42992855b9d64e63a24db0fd85ce5fe3efe4..0717e81ea60b0f0028ed7eb848957261da61b008 100644
 --- a/Source/WTF/wtf/Assertions.h
@@ -5780,7 +5801,7 @@ index 021cb4688f062e0b7eea621ab20663ff34c1fb9e..277e3aad560fc31e9a65d67f37424225
  }
  
 diff --git a/Source/WTF/wtf/HashTable.h b/Source/WTF/wtf/HashTable.h
-index 4502983763651998e1c6279d12a904810a64e03f..dc2ab8ac80382b0fe0be3dd676c4816ba0386c9c 100644
+index 4502983763651998e1c6279d12a904810a64e03f..c9eedefaf80018d34679b5c370bb3ef508148bde 100644
 --- a/Source/WTF/wtf/HashTable.h
 +++ b/Source/WTF/wtf/HashTable.h
 @@ -22,6 +22,7 @@
@@ -5826,7 +5847,7 @@ index 4502983763651998e1c6279d12a904810a64e03f..dc2ab8ac80382b0fe0be3dd676c4816b
 +class StatusWord {
 +public:
 +    StatusWord() = default;
-+    NODELETE SUPPRESS_NODELETE explicit StatusWord(const StatusByte* statusBytes)
++    explicit StatusWord(const StatusByte* statusBytes)
 +    {
 +        memcpy(&m_bits, statusBytes, sizeof(m_bits)); // NOLINT
 +        m_bits &= isFullMask;
@@ -8787,6 +8808,36 @@ index 581c21b35e31c8af0f8ecb698586bf6f023bb132..0ab9b3d335549f2646bea23957ad5812
      while (madvise(address, bytes, MADV_DONTNEED) == -1 && errno == EAGAIN) { }
  #else
      UNUSED_PARAM(address);
+diff --git a/Source/WTF/wtf/posix/POSIXExtras.h b/Source/WTF/wtf/posix/POSIXExtras.h
+index 0eadcc832b6a1763e434476475eb30802152e8e3..f73dc558df04a00145987c620f0abef89b272e45 100644
+--- a/Source/WTF/wtf/posix/POSIXExtras.h
++++ b/Source/WTF/wtf/posix/POSIXExtras.h
+@@ -137,6 +137,7 @@ inline int posixStatx(int directoryFileDescriptor, UTF8CStringView path, int fla
+     return dlopen(path.utf8(), mode);
+ }
+ 
++#if !OS(ANDROID) // Bionic has no POSIX shared memory objects.
+ [[nodiscard]] inline int posixShmOpen(UTF8CStringView name, int flags, mode_t mode)
+ {
+     return shm_open(name.utf8(), flags, mode);
+@@ -147,6 +148,7 @@ inline int posixShmUnlink(UTF8CStringView name)
+     return shm_unlink(name.utf8());
+ }
+ #endif
++#endif
+ 
+ #endif // OS(UNIX)
+ 
+@@ -175,7 +177,9 @@ using WTF::posixStatx;
+ #endif
+ #if !PLATFORM(PLAYSTATION)
+ using WTF::posixDlopen;
++#if !OS(ANDROID)
+ using WTF::posixShmOpen;
+ using WTF::posixShmUnlink;
+ #endif
+ #endif
++#endif
 diff --git a/Source/WTF/wtf/posix/ThreadingPOSIX.cpp b/Source/WTF/wtf/posix/ThreadingPOSIX.cpp
 index 94ecfb0a7d65820ae25a1dab5eed53b73b3b6b4d..7fc084296755bf9f9f31301d74c572db41a31c80 100644
 --- a/Source/WTF/wtf/posix/ThreadingPOSIX.cpp
@@ -27965,7 +28016,7 @@ index 0f96a1ddbe2ae2a8f4cec87fca089385207a580c..14710e5922d0dbdfbd87ea90f83ab3c3
      std::optional<String> textContent() const final;
      bool hasTextContent() const;
 diff --git a/Source/WebCore/accessibility/AccessibilityRenderObject.cpp b/Source/WebCore/accessibility/AccessibilityRenderObject.cpp
-index 05e420fb9bbd505f0804f8113f9c21750a4c31d1..f50509d9bbfbfcaf97d2d4d16b6053904245f6de 100644
+index 05e420fb9bbd505f0804f8113f9c21750a4c31d1..eff62da69bd17118faf84ccfb83c3ed5885d53d5 100644
 --- a/Source/WebCore/accessibility/AccessibilityRenderObject.cpp
 +++ b/Source/WebCore/accessibility/AccessibilityRenderObject.cpp
 @@ -412,9 +412,18 @@ Element* AccessibilityRenderObject::anchorElement() const
@@ -28070,7 +28121,7 @@ index 05e420fb9bbd505f0804f8113f9c21750a4c31d1..f50509d9bbfbfcaf97d2d4d16b605390
      return m_ariaRole == AccessibilityRole::Document && hasContentEditableAttributeSet();
  }
  
-+NODELETE static bool generatedContentIsOnlyImages(const Style::ComputedStyle& style)
++static bool NODELETE generatedContentIsOnlyImages(const Style::ComputedStyle& style)
 +{
 +    auto* contentData = style.content().tryData();
 +    if (!contentData || contentData->visible.isEmpty())
@@ -99710,7 +99761,7 @@ index e7cbc7bd4c1c1a0567436660a93bf4a2764bfc1f..eb74e231541b5905745799e993ee2efb
  
  #include <wtf/CompletionHandler.h>
 diff --git a/Source/WebCore/platform/network/ResourceHandle.cpp b/Source/WebCore/platform/network/ResourceHandle.cpp
-index 06497167b74366bed3a2a37f67079938034f6660..4a9d28c89be55240d12f51376d58eacb73a51658 100644
+index 06497167b74366bed3a2a37f67079938034f6660..9c09c3426d91d8f490bfd0cfcdafb95f8f40ba95 100644
 --- a/Source/WebCore/platform/network/ResourceHandle.cpp
 +++ b/Source/WebCore/platform/network/ResourceHandle.cpp
 @@ -177,6 +177,13 @@ void ResourceHandle::didReceiveResponse(ResourceResponse&& response, CompletionH
@@ -99727,77 +99778,17 @@ index 06497167b74366bed3a2a37f67079938034f6660..4a9d28c89be55240d12f51376d58eacb
  ResourceRequest& ResourceHandle::firstRequest()
  {
      return d->m_firstRequest;
-@@ -309,70 +316,4 @@ void ResourceHandle::setDefersLoading(bool defers)
+@@ -309,7 +316,9 @@ void ResourceHandle::setDefersLoading(bool defers)
      platformSetDefersLoading(defers);
  }
  
 -#if USE(SOUP) || USE(CURL)
--ResourceHandleInternal::~ResourceHandleInternal() = default;
--
--ResourceHandle::~ResourceHandle()
--{
--    ASSERT_NOT_REACHED();
--}
--
--bool ResourceHandle::start()
--{
--    ASSERT_NOT_REACHED();
--    return false;
--}
--
--void ResourceHandle::cancel()
--{
--    ASSERT_NOT_REACHED();
--}
--
--void ResourceHandle::platformSetDefersLoading(bool)
--{
--    ASSERT_NOT_REACHED();
--}
--
--void ResourceHandle::platformLoadResourceSynchronously(NetworkingContext*, const ResourceRequest&, StoredCredentialsPolicy, SecurityOrigin*, ResourceError&, ResourceResponse&, Vector<uint8_t>&)
--{
--    ASSERT_NOT_REACHED();
--}
--
--bool ResourceHandle::shouldUseCredentialStorage()
--{
--    ASSERT_NOT_REACHED();
--    return false;
--}
--
--void ResourceHandle::didReceiveAuthenticationChallenge(const AuthenticationChallenge&)
--{
--    ASSERT_NOT_REACHED();
--}
--
--void ResourceHandle::receivedCredential(const AuthenticationChallenge&, const Credential&)
--{
--    ASSERT_NOT_REACHED();
--}
--
--void ResourceHandle::receivedRequestToContinueWithoutCredential(const AuthenticationChallenge&)
--{
--    ASSERT_NOT_REACHED();
--}
--
--void ResourceHandle::receivedCancellation(const AuthenticationChallenge&)
--{
--    ASSERT_NOT_REACHED();
--}
--
--void ResourceHandle::receivedRequestToPerformDefaultHandling(const AuthenticationChallenge&)
--{
--    ASSERT_NOT_REACHED();
--}
--
--void ResourceHandle::receivedChallengeRejection(const AuthenticationChallenge&)
--{
--    ASSERT_NOT_REACHED();
--}
--#endif
--
- } // namespace WebCore
++#if USE(SOUP)
++// Soup ports load through the network process; this class is never used there
++// (Haiku's curl build has a real implementation).
+ ResourceHandleInternal::~ResourceHandleInternal() = default;
+ 
+ ResourceHandle::~ResourceHandle()
 diff --git a/Source/WebCore/platform/network/ResourceHandle.h b/Source/WebCore/platform/network/ResourceHandle.h
 index 345b32ee763ff54cd1cc4ac1a20dce46c0bfabce..932c42f5c2e15ac5709e4bc657d9369c2ed05f94 100644
 --- a/Source/WebCore/platform/network/ResourceHandle.h
@@ -127972,6 +127963,18 @@ index 0000000000000000000000000000000000000000..abdba4dff009ff314eecd9f825a128aa
 +namespace WebKit {
 +String storageDirectoryPathHaiku(bool cache, const String& baseDirectory, const String& directoryName, bool create);
 +} // namespace WebKit
+diff --git a/Source/WebKit/PlatformGTK.cmake b/Source/WebKit/PlatformGTK.cmake
+index ba7f7450916014f7347c014f758e529a160703f3..67793de0a3d349cd7333f12397e3348ea7245a93 100644
+--- a/Source/WebKit/PlatformGTK.cmake
++++ b/Source/WebKit/PlatformGTK.cmake
+@@ -168,6 +168,7 @@ set(WebKitGTK_HEADER_TEMPLATES
+     ${WEBKIT_DIR}/UIProcess/API/glib/WebKitFileChooserRequest.h.in
+     ${WEBKIT_DIR}/UIProcess/API/glib/WebKitFindController.h.in
+     ${WEBKIT_DIR}/UIProcess/API/glib/WebKitFormSubmissionRequest.h.in
++    ${WEBKIT_DIR}/UIProcess/API/glib/WebKitFrameInfo.h.in
+     ${WEBKIT_DIR}/UIProcess/API/glib/WebKitGeolocationManager.h.in
+     ${WEBKIT_DIR}/UIProcess/API/glib/WebKitGeolocationPermissionRequest.h.in
+     ${WEBKIT_DIR}/UIProcess/API/glib/WebKitHitTestResult.h.in
 diff --git a/Source/WebKit/PlatformHaiku.cmake b/Source/WebKit/PlatformHaiku.cmake
 new file mode 100644
 index 0000000000000000000000000000000000000000..4d0a8c2f16af8e83a9a574fbf6f9dc75f00701c8
@@ -128612,6 +128615,31 @@ index 0000000000000000000000000000000000000000..4d0a8c2f16af8e83a9a574fbf6f9dc75
 +    message(STATUS "WebTransport: off (ngtcp2, ngtcp2_crypto_ossl or nghttp3 not found)")
 +    set_source_files_properties(NetworkProcess/webtransport/haiku/WebTransportQuicConnectionHaiku.cpp PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
 +endif ()
+diff --git a/Source/WebKit/PlatformWPE.cmake b/Source/WebKit/PlatformWPE.cmake
+index d7af1df57c6a15668529d012456a8e550015697f..63dc18abfa3b941eac9cac725f50ca992aeb9463 100644
+--- a/Source/WebKit/PlatformWPE.cmake
++++ b/Source/WebKit/PlatformWPE.cmake
+@@ -189,6 +189,7 @@ set(WPE_API_HEADER_TEMPLATES
+     ${WEBKIT_DIR}/UIProcess/API/glib/WebKitFileChooserRequest.h.in
+     ${WEBKIT_DIR}/UIProcess/API/glib/WebKitFindController.h.in
+     ${WEBKIT_DIR}/UIProcess/API/glib/WebKitFormSubmissionRequest.h.in
++    ${WEBKIT_DIR}/UIProcess/API/glib/WebKitFrameInfo.h.in
+     ${WEBKIT_DIR}/UIProcess/API/glib/WebKitGeolocationManager.h.in
+     ${WEBKIT_DIR}/UIProcess/API/glib/WebKitGeolocationPermissionRequest.h.in
+     ${WEBKIT_DIR}/UIProcess/API/glib/WebKitHitTestResult.h.in
+diff --git a/Source/WebKit/Scripts/generate-forwarding-headers.pl b/Source/WebKit/Scripts/generate-forwarding-headers.pl
+index cc6d6196ee5952d950269a9daf2dc728a0fe73fe..ec424571fd3c3396f45ae1d938a56ac189bb5b12 100755
+--- a/Source/WebKit/Scripts/generate-forwarding-headers.pl
++++ b/Source/WebKit/Scripts/generate-forwarding-headers.pl
+@@ -36,7 +36,7 @@ use File::Spec::Functions;
+ use Getopt::Long;
+ 
+ my $srcRoot = realpath(File::Spec->catfile(dirname(abs_path($0)), "../.."));
+-my @platformPrefixes = ("ca", "cf", "cocoa", "Cocoa", "curl", "gtk", "ios", "mac", "playstation", "soup", "win", "wpe");
++my @platformPrefixes = ("ca", "cf", "cocoa", "Cocoa", "curl", "gtk", "haiku", "ios", "mac", "playstation", "soup", "win", "wpe");
+ my @frameworks = ("WebKit");
+ my @skippedPrefixes = ("PAL");
+ my @frameworkHeaders;
 diff --git a/Source/WebKit/Scripts/generate-message-receiver.py b/Source/WebKit/Scripts/generate-message-receiver.py
 index ed16efeb37c68e50e33b63f5b5d6aecadd2234bc..f2cdd8327d4997c05249ac62b5ae4c04f5e9cb91 100644
 --- a/Source/WebKit/Scripts/generate-message-receiver.py
@@ -135752,6 +135780,18 @@ index bdd839107c6fb8eb0c40b5f0680356209cbefdb2..83750016d3c049fa8941284487477178
  #if ENABLE(DEVELOPER_MODE)
      // Check last remaining options for JSC testing
      for (auto& arg : argvSpan.subspan(argIndex)) {
+diff --git a/Source/WebKit/Shared/wpe/WebEventFactoryWPE.cpp b/Source/WebKit/Shared/wpe/WebEventFactoryWPE.cpp
+index a792186daec7f9c86804e0a6455c1162bb344ca8..4bbe8d86e4f48a7c09c786b6a72f477e41da66ff 100644
+--- a/Source/WebKit/Shared/wpe/WebEventFactoryWPE.cpp
++++ b/Source/WebKit/Shared/wpe/WebEventFactoryWPE.cpp
+@@ -146,6 +146,7 @@ WebMouseEventInit WebEventFactory::createWebMouseEvent(WPEEvent* event)
+     case WPE_EVENT_POINTER_UP:
+         type = WebEventType::MouseUp;
+         button = buttonForWPEButton(wpe_event_pointer_button_get_button(event));
++        clickCount = wpe_event_pointer_button_get_press_count(event);
+         if (wpe_event_get_input_source(event) == WPE_INPUT_SOURCE_TOUCHSCREEN)
+             syntheticClickType = WebMouseEventSyntheticClickType::OneFingerTap;
+         break;
 diff --git a/Source/WebKit/Sources.txt b/Source/WebKit/Sources.txt
 index ea8d6c585971b5ea0e3588513f4c4752498984bd..5f04f43fe2761035be545ff37462a5a4330ad896 100644
 --- a/Source/WebKit/Sources.txt
@@ -135820,6 +135860,30 @@ index ea8d6c585971b5ea0e3588513f4c4752498984bd..5f04f43fe2761035be545ff37462a5a4
  WebProcess/FileAPI/BlobRegistryProxy.cpp
  
  WebProcess/FullScreen/WebFullScreenManager.cpp @cost:8
+diff --git a/Source/WebKit/SourcesGTK.txt b/Source/WebKit/SourcesGTK.txt
+index 398e6df2fc438d44e94f3b7d08b5c92f9f838ec7..fd4dc5c9c5c20b7c293048a4517a6bd68331fb79 100644
+--- a/Source/WebKit/SourcesGTK.txt
++++ b/Source/WebKit/SourcesGTK.txt
+@@ -153,6 +153,7 @@ UIProcess/API/glib/WebKitFileChooserRequest.cpp @no-unify
+ UIProcess/API/glib/WebKitFindController.cpp @no-unify
+ UIProcess/API/glib/WebKitFormClient.cpp @no-unify
+ UIProcess/API/glib/WebKitFormSubmissionRequest.cpp @no-unify
++UIProcess/API/glib/WebKitFrameInfo.cpp @no-unify
+ UIProcess/API/glib/WebKitGeolocationManager.cpp @no-unify
+ UIProcess/API/glib/WebKitGeolocationPermissionRequest.cpp @no-unify
+ UIProcess/API/glib/WebKitIconLoadingClient.cpp @no-unify
+diff --git a/Source/WebKit/SourcesWPE.txt b/Source/WebKit/SourcesWPE.txt
+index db779aefcd6fa39e1b544159d7f0780b583445b6..78e1ce4036e2a889ca25f9f3ffed2420b99a0a7e 100644
+--- a/Source/WebKit/SourcesWPE.txt
++++ b/Source/WebKit/SourcesWPE.txt
+@@ -158,6 +158,7 @@ UIProcess/API/glib/WebKitFileChooserRequest.cpp @no-unify
+ UIProcess/API/glib/WebKitFindController.cpp @no-unify
+ UIProcess/API/glib/WebKitFormClient.cpp @no-unify
+ UIProcess/API/glib/WebKitFormSubmissionRequest.cpp @no-unify
++UIProcess/API/glib/WebKitFrameInfo.cpp @no-unify
+ UIProcess/API/glib/WebKitGeolocationManager.cpp @no-unify
+ UIProcess/API/glib/WebKitGeolocationPermissionRequest.cpp @no-unify
+ UIProcess/API/glib/WebKitImage.cpp @no-unify
 diff --git a/Source/WebKit/UIProcess/API/APIContentRuleListStore.cpp b/Source/WebKit/UIProcess/API/APIContentRuleListStore.cpp
 index c6711c26a1e13b36c8cbc3b3cd22e376207b1bf1..8bfc7789886180cb58ad7419f4c370bd41befe83 100644
 --- a/Source/WebKit/UIProcess/API/APIContentRuleListStore.cpp
@@ -136297,6 +136361,365 @@ index 0000000000000000000000000000000000000000..23ef0de7f5c5892922479a85b153ca94
 +
 +#endif /* WKView_h */
 +
+diff --git a/Source/WebKit/UIProcess/API/glib/WebKitFrameInfo.cpp b/Source/WebKit/UIProcess/API/glib/WebKitFrameInfo.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..ce7648da8d769d59539691c907a6bb06e93c56b3
+--- /dev/null
++++ b/Source/WebKit/UIProcess/API/glib/WebKitFrameInfo.cpp
+@@ -0,0 +1,116 @@
++/*
++ * Copyright (C) 2026 Tau Gärtli
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Library General Public
++ * License as published by the Free Software Foundation; either
++ * version 2 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Library General Public License for more details.
++ *
++ * You should have received a copy of the GNU Library General Public License
++ * along with this library; see the file COPYING.LIB.  If not, write to
++ * the Free Software Foundation, Inc., 51 Franklin Street, Fifth Floor,
++ * Boston, MA 02110-1301, USA.
++ */
++
++#include "config.h"
++#include "WebKitFrameInfo.h"
++
++#include "APIFrameInfo.h"
++#include "WebKitFrameInfoPrivate.h"
++
++/**
++ * WebKitFrameInfo: (ref-func webkit_frame_info_ref) (unref-func webkit_frame_info_unref)
++ *
++ * Information about a frame on a webpage.
++ *
++ * Since: 2.56
++ */
++struct _WebKitFrameInfo {
++    explicit _WebKitFrameInfo(API::FrameInfo* info)
++        : info(info)
++    {
++    }
++
++    explicit _WebKitFrameInfo(WebKitFrameInfo* frameInfo)
++        : info(frameInfo->info)
++    {
++    }
++
++    RefPtr<API::FrameInfo> info;
++    int referenceCount { 1 };
++};
++
++G_DEFINE_BOXED_TYPE(WebKitFrameInfo, webkit_frame_info, webkit_frame_info_ref, webkit_frame_info_unref)
++
++WebKitFrameInfo* webkitFrameInfoCreate(API::FrameInfo* frameInfo)
++{
++    WebKitFrameInfo* info = static_cast<WebKitFrameInfo*>(fastZeroedMalloc(sizeof(WebKitFrameInfo)));
++    new (info) WebKitFrameInfo(frameInfo);
++    return info;
++}
++
++/**
++ * webkit_frame_info_ref:
++ * @info: a #WebKitFrameInfo
++ *
++ * Atomically acquires a reference on the given @info.
++ *
++ * This function is MT-safe and may be called from any thread.
++ *
++ * Returns: The same @info with an additional reference.
++ *
++ * Since: 2.56
++ */
++WebKitFrameInfo* webkit_frame_info_ref(WebKitFrameInfo* info)
++{
++    g_return_val_if_fail(info, nullptr);
++    g_atomic_int_inc(&info->referenceCount);
++    return info;
++}
++
++/**
++ * webkit_frame_info_unref:
++ * @info: a #WebKitFrameInfo
++ *
++ * Atomically releases a reference on the given @info.
++ *
++ * If the reference was the last, the resources associated with
++ * the @info are freed.
++ *
++ * This function is MT-safe and may be called from any thread.
++ *
++ * Since: 2.56
++ */
++void webkit_frame_info_unref(WebKitFrameInfo* info)
++{
++    g_return_if_fail(info);
++    if (g_atomic_int_dec_and_test(&info->referenceCount)) {
++        info->~WebKitFrameInfo();
++        fastFree(info);
++    }
++}
++
++/**
++ * webkit_frame_info_is_main_frame:
++ * @info: a #WebKitFrameInfo
++ *
++ * Whether or not this frame is the web site's main frame or a subframe.
++ *
++ * Since: 2.56
++ */
++gboolean
++webkit_frame_info_is_main_frame(WebKitFrameInfo* info)
++{
++    g_return_val_if_fail(info, FALSE);
++
++    return info->info->isMainFrame();
++}
++
++namespace WTF {
++WTF_DEFINE_GREF_TRAITS(WebKitFrameInfo, webkit_frame_info_ref, webkit_frame_info_unref)
++}
+diff --git a/Source/WebKit/UIProcess/API/glib/WebKitFrameInfo.h.in b/Source/WebKit/UIProcess/API/glib/WebKitFrameInfo.h.in
+new file mode 100644
+index 0000000000000000000000000000000000000000..9e174b92b264ddd42f9cd32934cbdf232be9804e
+--- /dev/null
++++ b/Source/WebKit/UIProcess/API/glib/WebKitFrameInfo.h.in
+@@ -0,0 +1,47 @@
++/*
++ * Copyright (C) 2026 Tau Gärtli
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Library General Public
++ * License as published by the Free Software Foundation; either
++ * version 2 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Library General Public License for more details.
++ *
++ * You should have received a copy of the GNU Library General Public License
++ * along with this library; see the file COPYING.LIB.  If not, write to
++ * the Free Software Foundation, Inc., 51 Franklin Street, Fifth Floor,
++ * Boston, MA 02110-1301, USA.
++ */
++
++@API_SINGLE_HEADER_CHECK@
++
++#pragma once
++
++#include <glib-object.h>
++#include <@API_INCLUDE_PREFIX@/WebKitDefines.h>
++
++G_BEGIN_DECLS
++
++#define WEBKIT_TYPE_FRAME_INFO (webkit_frame_info_get_type())
++
++typedef struct _WebKitFrameInfo WebKitFrameInfo;
++
++WEBKIT_API GType
++webkit_frame_info_get_type            (void);
++
++WEBKIT_API WebKitFrameInfo *
++webkit_frame_info_ref                 (WebKitFrameInfo *info);
++
++WEBKIT_API void
++webkit_frame_info_unref               (WebKitFrameInfo *info);
++
++WEBKIT_API gboolean
++webkit_frame_info_is_main_frame       (WebKitFrameInfo *info);
++
++G_DEFINE_AUTOPTR_CLEANUP_FUNC (WebKitFrameInfo, webkit_frame_info_unref)
++
++G_END_DECLS
+diff --git a/Source/WebKit/UIProcess/API/glib/WebKitFrameInfoPrivate.h b/Source/WebKit/UIProcess/API/glib/WebKitFrameInfoPrivate.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..f286f9ad3dd36a61a55ac6a318b27f93a18b6913
+--- /dev/null
++++ b/Source/WebKit/UIProcess/API/glib/WebKitFrameInfoPrivate.h
+@@ -0,0 +1,33 @@
++/*
++ * Copyright (C) 2026 Tau Gärtli
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Library General Public
++ * License as published by the Free Software Foundation; either
++ * version 2 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Library General Public License for more details.
++ *
++ * You should have received a copy of the GNU Library General Public License
++ * along with this library; see the file COPYING.LIB.  If not, write to
++ * the Free Software Foundation, Inc., 51 Franklin Street, Fifth Floor,
++ * Boston, MA 02110-1301, USA.
++ */
++
++#pragma once
++
++#include "WebKitFrameInfo.h"
++#include <wtf/glib/GRefPtr.h>
++
++namespace API {
++class FrameInfo;
++};
++
++namespace WTF {
++WTF_DECLARE_GREF_TRAITS(WebKitFrameInfo)
++}
++
++WebKitFrameInfo* webkitFrameInfoCreate(API::FrameInfo*);
+diff --git a/Source/WebKit/UIProcess/API/glib/WebKitNavigationAction.cpp b/Source/WebKit/UIProcess/API/glib/WebKitNavigationAction.cpp
+index 902dd24ef819ab43e5c086130bd1c57ea062ff83..7648649679a2a7cd3cc13436a235dde99e010082 100644
+--- a/Source/WebKit/UIProcess/API/glib/WebKitNavigationAction.cpp
++++ b/Source/WebKit/UIProcess/API/glib/WebKitNavigationAction.cpp
+@@ -20,6 +20,7 @@
+ #include "config.h"
+ #include "WebKitNavigationAction.h"
+ 
++#include "WebKitFrameInfoPrivate.h"
+ #include "WebKitNavigationActionPrivate.h"
+ #include "WebKitPrivate.h"
+ #include "WebKitURIRequestPrivate.h"
+@@ -214,3 +215,44 @@ RefPtr<API::NavigationAction> webkitNavigationActionGetAction(WebKitNavigationAc
+ {
+     return navigation->action;
+ }
++
++/**
++ * webkit_navigation_action_get_source_frame_info:
++ * @navigation: a #WebKitNavigationAction
++ *
++ * Gets the frame that requested the navigation.
++ *
++ * Returns: (transfer none) (nullable): a #WebKitFrameInfo or %NULL
++ *
++ * Since: 2.56
++ */
++WebKitFrameInfo* webkit_navigation_action_get_source_frame_info(WebKitNavigationAction* navigation)
++{
++    g_return_val_if_fail(navigation, nullptr);
++    if (!navigation->sourceFrame) {
++        if (auto sourceFrame = navigation->action->sourceFrame())
++            navigation->sourceFrame = adoptGRef(webkitFrameInfoCreate(sourceFrame));
++    }
++    return navigation->sourceFrame.get();
++}
++
++/**
++ * webkit_navigation_action_get_target_frame_info:
++ * @navigation: a #WebKitNavigationAction
++ *
++ * Gets the frame in which to display the new content or %NULL
++ * if the target of the navigation is a new window.
++ *
++ * Returns: (transfer none) (nullable): a #WebKitFrameInfo or %NULL
++ *
++ * Since: 2.56
++ */
++WebKitFrameInfo* webkit_navigation_action_get_target_frame_info(WebKitNavigationAction* navigation)
++{
++    g_return_val_if_fail(navigation, nullptr);
++    if (!navigation->targetFrame) {
++        if (auto targetFrame = navigation->action->targetFrame())
++            navigation->targetFrame = adoptGRef(webkitFrameInfoCreate(targetFrame));
++    }
++    return navigation->targetFrame.get();
++}
+diff --git a/Source/WebKit/UIProcess/API/glib/WebKitNavigationAction.h.in b/Source/WebKit/UIProcess/API/glib/WebKitNavigationAction.h.in
+index ba17491fcecea256366a62433e6fa62d5edd3aa1..fb9be77ef62b58b84d213a5b22aea41288abd9d0 100644
+--- a/Source/WebKit/UIProcess/API/glib/WebKitNavigationAction.h.in
++++ b/Source/WebKit/UIProcess/API/glib/WebKitNavigationAction.h.in
+@@ -24,6 +24,7 @@
+ 
+ #include <glib-object.h>
+ #include <@API_INCLUDE_PREFIX@/WebKitDefines.h>
++#include <@API_INCLUDE_PREFIX@/WebKitFrameInfo.h>
+ #include <@API_INCLUDE_PREFIX@/WebKitURIRequest.h>
+ 
+ G_BEGIN_DECLS
+@@ -54,34 +55,40 @@ typedef struct _WebKitNavigationAction WebKitNavigationAction;
+ 
+ 
+ WEBKIT_API GType
+-webkit_navigation_action_get_type            (void);
++webkit_navigation_action_get_type              (void);
+ 
+ WEBKIT_API WebKitNavigationAction *
+-webkit_navigation_action_copy                (WebKitNavigationAction *navigation);
++webkit_navigation_action_copy                  (WebKitNavigationAction *navigation);
+ 
+ WEBKIT_API void
+-webkit_navigation_action_free                (WebKitNavigationAction *navigation);
++webkit_navigation_action_free                  (WebKitNavigationAction *navigation);
+ 
+ WEBKIT_API WebKitNavigationType
+-webkit_navigation_action_get_navigation_type (WebKitNavigationAction *navigation);
++webkit_navigation_action_get_navigation_type   (WebKitNavigationAction *navigation);
+ 
+ WEBKIT_API guint
+-webkit_navigation_action_get_mouse_button    (WebKitNavigationAction *navigation);
++webkit_navigation_action_get_mouse_button      (WebKitNavigationAction *navigation);
+ 
+ WEBKIT_API guint
+-webkit_navigation_action_get_modifiers       (WebKitNavigationAction *navigation);
++webkit_navigation_action_get_modifiers         (WebKitNavigationAction *navigation);
+ 
+ WEBKIT_API WebKitURIRequest *
+-webkit_navigation_action_get_request         (WebKitNavigationAction *navigation);
++webkit_navigation_action_get_request           (WebKitNavigationAction *navigation);
+ 
+ WEBKIT_API gboolean
+-webkit_navigation_action_is_user_gesture     (WebKitNavigationAction *navigation);
++webkit_navigation_action_is_user_gesture       (WebKitNavigationAction *navigation);
+ 
+ WEBKIT_API gboolean
+-webkit_navigation_action_is_redirect         (WebKitNavigationAction *navigation);
++webkit_navigation_action_is_redirect           (WebKitNavigationAction *navigation);
+ 
+ WEBKIT_API const char *
+-webkit_navigation_action_get_frame_name      (WebKitNavigationAction *navigation);
++webkit_navigation_action_get_frame_name        (WebKitNavigationAction *navigation);
++
++WEBKIT_API WebKitFrameInfo *
++webkit_navigation_action_get_source_frame_info (WebKitNavigationAction *navigation);
++
++WEBKIT_API WebKitFrameInfo *
++webkit_navigation_action_get_target_frame_info (WebKitNavigationAction *navigation);
+ 
+ G_END_DECLS
+ 
+diff --git a/Source/WebKit/UIProcess/API/glib/WebKitNavigationActionPrivate.h b/Source/WebKit/UIProcess/API/glib/WebKitNavigationActionPrivate.h
+index 56b8f77cf6cff36f45b52cf47dfbd0dcf1fb55e0..5e5d8a93db182819bde5e9ed4222fec66cfdb3a7 100644
+--- a/Source/WebKit/UIProcess/API/glib/WebKitNavigationActionPrivate.h
++++ b/Source/WebKit/UIProcess/API/glib/WebKitNavigationActionPrivate.h
+@@ -38,6 +38,8 @@ struct _WebKitNavigationAction {
+     RefPtr<API::NavigationAction> action;
+     GRefPtr<WebKitURIRequest> request;
+     std::optional<UTF8CString> frameName;
++    GRefPtr<WebKitFrameInfo> sourceFrame;
++    GRefPtr<WebKitFrameInfo> targetFrame;
+ };
+ 
+ WebKitNavigationAction* webkitNavigationActionCreate(Ref<API::NavigationAction>&&);
+diff --git a/Source/WebKit/UIProcess/API/glib/webkit.h.in b/Source/WebKit/UIProcess/API/glib/webkit.h.in
+index 6b1ae2f744b6be6310c2bd87f26969ec2ee9ec9e..3853572f1cdb397a5d0b673d68adc9d68755ac18 100644
+--- a/Source/WebKit/UIProcess/API/glib/webkit.h.in
++++ b/Source/WebKit/UIProcess/API/glib/webkit.h.in
+@@ -68,6 +68,7 @@
+ #endif
+ #include <@API_INCLUDE_PREFIX@/WebKitFindController.h>
+ #include <@API_INCLUDE_PREFIX@/WebKitFormSubmissionRequest.h>
++#include <@API_INCLUDE_PREFIX@/WebKitFrameInfo.h>
+ #include <@API_INCLUDE_PREFIX@/WebKitGeolocationManager.h>
+ #include <@API_INCLUDE_PREFIX@/WebKitGeolocationPermissionRequest.h>
+ #include <@API_INCLUDE_PREFIX@/WebKitHitTestResult.h>
 diff --git a/Source/WebKit/UIProcess/API/haiku/APIContentRuleListStoreHaiku.cpp b/Source/WebKit/UIProcess/API/haiku/APIContentRuleListStoreHaiku.cpp
 new file mode 100644
 index 0000000000000000000000000000000000000000..21a901f84f8f9a2904f5a79805ec1422dbbcd54a
@@ -179031,14 +179454,14 @@ index 0000000000000000000000000000000000000000..e545399afbe8b5539a8026d49532e05a
 +
 +} // namespace WebKit
 diff --git a/Source/WebKit/UIProcess/glib/AcceleratedBackingStore.messages.in b/Source/WebKit/UIProcess/glib/AcceleratedBackingStore.messages.in
-index 8ace95c1b44f471e9072adcce4b7875472a98436..6fc7a4a0abf48a63464a65b0589da9a902a1aec0 100644
+index 8ace95c1b44f471e9072adcce4b7875472a98436..0e6f9b41fa77cc2c123931b5db00d8b90b2930be 100644
 --- a/Source/WebKit/UIProcess/glib/AcceleratedBackingStore.messages.in
 +++ b/Source/WebKit/UIProcess/glib/AcceleratedBackingStore.messages.in
 @@ -26,7 +26,10 @@
      ExceptionForEnabledBy
  ]
  messages -> AcceleratedBackingStore {
-+#if USE(GBM)
++#if !PLATFORM(HAIKU)
      DidCreateDMABufBuffer(uint64_t id, WebCore::DMABufBufferAttributes dmaBufAttributes, WebKit::RendererBufferFormat::Usage usage)
 +#endif
 +
@@ -198721,6 +199144,112 @@ index 0000000000000000000000000000000000000000..1c0727fa23ca440ace4a93b1f1841aff
 +};
 +}
 +#endif
+diff --git a/Source/WebKit/WPEPlatform/wpe/WPEEvent.cpp b/Source/WebKit/WPEPlatform/wpe/WPEEvent.cpp
+index b07eae5f542a373e829ec34872fb5fc5cb39cb89..55b3bbc54e2e621012d70ffa70e809149d1b0401 100644
+--- a/Source/WebKit/WPEPlatform/wpe/WPEEvent.cpp
++++ b/Source/WebKit/WPEPlatform/wpe/WPEEvent.cpp
+@@ -330,7 +330,6 @@ WPEEvent* wpe_event_pointer_button_new(WPEEventType type, WPEView* view, WPEInpu
+ {
+     g_return_val_if_fail(type == WPE_EVENT_POINTER_DOWN || type == WPE_EVENT_POINTER_UP, nullptr);
+     g_return_val_if_fail(WPE_IS_VIEW(view), nullptr);
+-    g_return_val_if_fail(!pressCount || type == WPE_EVENT_POINTER_DOWN, nullptr);
+ 
+     return new _WPEEvent { view, type, source, time, { nullptr, nullptr }, WPEEventPointerButton { modifiers, button, pressCount, x, y }, 1 };
+ }
+@@ -357,14 +356,16 @@ guint wpe_event_pointer_button_get_button(WPEEvent* event)
+  * @event: a #WPEEvent
+  *
+  * Get the number of button presses for @event
+- * Note that @event must be a pointer button press event (%WPE_EVENT_POINTER_DOWN).
++ * Note that @event must be a pointer button press or release event
++ * (%WPE_EVENT_POINTER_DOWN or %WPE_EVENT_POINTER_UP). For a release event this is
++ * the press count of the button press that it completes.
+  *
+  * Returns: the press count of @event
+  */
+ guint wpe_event_pointer_button_get_press_count(WPEEvent* event)
+ {
+     g_return_val_if_fail(event, 0);
+-    g_return_val_if_fail(event->type == WPE_EVENT_POINTER_DOWN, 0);
++    g_return_val_if_fail(event->type == WPE_EVENT_POINTER_DOWN || event->type == WPE_EVENT_POINTER_UP, 0);
+ 
+     return std::get<WPEEventPointerButton>(event->variant).pressCount;
+ }
+diff --git a/Source/WebKit/WPEPlatform/wpe/WPEView.cpp b/Source/WebKit/WPEPlatform/wpe/WPEView.cpp
+index 8a7c8d294563865666400cad608c50c4748b8f49..2f0fe60b31809cabebf9143b1052a644fa5a8455 100644
+--- a/Source/WebKit/WPEPlatform/wpe/WPEView.cpp
++++ b/Source/WebKit/WPEPlatform/wpe/WPEView.cpp
+@@ -1060,6 +1060,29 @@ guint wpe_view_compute_press_count(WPEView* view, gdouble x, gdouble y, guint bu
+     return pressCount;
+ }
+ 
++/**
++ * wpe_view_get_press_count:
++ * @view: a #WPEView
++ * @button: the button number
++ *
++ * Retrieve the number of presses for a given button number.
++ *
++ * Returns: the number of button presses
++ *
++ * Since: 2.56
++ */
++guint wpe_view_get_press_count(WPEView* view, guint button)
++{
++    g_return_val_if_fail(WPE_IS_VIEW(view), 0);
++
++    auto* priv = view->priv;
++    unsigned pressCount = 0;
++    if (priv->lastButtonPress.pressCount && button == priv->lastButtonPress.button)
++        pressCount = priv->lastButtonPress.pressCount;
++
++    return pressCount;
++}
++
+ /**
+  * wpe_view_focus_in:
+  * @view: a #WPEView
+diff --git a/Source/WebKit/WPEPlatform/wpe/WPEView.h b/Source/WebKit/WPEPlatform/wpe/WPEView.h
+index aac7a4625ee15765e0ef18420ac29321c1c3b940..03512839e461282e40145ee196be00e50067488a 100644
+--- a/Source/WebKit/WPEPlatform/wpe/WPEView.h
++++ b/Source/WebKit/WPEPlatform/wpe/WPEView.h
+@@ -144,6 +144,8 @@ WPE_API guint                 wpe_view_compute_press_count          (WPEView
+                                                                      gdouble             y,
+                                                                      guint               button,
+                                                                      guint32             time);
++WPE_API guint                 wpe_view_get_press_count              (WPEView            *view,
++                                                                     guint               button);
+ WPE_API void                  wpe_view_focus_in                     (WPEView            *view);
+ WPE_API void                  wpe_view_focus_out                    (WPEView            *view);
+ WPE_API gboolean              wpe_view_get_has_focus                (WPEView            *view);
+diff --git a/Source/WebKit/WPEPlatform/wpe/drm/WPEDRMSeat.cpp b/Source/WebKit/WPEPlatform/wpe/drm/WPEDRMSeat.cpp
+index cf817133ec994b9670b5d1f560cad1964155faff..647e8051c8f6bec1a32f42ae64d784bb55c2888f 100644
+--- a/Source/WebKit/WPEPlatform/wpe/drm/WPEDRMSeat.cpp
++++ b/Source/WebKit/WPEPlatform/wpe/drm/WPEDRMSeat.cpp
+@@ -323,7 +323,8 @@ void Seat::handlePointerButtonEvent(struct libinput_event_pointer* event)
+     m_pointer.time = libinput_event_pointer_get_time(event);
+ 
+     auto scale = wpe_view_get_scale(m_view.get());
+-    unsigned pressCount = state == LIBINPUT_BUTTON_STATE_PRESSED ? wpe_view_compute_press_count(m_view.get(), m_pointer.x / scale, m_pointer.y / scale, button, m_pointer.time) : 0;
++    unsigned pressCount = state == LIBINPUT_BUTTON_STATE_PRESSED ? wpe_view_compute_press_count(m_view.get(), m_pointer.x / scale, m_pointer.y / scale, button, m_pointer.time) : wpe_view_get_press_count(m_view.get(), button);
++
+     GRefPtr<WPEEvent> wpeEvent = adoptGRef(wpe_event_pointer_button_new(state == LIBINPUT_BUTTON_STATE_PRESSED ? WPE_EVENT_POINTER_DOWN : WPE_EVENT_POINTER_UP, m_view.get(), m_pointer.source,
+         m_pointer.time, modifiers(), button, m_pointer.x / scale, m_pointer.y / scale, pressCount));
+     wpe_view_event(m_view.get(), wpeEvent.get());
+diff --git a/Source/WebKit/WPEPlatform/wpe/wayland/WPEWaylandSeat.cpp b/Source/WebKit/WPEPlatform/wpe/wayland/WPEWaylandSeat.cpp
+index 762b164939c26fe22d5b1f2fd5cc911bfb8aa900..1983c3b2126f830806340356838f6aa8d851a4d7 100644
+--- a/Source/WebKit/WPEPlatform/wpe/wayland/WPEWaylandSeat.cpp
++++ b/Source/WebKit/WPEPlatform/wpe/wayland/WPEWaylandSeat.cpp
+@@ -175,7 +175,8 @@ const struct wl_pointer_listener WaylandSeat::s_pointerListener = {
+         if (!view)
+             return;
+ 
+-        unsigned pressCount = state ? wpe_view_compute_press_count(view.get(), seat.m_pointer.x, seat.m_pointer.y, button, time) : 0;
++        unsigned pressCount = state ? wpe_view_compute_press_count(view.get(), seat.m_pointer.x, seat.m_pointer.y, button, time) : wpe_view_get_press_count(view.get(), button);
++
+         GRefPtr<WPEEvent> event = adoptGRef(wpe_event_pointer_button_new(state ? WPE_EVENT_POINTER_DOWN : WPE_EVENT_POINTER_UP, view.get(), seat.m_pointer.source,
+             time, seat.modifiers(), button, seat.m_pointer.x, seat.m_pointer.y, pressCount));
+         wpe_view_event(view.get(), event.get());
 diff --git a/Source/WebKit/WebKit.xcodeproj/project.pbxproj b/Source/WebKit/WebKit.xcodeproj/project.pbxproj
 index 8b9983019075e23aabf98e2a4d0385261c98ca2c..aba379dee696847e957a26932ecddf6652076d7c 100644
 --- a/Source/WebKit/WebKit.xcodeproj/project.pbxproj
@@ -227134,7 +227663,7 @@ index eb5f426f394dfc94dc2a52d37a497b69e05e6b58..3acc6c59661b5299e75359948c346cf6
      const Ref<AcceleratedSurface> m_surface;
      std::unique_ptr<WebCore::GLContext> m_context;
 diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp
-index c238029ad9c99c5028ea7e456520af85d1d85532..f02c24bc55297cbf499a9a255f80f763400f967e 100644
+index c238029ad9c99c5028ea7e456520af85d1d85532..95d9a74d4de253b02af865111f9d56b9f78c6679 100644
 --- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp
 +++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp
 @@ -26,6 +26,11 @@
@@ -227149,18 +227678,20 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..f02c24bc55297cbf499a9a255f80f763
  #if USE(COORDINATED_GRAPHICS)
  #include "AcceleratedSurface.h"
  #include "CoordinatedSceneState.h"
-@@ -33,6 +38,10 @@
+@@ -33,6 +38,12 @@
  #include "RenderProcessInfo.h"
  #include "WebPage.h"
  #include "WebProcess.h"
++#if PLATFORM(HAIKU)
 +#include <WebCore/CoordinatedBackingStore.h>
 +#include <WebCore/CoordinatedBackingStoreTile.h>
++#endif
 +#include <WebCore/CoordinatedImageBackingStore.h>
 +#include <WebCore/CoordinatedPlatformLayerBuffer.h>
  #include <WebCore/CoordinatedPlatformLayer.h>
  #include <WebCore/Damage.h>
  #include <WebCore/FontCache.h>
-@@ -51,8 +60,18 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
+@@ -51,8 +62,18 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
  #include <wtf/SetForScope.h>
  #include <wtf/SystemTracing.h>
  #include <wtf/TZoneMallocInlines.h>
@@ -227179,7 +227710,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..f02c24bc55297cbf499a9a255f80f763
  #if USE(GLIB_EVENT_LOOP)
  #include <wtf/glib/RunLoopSourcePriority.h>
  #endif
-@@ -68,18 +87,98 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
+@@ -68,18 +89,98 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
  #include <GLES2/gl2.h>
  #endif
  
@@ -227278,7 +227809,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..f02c24bc55297cbf499a9a255f80f763
      , m_layerTreeHost(&layerTreeHost)
      , m_surface(AcceleratedSurface::create(webPage, [this] { frameComplete(); }, AcceleratedSurface::RenderingPurpose::Composited))
      , m_sceneState(&sceneState)
-@@ -90,6 +189,19 @@ ThreadedCompositor::ThreadedCompositor(WebPage& webPage, LayerTreeHost& layerTre
+@@ -90,6 +191,19 @@ ThreadedCompositor::ThreadedCompositor(WebPage& webPage, LayerTreeHost& layerTre
  {
      ASSERT(RunLoop::isMain());
  
@@ -227298,7 +227829,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..f02c24bc55297cbf499a9a255f80f763
      lazyInitialize(m_didCompositeRunLoopObserver, makeUnique<RunLoopObserver>(RunLoopObserver::WellKnownOrder::GraphicsCommit, [this] {
          this->didCompositeRunLoopObserverFired();
      }));
-@@ -112,7 +224,28 @@ ThreadedCompositor::ThreadedCompositor(WebPage& webPage, LayerTreeHost& layerTre
+@@ -112,7 +226,28 @@ ThreadedCompositor::ThreadedCompositor(WebPage& webPage, LayerTreeHost& layerTre
  
      m_surface->didCreateCompositingRunLoop(m_workQueue->runLoop());
  
@@ -227328,7 +227859,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..f02c24bc55297cbf499a9a255f80f763
          // GLNativeWindowType depends on the EGL implementation: reinterpret_cast works
          // for pointers (only if they are 64-bit wide and not for other cases), and static_cast for
          // numeric types (and when needed they get extended to 64-bit) but not for pointers. Using
-@@ -126,7 +259,14 @@ ThreadedCompositor::ThreadedCompositor(WebPage& webPage, LayerTreeHost& layerTre
+@@ -126,7 +261,14 @@ ThreadedCompositor::ThreadedCompositor(WebPage& webPage, LayerTreeHost& layerTre
              return;
          }
  
@@ -227344,7 +227875,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..f02c24bc55297cbf499a9a255f80f763
  
  #if USE(TEXTURE_MAPPER)
          m_context = WTF::move(context);
-@@ -135,10 +275,340 @@ ThreadedCompositor::ThreadedCompositor(WebPage& webPage, LayerTreeHost& layerTre
+@@ -135,10 +277,340 @@ ThreadedCompositor::ThreadedCompositor(WebPage& webPage, LayerTreeHost& layerTre
          PlatformDisplay::sharedDisplay().setSkiaGLContextForCurrentThread(WTF::move(context));
          m_threadSafeGrContext = PlatformDisplay::sharedDisplay().skiaGrContext()->threadSafeProxy();
  #endif
@@ -227420,9 +227951,9 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..f02c24bc55297cbf499a9a255f80f763
 +    RunLoop::mainSingleton().dispatch([this, protectedThis = Ref { *this }] {
 +        if (m_layerTreeHost)
 +            m_layerTreeHost->recoverFromContextLossHaiku();
-+    });
-+}
-+
+     });
+ }
+ 
 +bool ThreadedCompositor::recreateContextHaiku()
 +{
 +    ASSERT(RunLoop::isMain());
@@ -227670,10 +228201,10 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..f02c24bc55297cbf499a9a255f80f763
 +    m_textureMapper->warmShaderProgramsHaiku();
 +    m_workQueue->dispatch([this, protectedThis = Ref { *this }, remaining, waitsForQuiet] {
 +        warmShaderProgramsHaiku(remaining - 1, waitsForQuiet);
-     });
- }
++    });
++}
 +#endif
- 
++
 +#if PLATFORM(HAIKU)
 +ThreadedCompositor::~ThreadedCompositor()
 +{
@@ -227685,7 +228216,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..f02c24bc55297cbf499a9a255f80f763
  
  uint64_t ThreadedCompositor::surfaceID() const
  {
-@@ -160,11 +630,20 @@ void ThreadedCompositor::invalidate()
+@@ -160,11 +632,20 @@ void ThreadedCompositor::invalidate()
      m_didCompositeRunLoopObserver->invalidate();
      m_workQueue->dispatchSync([this] {
  #if USE(TEXTURE_MAPPER)
@@ -227706,7 +228237,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..f02c24bc55297cbf499a9a255f80f763
          flushCompositingState(CompositionReason::RenderingUpdate);
  
          m_sceneState->invalidateCommittedLayers();
-@@ -184,6 +663,59 @@ void ThreadedCompositor::invalidate()
+@@ -184,6 +665,59 @@ void ThreadedCompositor::invalidate()
      m_surface = nullptr;
  }
  
@@ -227766,7 +228297,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..f02c24bc55297cbf499a9a255f80f763
  void ThreadedCompositor::startRenderTimer()
  {
      assertIsHeld(m_state.lock);
-@@ -216,8 +748,37 @@ void ThreadedCompositor::updateRenderTimer()
+@@ -216,8 +750,37 @@ void ThreadedCompositor::updateRenderTimer()
      }
  
      if (m_state.isRenderTimerActive) {
@@ -227806,7 +228337,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..f02c24bc55297cbf499a9a255f80f763
      } else
          m_renderTimer.stop();
  }
-@@ -284,6 +845,10 @@ void ThreadedCompositor::pendingTilesDidChange()
+@@ -284,6 +847,10 @@ void ThreadedCompositor::pendingTilesDidChange()
          return;
  
      m_state.isWaitingForTiles = false;
@@ -227817,7 +228348,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..f02c24bc55297cbf499a9a255f80f763
      scheduleUpdateLocked();
  }
  
-@@ -364,6 +929,10 @@ TargetContents ThreadedCompositor::paintToCurrentGLContext(const TransformationM
+@@ -364,6 +931,10 @@ TargetContents ThreadedCompositor::paintToCurrentGLContext(const TransformationM
  #if USE(TEXTURE_MAPPER)
  void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix, const IntSize& size, const OptionSet<CompositionReason>& reasons)
  {
@@ -227828,7 +228359,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..f02c24bc55297cbf499a9a255f80f763
      FloatRect clipRect(FloatPoint { }, size);
      TextureMapperLayer& currentRootLayer = m_sceneState->rootLayer().ensureTarget();
      if (currentRootLayer.transform() != matrix)
-@@ -371,11 +940,23 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
+@@ -371,11 +942,23 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
  
      bool sceneHasRunningAnimations = currentRootLayer.applyAnimationsRecursively(MonotonicTime::now());
  
@@ -227852,7 +228383,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..f02c24bc55297cbf499a9a255f80f763
      currentRootLayer.prepareForPainting(*m_textureMapper);
      if (m_damage.flags) {
          Damage frameDamage(size, m_damage.flags->contains(DamagePropagationFlags::Unified) ? Damage::Mode::BoundingBox : Damage::Mode::Rectangles);
-@@ -383,7 +964,29 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
+@@ -383,7 +966,29 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
          WTFBeginSignpost(this, CollectDamage);
          currentRootLayer.collectDamage(*m_textureMapper, frameDamage);
          WTFEndSignpost(this, CollectDamage);
@@ -227882,7 +228413,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..f02c24bc55297cbf499a9a255f80f763
          recordFrameDamage(WTF::move(frameDamage));
  
          if (m_damage.flags->contains(DamagePropagationFlags::UseForCompositing)) {
-@@ -392,23 +995,62 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
+@@ -392,23 +997,62 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
                  m_textureMapper->setDamage(std::nullopt);
              } else {
                  const auto& damageSinceLastSurfaceUse = m_surface->renderTargetDamage();
@@ -227945,7 +228476,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..f02c24bc55297cbf499a9a255f80f763
  
  #if ENABLE(DAMAGE_TRACKING)
      if (rectContainingRegionThatActuallyChanged)
-@@ -426,6 +1068,21 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
+@@ -426,6 +1070,21 @@ void ThreadedCompositor::paintToTextureMapper(const TransformationMatrix& matrix
  
      m_textureMapper->endClip();
      m_textureMapper->endPainting();
@@ -227967,7 +228498,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..f02c24bc55297cbf499a9a255f80f763
  
      if (sceneHasRunningAnimations)
          requestComposition(CompositionReason::Animation);
-@@ -525,8 +1182,17 @@ void ThreadedCompositor::recordFrameDamage(Damage&& damage)
+@@ -525,8 +1184,17 @@ void ThreadedCompositor::recordFrameDamage(Damage&& damage)
  
      // Nothing changed this frame: an empty damage contributes nothing to the targets, since Damage::add()
      // ignores empty damage. Skip it rather than replace the recorded frame damage with an empty one.
@@ -227986,7 +228517,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..f02c24bc55297cbf499a9a255f80f763
  
      m_surface->setFrameDamage(WTF::move(damage));
  }
-@@ -555,6 +1221,53 @@ void ThreadedCompositor::renderLayerTree()
+@@ -555,6 +1223,53 @@ void ThreadedCompositor::renderLayerTree()
  
      if (m_suspendedCount > 0)
          return;
@@ -228040,7 +228571,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..f02c24bc55297cbf499a9a255f80f763
  
      OptionSet<CompositionReason> reasons;
      bool shouldNotifiyDidComposite = false;
-@@ -580,11 +1293,36 @@ void ThreadedCompositor::renderLayerTree()
+@@ -580,11 +1295,36 @@ void ThreadedCompositor::renderLayerTree()
  
          ASSERT(m_state.state == State::Scheduled);
          m_state.state = State::InProgress;
@@ -228078,7 +228609,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..f02c24bc55297cbf499a9a255f80f763
  #endif
  
      // Retrieve the scene attributes in a thread-safe manner.
-@@ -599,29 +1337,119 @@ void ThreadedCompositor::renderLayerTree()
+@@ -599,29 +1339,119 @@ void ThreadedCompositor::renderLayerTree()
      if (viewportSize.isEmpty())
          return;
  
@@ -228201,7 +228732,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..f02c24bc55297cbf499a9a255f80f763
      WTFEmitSignpost(this, DidRenderFrame, "reasons: %s", reasonsToString(reasons).utf8());
  
  #if USE(TEXTURE_MAPPER)
-@@ -631,8 +1459,84 @@ void ThreadedCompositor::renderLayerTree()
+@@ -631,8 +1461,84 @@ void ThreadedCompositor::renderLayerTree()
      PlatformDisplay::sharedDisplay().skiaGLContext()->swapBuffers();
  #endif
  
@@ -228286,7 +228817,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..f02c24bc55297cbf499a9a255f80f763
  
      RunLoop::mainSingleton().dispatch([this, protectedThis = Ref { *this }] {
          if (m_layerTreeHost)
-@@ -649,6 +1553,13 @@ void ThreadedCompositor::requestCompositionForRenderingUpdate(Function<void()>&&
+@@ -649,6 +1555,13 @@ void ThreadedCompositor::requestCompositionForRenderingUpdate(Function<void()>&&
      m_state.didCompositeRenderingUpdateFunction = WTF::move(didCompositeFunction);
      if (m_sceneState->pendingTiles())
          m_state.isWaitingForTiles = true;
@@ -228300,7 +228831,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..f02c24bc55297cbf499a9a255f80f763
      scheduleUpdateLocked();
  }
  
-@@ -656,6 +1567,13 @@ void ThreadedCompositor::requestComposition(CompositionReason reason)
+@@ -656,6 +1569,13 @@ void ThreadedCompositor::requestComposition(CompositionReason reason)
  {
      Locker locker { m_state.lock };
      m_state.reasons.add(reason);
@@ -228314,7 +228845,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..f02c24bc55297cbf499a9a255f80f763
      scheduleUpdateLocked();
  }
  
-@@ -679,6 +1597,10 @@ ASCIILiteral ThreadedCompositor::stateToString(ThreadedCompositor::State state)
+@@ -679,6 +1599,10 @@ ASCIILiteral ThreadedCompositor::stateToString(ThreadedCompositor::State state)
  void ThreadedCompositor::scheduleUpdateLocked()
  {
      assertIsHeld(m_state.lock);
@@ -228325,7 +228856,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..f02c24bc55297cbf499a9a255f80f763
      WTFEmitSignpost(this, ScheduleComposition, "reasons: %s, state: %s, waiting for tiles: %s, render timer active: %s", reasonsToString(m_state.reasons).utf8(), stateToString(m_state.state).characters(), m_state.isWaitingForTiles ? "yes" : "no", m_state.isRenderTimerActive ? "yes" : "no");
  
      switch (m_state.state) {
-@@ -703,6 +1625,10 @@ void ThreadedCompositor::scheduleUpdateLocked()
+@@ -703,6 +1627,10 @@ void ThreadedCompositor::scheduleUpdateLocked()
  void ThreadedCompositor::frameComplete()
  {
      ASSERT(m_workQueue->runLoop().isCurrent());
@@ -228336,7 +228867,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..f02c24bc55297cbf499a9a255f80f763
  
      Locker locker { m_state.lock };
      WTFEmitSignpost(this, FrameComplete, "reasons: %s, state: %s, waiting for tiles: %s", reasonsToString(m_state.reasons).utf8(), stateToString(m_state.state).characters(), m_state.isWaitingForTiles ? "yes" : "no");
-@@ -726,6 +1652,112 @@ void ThreadedCompositor::frameComplete()
+@@ -726,6 +1654,112 @@ void ThreadedCompositor::frameComplete()
      }
  }
  
@@ -228449,7 +228980,7 @@ index c238029ad9c99c5028ea7e456520af85d1d85532..f02c24bc55297cbf499a9a255f80f763
  RunLoop* ThreadedCompositor::runLoop()
  {
      return m_surface ? &m_workQueue->runLoop() : nullptr;
-@@ -747,7 +1779,15 @@ void ThreadedCompositor::updateSceneAttributes(const IntSize& size, float device
+@@ -747,7 +1781,15 @@ void ThreadedCompositor::updateSceneAttributes(const IntSize& size, float device
  {
      m_attributes.viewportSize = size;
      m_attributes.deviceScaleFactor = deviceScaleFactor;

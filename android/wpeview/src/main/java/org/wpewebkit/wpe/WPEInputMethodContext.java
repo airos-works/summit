@@ -1,0 +1,123 @@
+/**
+ * Copyright (C) 2026 Igalia S.L.
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
+ */
+
+package org.wpewebkit.wpe;
+
+import androidx.annotation.Keep;
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
+
+/**
+ * WPEInputMethodContext is a borrowed JNI proxy for the native WPEInputMethodContext that WebKit
+ * attaches to a WPEView. The native context is owned by WebKit. The methods of this wrapper do nothing
+ * once the WebKitWebView is destroyed.
+ */
+public final class WPEInputMethodContext {
+    public interface Listener {
+        void onFocusIn();
+        void onFocusOut();
+        /** WebKit ended the composition itself, for example because the page was tapped. */
+        void onPreeditReset();
+        /** The input purpose or the input hints changed. */
+        default void onContentTypeChanged() {}
+    }
+
+    private long mNativePtr = 0;
+    public long getNativePtr() { return mNativePtr; }
+
+    WPEInputMethodContext(long nativePtr) { this.mNativePtr = nativePtr; }
+
+    // An input method may still hold a connection to the context after the WebKitWebView is destroyed.
+    public void commitText(@NonNull String text) {
+        if (mNativePtr != 0)
+            nativeCommitText(mNativePtr, text);
+    }
+
+    public void deleteSurrounding(int offset, int count) {
+        if (mNativePtr != 0)
+            nativeDeleteSurrounding(mNativePtr, offset, count);
+    }
+
+    /**
+     * Shows text as a composition (preedit) that replaces the current one. cursorOffset is in UTF-16
+     * code units from the start of text.
+     */
+    public void setPreedit(@NonNull String text, int cursorOffset) {
+        if (mNativePtr != 0)
+            nativeSetPreedit(mNativePtr, text, cursorOffset);
+    }
+
+    /** Commits the current preedit text, if any, as final text. */
+    public void finishPreedit() {
+        if (mNativePtr != 0)
+            nativeFinishPreedit(mNativePtr);
+    }
+
+    /** One of the {@link WPEInputPurpose} values, for the focused field. */
+    public int getInputPurpose() {
+        return mNativePtr != 0 ? nativeGetInputPurpose(mNativePtr) : WPEInputPurpose.FREE_FORM;
+    }
+
+    /** A combination of {@link WPEInputHints} flags, for the focused field. */
+    public int getInputHints() { return mNativePtr != 0 ? nativeGetInputHints(mNativePtr) : WPEInputHints.NONE; }
+
+    public void setListener(@Nullable Listener listener) {
+        if (mNativePtr != 0)
+            nativeSetListener(mNativePtr, listener != null ? new ListenerHolder(listener) : null);
+    }
+
+    void invalidate() { mNativePtr = 0; }
+
+    static long getForView(@NonNull WPEView view) { return nativeGetForView(view.getNativePtr()); }
+
+    private static class ListenerHolder {
+        private final Listener delegate;
+
+        ListenerHolder(@NonNull Listener delegate) { this.delegate = delegate; }
+
+        @Keep
+        public void onFocusIn() {
+            MainLooperDispatcher.post(delegate::onFocusIn);
+        }
+
+        @Keep
+        public void onFocusOut() {
+            MainLooperDispatcher.post(delegate::onFocusOut);
+        }
+
+        @Keep
+        public void onPreeditReset() {
+            MainLooperDispatcher.post(delegate::onPreeditReset);
+        }
+
+        // WebKit sets the purpose and the hints one after the other. Run the delegate after both are set.
+        @Keep
+        public void onContentTypeChanged() {
+            MainLooperDispatcher.postLater(delegate::onContentTypeChanged);
+        }
+    }
+
+    private native void nativeCommitText(long nativePtr, String text);
+    private native void nativeDeleteSurrounding(long nativePtr, int offset, int count);
+    private native void nativeSetPreedit(long nativePtr, String text, int cursorOffset);
+    private native void nativeFinishPreedit(long nativePtr);
+    private native void nativeSetListener(long nativePtr, @Nullable ListenerHolder listener);
+    private native int nativeGetInputPurpose(long nativePtr);
+    private native int nativeGetInputHints(long nativePtr);
+    private static native long nativeGetForView(long viewPtr);
+}
