@@ -182,3 +182,16 @@ a small model), so they need the extension signed in.
 A tab restored but never shown since start has a 320x200 view, so tools acting
 on it see that viewport until the tab is selected once.
 
+
+## Signing in (28 Nov 2026)
+
+Signing in from the laptop's own Summit spun on claude.ai's authorize page.
+Two causes, both fixed:
+
+- claude.ai tries Claude's extension IDs in turn and took Summit's empty
+  answer for a missing ID as success (docs/webextensions-external-messaging.md).
+- A POST whose HTTP/2 stream failed could not be sent again: curl had no seek
+  callback for request bodies ("Send failed since rewinding of the data
+  stream failed"). `CurlRequest` now rewinds its form data
+  (`CurlFormDataStream::rewind`, CURLOPT_SEEKFUNCTION); a streamed body still
+  cannot be.

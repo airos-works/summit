@@ -75,3 +75,15 @@ its sign-in that way. A page that a loaded extension lists in
 pages still have no `window.chrome`, which sites take for Chrome itself.
 Checked on the laptop: claude.ai's page messaged Claude in Chrome and got its
 answer; example.com has no `chrome`.
+
+## A page's message nobody takes (28 Nov 2026)
+
+WebKit answered `runtime.sendMessage(id, ...)` from a web page with nothing
+(after a random delay) when no extension with that ID was loaded, so a page
+could not tell installed extensions from missing ones. Chrome reports
+"Could not establish connection. Receiving end does not exist.", and sites
+rely on it: claude.ai hands Claude in Chrome its sign-in by trying each of the
+extension's IDs (development builds first) until one accepts, and took the
+empty answer from the first missing one as success, so the sign-in page
+spun forever. Summit now answers as Chrome does, still after the random
+delay, also when the browser could not deliver the message.
