@@ -62,6 +62,13 @@ public final class WebKitSettings {
     public boolean getDeveloperExtrasEnabled() { return nativeGetDeveloperExtrasEnabled(mNativePtr); }
     public void setDeveloperExtrasEnabled(boolean flag) { nativeSetDeveloperExtrasEnabled(mNativePtr, flag); }
 
+    public boolean getJavaScriptCanOpenWindowsAutomatically() {
+        return nativeGetJavaScriptCanOpenWindowsAutomatically(mNativePtr);
+    }
+    public void setJavaScriptCanOpenWindowsAutomatically(boolean flag) {
+        nativeSetJavaScriptCanOpenWindowsAutomatically(mNativePtr, flag);
+    }
+
     public boolean getDisableWebSecurity() { return nativeGetDisableWebSecurity(mNativePtr); }
     public void setDisableWebSecurity(boolean disable) { nativeSetDisableWebSecurity(mNativePtr, disable); }
 
@@ -88,6 +95,8 @@ public final class WebKitSettings {
     private native void nativeSetAllowFileAccessFromFileURLs(long nativePtr, boolean flag);
     private native boolean nativeGetDeveloperExtrasEnabled(long nativePtr);
     private native void nativeSetDeveloperExtrasEnabled(long nativePtr, boolean flag);
+    private native boolean nativeGetJavaScriptCanOpenWindowsAutomatically(long nativePtr);
+    private native void nativeSetJavaScriptCanOpenWindowsAutomatically(long nativePtr, boolean flag);
     private native boolean nativeGetDisableWebSecurity(long nativePtr);
     private native void nativeSetDisableWebSecurity(long nativePtr, boolean disable);
     private native boolean nativeGetAudiblePlaybackRequiresPageVisibility(long nativePtr);

@@ -19,6 +19,22 @@ The rule that keeps the two in step:
   one patch by `tools/update-engine-patch.py`). A fix in shared engine code
   reaches both builds with no extra work. Android-only engine code lives under
   WPE/Android directories or `#if OS(ANDROID)`.
+- **Guard Summit's engine work with `USE(SUMMIT)`, not `PLATFORM(HAIKU)`.**
+  `USE(SUMMIT)` is on for both builds (`OptionsHaiku.cmake`, and
+  `OptionsWPE.cmake` on Android): use it for web behaviour, layout, style,
+  paint and loading changes, Interop fixes and performance work in shared
+  files. Keep `PLATFORM(HAIKU)` for code that needs Haiku itself (BeAPI,
+  `<OS.h>`, `system_time()`, `snooze()`, the Haiku network, media and
+  speech backends) and for workarounds of Haiku-only build settings (for
+  example `summitCodePathForSimplifiedMeasuring()`, which makes up for Haiku
+  lacking `USE(FONT_VARIANT_VIA_FEATURES)`; WPE has it). Until November 2026
+  every Summit guard was `PLATFORM(HAIKU)`, and Android missed the fixes
+  behind them (Safari's page step, focus scrolling, grid and layout
+  fixes). `tools/summit-guards.py` turns guards in given directories into
+  `USE(SUMMIT)` in the patch, leaving blocks that use Haiku interfaces alone.
+  WebCore's behaviour directories are done; the graphics and compositor
+  directories (`platform/graphics`, `page/scrolling`, `WebKit/WebProcess`)
+  mix Haiku plumbing with shared fixes and still need it.
 - **Browser logic goes into `src/core`**. The Android build compiles every
   file in `src/core` (a glob, like air/OS's Makefile), so new core code is
   built for Android automatically. Only its JNI surface

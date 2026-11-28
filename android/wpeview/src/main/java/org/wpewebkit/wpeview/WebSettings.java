@@ -52,6 +52,7 @@ public class WebSettings {
     private boolean allowUniversalAccessFromFileURLs;
     private boolean allowFileAccessFromFileURLs;
     private boolean developerExtrasEnabled;
+    private boolean javaScriptCanOpenWindowsAutomatically;
     private boolean disableWebSecurity;
     private boolean audiblePlaybackRequiresPageVisibility;
     // Not a WebKit setting: the WebView reads it for the input method.
@@ -122,6 +123,7 @@ public class WebSettings {
         allowUniversalAccessFromFileURLs = settings.getAllowUniversalAccessFromFileURLs();
         allowFileAccessFromFileURLs = settings.getAllowFileAccessFromFileURLs();
         developerExtrasEnabled = settings.getDeveloperExtrasEnabled();
+        javaScriptCanOpenWindowsAutomatically = settings.getJavaScriptCanOpenWindowsAutomatically();
         disableWebSecurity = settings.getDisableWebSecurity();
         audiblePlaybackRequiresPageVisibility = settings.getAudiblePlaybackRequiresPageVisibility();
         settings = null;
@@ -175,6 +177,21 @@ public class WebSettings {
             settings.setDeveloperExtrasEnabled(flag);
         else
             developerExtrasEnabled = flag;
+    }
+
+    /**
+     * Whether pages may open windows (window.open()) without a user gesture, which they cannot by default. As in
+     * android.webkit.WebSettings; the window is still the app's to make, in {@link WebChromeClient#onCreateWindow}.
+     */
+    public boolean getJavaScriptCanOpenWindowsAutomatically() {
+        return settings != null ? settings.getJavaScriptCanOpenWindowsAutomatically()
+                                : javaScriptCanOpenWindowsAutomatically;
+    }
+    public void setJavaScriptCanOpenWindowsAutomatically(boolean flag) {
+        if (settings != null)
+            settings.setJavaScriptCanOpenWindowsAutomatically(flag);
+        else
+            javaScriptCanOpenWindowsAutomatically = flag;
     }
 
     public boolean getDisableWebSecurity() {

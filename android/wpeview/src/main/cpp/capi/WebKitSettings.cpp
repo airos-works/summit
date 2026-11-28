@@ -50,6 +50,10 @@ public:
             JNI::NativeMethod<jboolean(jlong)>("nativeGetDeveloperExtrasEnabled", nativeGetDeveloperExtrasEnabled),
             JNI::NativeMethod<void(jlong, jboolean)>(
                 "nativeSetDeveloperExtrasEnabled", nativeSetDeveloperExtrasEnabled),
+            JNI::NativeMethod<jboolean(jlong)>(
+                "nativeGetJavaScriptCanOpenWindowsAutomatically", nativeGetJavaScriptCanOpenWindowsAutomatically),
+            JNI::NativeMethod<void(jlong, jboolean)>(
+                "nativeSetJavaScriptCanOpenWindowsAutomatically", nativeSetJavaScriptCanOpenWindowsAutomatically),
             JNI::NativeMethod<jboolean(jlong)>("nativeGetDisableWebSecurity", nativeGetDisableWebSecurity),
             JNI::NativeMethod<void(jlong, jboolean)>("nativeSetDisableWebSecurity", nativeSetDisableWebSecurity),
             JNI::NativeMethod<jboolean(jlong)>(
@@ -122,6 +126,7 @@ private:
     DEFINE_BOOL_SETTER_GETTER(AllowUniversalAccessFromFileURLs, allow_universal_access_from_file_urls)
     DEFINE_BOOL_SETTER_GETTER(AllowFileAccessFromFileURLs, allow_file_access_from_file_urls)
     DEFINE_BOOL_SETTER_GETTER(DeveloperExtrasEnabled, enable_developer_extras)
+    DEFINE_BOOL_SETTER_GETTER(JavaScriptCanOpenWindowsAutomatically, javascript_can_open_windows_automatically)
     DEFINE_BOOL_SETTER_GETTER(DisableWebSecurity, disable_web_security)
     DEFINE_BOOL_SETTER_GETTER(ZoomTextOnly, zoom_text_only)
 

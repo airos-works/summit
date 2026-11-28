@@ -41,6 +41,19 @@ class AutomationActivity : Activity() {
   }
 
   private val chromeClient = object : WebChromeClient() {
+    // window.open() in a test page (scoped registries, opener tests): a window
+    // of its own, which WebDriver lists and can switch to, as on air/OS.
+    override fun onCreateWindow(view: WebView, isUserGesture: Boolean): WebView {
+      val client = this
+      val window = WebView(this@AutomationActivity, view).apply {
+        setWebChromeClient(client)
+        settings.javaScriptCanOpenWindowsAutomatically = true
+      }
+      windows += window
+      show(window)
+      return window
+    }
+
     override fun onCloseWindow(window: WebView) {
       val shown = window.parent != null
       close(window)
@@ -52,6 +65,9 @@ class AutomationActivity : Activity() {
     override fun createWebViewForAutomation(): WebView {
       val window = WebView(context, false).apply {
         setWebChromeClient(chromeClient)
+        // As air/OS's test profile, which allows pop-ups on the test origins
+        // (tools/interop2026/make-profile.py): tests call window.open() unprompted.
+        settings.javaScriptCanOpenWindowsAutomatically = true
         show(this)
         loadUrl("about:blank")
       }
