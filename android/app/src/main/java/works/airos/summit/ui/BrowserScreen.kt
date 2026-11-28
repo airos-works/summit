@@ -11,6 +11,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -446,24 +448,41 @@ private fun TabCountButton(count: Int, onClick: () -> Unit) {
 private fun TabStrip(browser: Browser) {
   val selected = browser.selected
   val tabs = browser.tabs.filter { it.private == (selected?.private == true) }
-  Row(
-    Modifier.fillMaxWidth().height(36.dp).horizontalScroll(rememberScrollState()).padding(horizontal = 6.dp),
-    verticalAlignment = Alignment.CenterVertically,
-  ) {
-    for (tab in tabs) {
-      val current = tab === selected
-      Row(
-        Modifier.padding(horizontal = 2.dp).widthIn(min = 120.dp, max = 220.dp).height(30.dp)
-          .clip(RoundedCornerShape(8.dp))
-          .background(if (current) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceContainer)
-          .clickable { browser.select(tab) }
-          .padding(start = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-      ) {
-        Text(tab.displayTitle, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelLarge,
-          modifier = Modifier.weight(1f))
-        IconButton(onClick = { browser.close(tab) }, modifier = Modifier.size(28.dp)) {
-          Icon(SummitIcons.Close, "Close tab", Modifier.size(14.dp))
+  val scroll = rememberScrollState()
+  val density = LocalDensity.current
+  BoxWithConstraints(Modifier.fillMaxWidth().height(36.dp)) {
+    // The tabs share the width, between 120 and 220 dp each, as desktop
+    // browsers' do; past that the strip scrolls, keeping the selected tab in view.
+    val tabWidth = ((maxWidth - 12.dp) / tabs.size.coerceAtLeast(1)).coerceIn(120.dp, 220.dp)
+    val selectedIndex = tabs.indexOf(selected)
+    LaunchedEffect(selectedIndex, tabWidth, tabs.size) {
+      if (selectedIndex >= 0) {
+        val start = with(density) { (tabWidth * selectedIndex).roundToPx() }
+        val end = start + with(density) { tabWidth.roundToPx() }
+        val visible = scroll.value..(scroll.value + scroll.viewportSize)
+        if (start < visible.first) scroll.animateScrollTo(start)
+        else if (end > visible.last) scroll.animateScrollTo(end - scroll.viewportSize)
+      }
+    }
+    Row(
+      Modifier.fillMaxWidth().fillMaxHeight().horizontalScroll(scroll).padding(horizontal = 6.dp),
+      verticalAlignment = Alignment.CenterVertically,
+    ) {
+      for (tab in tabs) {
+        val current = tab === selected
+        Row(
+          Modifier.width(tabWidth).padding(horizontal = 2.dp).height(30.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(if (current) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceContainer)
+            .clickable { browser.select(tab) }
+            .padding(start = 10.dp),
+          verticalAlignment = Alignment.CenterVertically,
+        ) {
+          Text(tab.displayTitle, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelLarge,
+            modifier = Modifier.weight(1f))
+          IconButton(onClick = { browser.close(tab) }, modifier = Modifier.size(28.dp)) {
+            Icon(SummitIcons.Close, "Close tab", Modifier.size(14.dp))
+          }
         }
       }
     }
