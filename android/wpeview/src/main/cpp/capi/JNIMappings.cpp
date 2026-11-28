@@ -20,30 +20,19 @@
 
 namespace WebKit {
 
-void configureWebKitCookieManagerJNIMappings();
-void configureWebKitCookieManagerAcceptPolicyCallbackHolderJNIMappings();
-void configureWebKitNetworkSessionJNIMappings();
-void configureWebKitSettingsJNIMappings();
-void configureWebKitWebContextJNIMappings();
-void configureWebKitWebViewJNIMappings();
-void configureWebKitWebViewEvalCallbackHolderJNIMappings();
-void configureWebKitWebsiteDataManagerJNIMappings();
-void configureWebKitWebsiteDataManagerCallbackHolderJNIMappings();
-void configureWPEDisplayJNIMappings();
-void configureWPEInputMethodContextJNIMappings();
-void configureWPEScreenJNIMappings();
-void configureWPEToplevelJNIMappings();
-void configureWPEViewJNIMappings();
-
 void configureJNIMappings()
 {
+    configureSoupTLDJNIMappings();
     configureWebKitCookieManagerJNIMappings();
     configureWebKitCookieManagerAcceptPolicyCallbackHolderJNIMappings();
+    configureWebKitDownloadJNIMappings();
     configureWebKitNetworkSessionJNIMappings();
+    configureWebKitNetworkSessionITPSummaryCallbackHolderJNIMappings();
     configureWebKitSettingsJNIMappings();
     configureWebKitWebContextJNIMappings();
     configureWebKitWebViewJNIMappings();
     configureWebKitWebViewEvalCallbackHolderJNIMappings();
+    configureWebKitWebViewSnapshotCallbackHolderJNIMappings();
     configureWebKitWebsiteDataManagerJNIMappings();
     configureWebKitWebsiteDataManagerCallbackHolderJNIMappings();
     configureWPEDisplayJNIMappings();

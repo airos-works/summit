@@ -18,8 +18,11 @@
 
 package org.wpewebkit.wpe;
 
+import android.graphics.Color;
 import android.view.Surface;
 
+import androidx.annotation.ColorInt;
+import androidx.annotation.Keep;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
@@ -34,20 +37,97 @@ public final class WPEToplevel {
         mNativePtr = nativeInit(display.getNativePtr(), surface);
     }
 
-    public void setPhysicalSize(int width, int height) { nativeSetPhysicalSize(mNativePtr, width, height); }
+    public void setPhysicalSize(int width, int height) {
+        if (mNativePtr != 0)
+            nativeSetPhysicalSize(mNativePtr, width, height);
+    }
 
-    public void getSize(@NonNull int[] out) { nativeGetSize(mNativePtr, out); }
+    /** Gives the size in logical pixels, which is 0 by 0 once the toplevel is destroyed. */
+    public void getSize(@NonNull int[] out) {
+        if (mNativePtr != 0) {
+            nativeGetSize(mNativePtr, out);
+        } else {
+            out[0] = 0;
+            out[1] = 0;
+        }
+    }
+
+    /**
+     * Returns the scale of the screen the toplevel is on, the ratio of physical to logical pixels, which is 1 once the
+     * toplevel is destroyed.
+     */
+    public float getScale() { return mNativePtr != 0 ? nativeGetScale(mNativePtr) : 1; }
 
     public void onSurfaceCreated(@NonNull Surface surface) { setSurface(surface); }
 
     public void onSurfaceDestroyed() { setSurface(null); }
 
-    public void setSurface(@Nullable Surface surface) { nativeSetSurface(mNativePtr, surface); }
+    public void setSurface(@Nullable Surface surface) {
+        if (mNativePtr != 0)
+            nativeSetSurface(mNativePtr, surface);
+    }
+
+    public void setWindowFocused(boolean focused) {
+        if (mNativePtr != 0)
+            nativeSetWindowFocused(mNativePtr, focused);
+    }
+
+    /** Moves the toplevel to the screen of the Android display that its window shows on. */
+    public void setScreen(@NonNull WPEScreen screen) {
+        if (mNativePtr != 0)
+            nativeSetScreen(mNativePtr, screen.getNativePtr());
+    }
+
+    /**
+     * Receives WebKit's requests to enter and leave fullscreen, which the toplevel has already done when they arrive.
+     */
+    public interface Listener {
+        void onFullscreenRequested(boolean fullscreen);
+    }
+
+    public void setListener(@Nullable Listener listener) {
+        if (mNativePtr != 0)
+            nativeSetListener(mNativePtr, listener != null ? new ListenerHolder(listener) : null);
+    }
+
+    /**
+     * Sets whether the toplevel is fullscreen, without telling the listener. Leaving fullscreen this way takes the page
+     * out of fullscreen.
+     */
+    public void setFullscreen(boolean fullscreen) {
+        if (mNativePtr != 0)
+            nativeSetFullscreen(mNativePtr, fullscreen);
+    }
+
+    public boolean isFullscreen() { return mNativePtr != 0 && nativeIsFullscreen(mNativePtr); }
+
+    /**
+     * Sets the color of the layer under the web content, kept across surface replacements. The layer is opaque, so
+     * the alpha is ignored.
+     */
+    public void setBackgroundColor(@ColorInt int color) {
+        if (mNativePtr != 0) {
+            Color rgb = Color.valueOf(color);
+            nativeSetBackgroundColor(mNativePtr, rgb.red(), rgb.green(), rgb.blue());
+        }
+    }
 
     public void destroy() {
         if (mNativePtr != 0) {
+            nativeSetListener(mNativePtr, null);
             nativeDestroy(mNativePtr);
             mNativePtr = 0;
+        }
+    }
+
+    private static class ListenerHolder {
+        private final Listener delegate;
+
+        ListenerHolder(@NonNull Listener delegate) { this.delegate = delegate; }
+
+        @Keep
+        public void onFullscreenRequested(boolean fullscreen) {
+            MainLooperDispatcher.post(() -> delegate.onFullscreenRequested(fullscreen));
         }
     }
 
@@ -55,5 +135,12 @@ public final class WPEToplevel {
     private native void nativeDestroy(long nativePtr);
     private native void nativeSetPhysicalSize(long nativePtr, int width, int height);
     private native void nativeGetSize(long nativePtr, int[] out);
+    private native float nativeGetScale(long nativePtr);
     private native void nativeSetSurface(long nativePtr, Surface surface);
+    private native void nativeSetWindowFocused(long nativePtr, boolean focused);
+    private native void nativeSetScreen(long nativePtr, long screenPtr);
+    private native void nativeSetFullscreen(long nativePtr, boolean fullscreen);
+    private native boolean nativeIsFullscreen(long nativePtr);
+    private native void nativeSetListener(long nativePtr, @Nullable ListenerHolder listener);
+    private native void nativeSetBackgroundColor(long nativePtr, float red, float green, float blue);
 }

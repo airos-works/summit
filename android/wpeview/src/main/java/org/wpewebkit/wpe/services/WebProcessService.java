@@ -32,7 +32,6 @@ import androidx.annotation.NonNull;
 
 import org.freedesktop.gstreamer.GStreamer;
 import org.wpewebkit.wpe.WPEProcessType;
-import org.wpewebkit.wpe.WPEVersions;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -53,15 +52,13 @@ public class WebProcessService extends WPEService {
 
         // android.os.Debug.waitForDebugger();
 
-        final String assetsVersion = WPEVersions.versionedAssets("web_process");
         Context context = getApplicationContext();
-        if (ServiceUtils.needAssets(context, assetsVersion)) {
-            ServiceUtils.copyFileOrDir(context, getAssets(), "gstreamer-1.0", true);
-            ServiceUtils.copyFileOrDir(context, getAssets(), "fontconfig/fonts.conf", false);
-            ServiceUtils.saveAssetsVersion(context, assetsVersion);
-        }
+        // GST_REGISTRY_UPDATE=no below makes GStreamer trust its registry of plugins, so it goes with the plugins.
+        File gstreamerRegistry = new File(context.getCacheDir(), "registry.bin");
+        ServiceUtils.installAssets(context, getAssets(), "gstreamer-1.0", true, gstreamerRegistry);
+        ServiceUtils.installAssets(context, getAssets(), "fontconfig", false);
 
-        List<String> envStrings = new ArrayList<>(46);
+        List<String> envStrings = new ArrayList<>();
         envStrings.add("FONTCONFIG_PATH");
         envStrings.add(new File(context.getFilesDir(), "fontconfig").getAbsolutePath());
 
@@ -70,6 +67,11 @@ public class WebProcessService extends WPEService {
         envStrings.add(gstreamerPluginPath);
         envStrings.add("GST_PLUGIN_SYSTEM_PATH");
         envStrings.add(gstreamerPluginPath);
+        // GStreamer ranks Android's audio decoders (amcaudiodec) above its own, but amcaudiodec outputs nothing
+        // for Opus (https://gitlab.freedesktop.org/gstreamer/gstreamer/-/issues/1208) and aborts on Vorbis.
+        // Audio is cheap to decode in software.
+        envStrings.add("GST_PLUGIN_FEATURE_RANK");
+        envStrings.add("opusdec:MAX,vorbisdec:MAX");
 
         envStrings.add("GIO_EXTRA_MODULES");
         envStrings.add(new File(context.getFilesDir(), "gio").getAbsolutePath());
@@ -95,7 +97,7 @@ public class WebProcessService extends WPEService {
         envStrings.add(cachePath);
 
         envStrings.add("GST_REGISTRY");
-        envStrings.add(new File(context.getCacheDir(), "registry.bin").getAbsolutePath());
+        envStrings.add(gstreamerRegistry.getAbsolutePath());
         envStrings.add("GST_REGISTRY_UPDATE");
         envStrings.add("no");
         envStrings.add("GST_REGISTRY_REUSE_PLUGIN_SCANNER");

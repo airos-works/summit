@@ -17,80 +17,134 @@
  */
 
 #include "JNI/JNI.h"
+#include "JNIMappings.h"
 #include "Logging.h"
 #include "WPEInputMethodContextAndroid.h"
 
+#include <vector>
 #include <wpe/wpe-platform.h>
 
 DECLARE_JNI_CLASS_SIGNATURE(JNIWPEInputMethodContext, "org/wpewebkit/wpe/WPEInputMethodContext");
-DECLARE_JNI_CLASS_SIGNATURE(
-    JNIWPEInputMethodContextFocusListener, "org/wpewebkit/wpe/WPEInputMethodContext$FocusListenerHolder");
+DECLARE_JNI_CLASS_SIGNATURE(JNIWPEInputMethodContextListener, "org/wpewebkit/wpe/WPEInputMethodContext$ListenerHolder");
 
 namespace WebKit {
 
-class JNIWPEInputMethodContextFocusListenerCache final : public JNI::TypedClass<JNIWPEInputMethodContextFocusListener> {
+class JNIWPEInputMethodContextListenerCache final : public JNI::TypedClass<JNIWPEInputMethodContextListener> {
 public:
-    JNIWPEInputMethodContextFocusListenerCache()
-        : JNI::TypedClass<JNIWPEInputMethodContextFocusListener>(true)
+    JNIWPEInputMethodContextListenerCache()
+        : JNI::TypedClass<JNIWPEInputMethodContextListener>(true)
         , m_onFocusIn(getMethod<void()>("onFocusIn"))
         , m_onFocusOut(getMethod<void()>("onFocusOut"))
+        , m_onPreeditReset(getMethod<void()>("onPreeditReset"))
+        , m_onContentTypeChanged(getMethod<void()>("onContentTypeChanged"))
     {
     }
 
-    void onFocusIn(JNIWPEInputMethodContextFocusListener listener) const
+    void onFocusIn(JNIWPEInputMethodContextListener listener) const
     {
         if (!m_onFocusIn.invoke(listener))
             Logging::logError("cannot call WPEInputMethodContext focus-in callback");
     }
 
-    void onFocusOut(JNIWPEInputMethodContextFocusListener listener) const
+    void onFocusOut(JNIWPEInputMethodContextListener listener) const
     {
         if (!m_onFocusOut.invoke(listener))
             Logging::logError("cannot call WPEInputMethodContext focus-out callback");
+    }
+
+    void onPreeditReset(JNIWPEInputMethodContextListener listener) const
+    {
+        if (!m_onPreeditReset.invoke(listener))
+            Logging::logError("cannot call WPEInputMethodContext preedit-reset callback");
+    }
+
+    void onContentTypeChanged(JNIWPEInputMethodContextListener listener) const
+    {
+        if (!m_onContentTypeChanged.invoke(listener))
+            Logging::logError("cannot call WPEInputMethodContext content-type callback");
     }
 
 private:
     // NOLINTBEGIN(cppcoreguidelines-avoid-const-or-ref-data-members)
     const JNI::Method<void()> m_onFocusIn;
     const JNI::Method<void()> m_onFocusOut;
+    const JNI::Method<void()> m_onPreeditReset;
+    const JNI::Method<void()> m_onContentTypeChanged;
     // NOLINTEND(cppcoreguidelines-avoid-const-or-ref-data-members)
 };
 
-const JNIWPEInputMethodContextFocusListenerCache& getJNIFocusListenerCache()
+static const JNIWPEInputMethodContextListenerCache& getJNIListenerCache()
 {
-    static const JNIWPEInputMethodContextFocusListenerCache s_singleton;
+    static const JNIWPEInputMethodContextListenerCache s_singleton;
     return s_singleton;
 }
 
 namespace {
 
-    struct FocusListenerHolder {
-        JNI::GlobalRef<JNIWPEInputMethodContextFocusListener> ref;
+    struct ListenerHolder {
+        JNI::GlobalRef<JNIWPEInputMethodContextListener> ref;
     };
 
-    GQuark focusListenerQuark()
+    GQuark listenerQuark()
     {
-        static GQuark quark = g_quark_from_static_string("wpe-im-context-android-focus-listener");
+        static GQuark quark = g_quark_from_static_string("wpe-im-context-android-listener");
         return quark;
     }
 
-    void destroyFocusListenerHolder(gpointer ptr) noexcept
+    void destroyListenerHolder(gpointer ptr) noexcept
     {
-        delete static_cast<FocusListenerHolder*>(ptr);
+        delete static_cast<ListenerHolder*>(ptr);
     }
 
     void onFocusInThunk(gpointer userData)
     {
-        auto* holder = static_cast<FocusListenerHolder*>(userData);
+        auto* holder = static_cast<ListenerHolder*>(userData);
         if (holder && holder->ref)
-            getJNIFocusListenerCache().onFocusIn(holder->ref.get());
+            getJNIListenerCache().onFocusIn(holder->ref.get());
     }
 
     void onFocusOutThunk(gpointer userData)
     {
-        auto* holder = static_cast<FocusListenerHolder*>(userData);
+        auto* holder = static_cast<ListenerHolder*>(userData);
         if (holder && holder->ref)
-            getJNIFocusListenerCache().onFocusOut(holder->ref.get());
+            getJNIListenerCache().onFocusOut(holder->ref.get());
+    }
+
+    void onPreeditResetThunk(gpointer userData)
+    {
+        auto* holder = static_cast<ListenerHolder*>(userData);
+        if (holder && holder->ref)
+            getJNIListenerCache().onPreeditReset(holder->ref.get());
+    }
+
+    void onContentTypeChangedThunk(gpointer userData)
+    {
+        auto* holder = static_cast<ListenerHolder*>(userData);
+        if (holder && holder->ref)
+            getJNIListenerCache().onContentTypeChanged(holder->ref.get());
+    }
+
+    // GetStringUTFChars returns modified UTF-8 (CESU-8), which mangles supplementary characters
+    // like emoji. Go through UTF-16 + g_utf16_to_utf8 to produce standard UTF-8 for WebKit.
+    // g_utf16_to_utf8 fails on an unpaired surrogate (an input method can split an emoji), so
+    // replace those with U+FFFD first rather than lose the whole text.
+    gchar* toUTF8(JNIEnv* env, jstring text)
+    {
+        const jsize len = env->GetStringLength(text);
+        // g_utf16_to_utf8 gives NULL for an empty buffer, whose data() may be null.
+        if (!len)
+            return g_strdup("");
+        std::vector<gunichar2> units(static_cast<size_t>(len));
+        env->GetStringRegion(text, 0, len, reinterpret_cast<jchar*>(units.data()));
+        auto isLead = [](gunichar2 unit) { return unit >= 0xD800 && unit <= 0xDBFF; };
+        auto isTrail = [](gunichar2 unit) { return unit >= 0xDC00 && unit <= 0xDFFF; };
+        for (size_t i = 0; i < units.size(); ++i) {
+            if (isLead(units[i]) && i + 1 < units.size() && isTrail(units[i + 1]))
+                ++i;
+            else if (isLead(units[i]) || isTrail(units[i]))
+                units[i] = 0xFFFD;
+        }
+        return g_utf16_to_utf8(units.data(), len, nullptr, nullptr, nullptr);
     }
 
 } // namespace
@@ -102,22 +156,31 @@ public:
     {
         registerNativeMethods(JNI::NativeMethod<void(jlong, jstring)>("nativeCommitText", nativeCommitText),
             JNI::NativeMethod<void(jlong, jint, jint)>("nativeDeleteSurrounding", nativeDeleteSurrounding),
-            JNI::NativeMethod<void(jlong, JNIWPEInputMethodContextFocusListener)>(
-                "nativeSetFocusListener", nativeSetFocusListener),
+            JNI::NativeMethod<void(jlong, jstring, jint)>("nativeSetPreedit", nativeSetPreedit),
+            JNI::NativeMethod<void(jlong)>("nativeFinishPreedit", nativeFinishPreedit),
+            JNI::NativeMethod<void(jlong, JNIWPEInputMethodContextListener)>("nativeSetListener", nativeSetListener),
+            JNI::NativeMethod<jint(jlong)>("nativeGetInputPurpose", nativeGetInputPurpose),
+            JNI::NativeMethod<jint(jlong)>("nativeGetInputHints", nativeGetInputHints),
             JNI::StaticNativeMethod<jlong(jlong)>("nativeGetForView", nativeGetForView));
     }
 
 private:
     static void nativeCommitText(JNIEnv* env, jobject, jlong nativePtr, jstring text)
     {
-        // GetStringUTFChars returns modified UTF-8 (CESU-8), which mangles supplementary characters
-        // like emoji. Go through UTF-16 + g_utf16_to_utf8 to produce standard UTF-8 for WebKit.
-        const jchar* chars = env->GetStringChars(text, nullptr);
-        const jsize len = env->GetStringLength(text);
-        g_autofree gchar* utf8
-            = g_utf16_to_utf8(reinterpret_cast<const gunichar2*>(chars), len, nullptr, nullptr, nullptr);
-        env->ReleaseStringChars(text, chars);
+        g_autofree gchar* utf8 = toUTF8(env, text);
         wpe_input_method_context_android_commit_text(JNI::from_jlong<WPEInputMethodContextAndroid>(nativePtr), utf8);
+    }
+
+    static void nativeSetPreedit(JNIEnv* env, jobject, jlong nativePtr, jstring text, jint cursorOffset)
+    {
+        g_autofree gchar* utf8 = toUTF8(env, text);
+        wpe_input_method_context_android_set_preedit(
+            JNI::from_jlong<WPEInputMethodContextAndroid>(nativePtr), utf8, static_cast<unsigned int>(cursorOffset));
+    }
+
+    static void nativeFinishPreedit(JNIEnv*, jobject, jlong nativePtr)
+    {
+        wpe_input_method_context_android_finish_preedit(JNI::from_jlong<WPEInputMethodContextAndroid>(nativePtr));
     }
 
     static void nativeDeleteSurrounding(JNIEnv*, jobject, jlong nativePtr, jint offset, jint count)
@@ -126,20 +189,34 @@ private:
             JNI::from_jlong<WPEInputMethodContextAndroid>(nativePtr), offset, static_cast<unsigned int>(count));
     }
 
-    static void nativeSetFocusListener(
-        JNIEnv* env, jobject, jlong nativePtr, JNIWPEInputMethodContextFocusListener listener)
+    static void nativeSetListener(JNIEnv* env, jobject, jlong nativePtr, JNIWPEInputMethodContextListener listener)
     {
         auto* context = JNI::from_jlong<WPEInputMethodContextAndroid>(nativePtr);
         if (listener) {
-            auto* holder
-                = new FocusListenerHolder {JNI::GlobalRef<JNIWPEInputMethodContextFocusListener>(env, listener)};
+            auto* holder = new ListenerHolder {JNI::GlobalRef<JNIWPEInputMethodContextListener>(env, listener)};
             // qdata owns the holder: the destroy notify runs on context dispose and on listener replacement.
-            g_object_set_qdata_full(G_OBJECT(context), focusListenerQuark(), holder, destroyFocusListenerHolder);
+            g_object_set_qdata_full(G_OBJECT(context), listenerQuark(), holder, destroyListenerHolder);
             wpe_input_method_context_android_set_focus_callbacks(context, onFocusInThunk, onFocusOutThunk, holder);
+            wpe_input_method_context_android_set_reset_callback(context, onPreeditResetThunk, holder);
+            wpe_input_method_context_android_set_content_type_callback(context, onContentTypeChangedThunk, holder);
         } else {
             wpe_input_method_context_android_set_focus_callbacks(context, nullptr, nullptr, nullptr);
-            g_object_set_qdata(G_OBJECT(context), focusListenerQuark(), nullptr);
+            wpe_input_method_context_android_set_reset_callback(context, nullptr, nullptr);
+            wpe_input_method_context_android_set_content_type_callback(context, nullptr, nullptr);
+            g_object_set_qdata(G_OBJECT(context), listenerQuark(), nullptr);
         }
+    }
+
+    static jint nativeGetInputPurpose(JNIEnv*, jobject, jlong nativePtr)
+    {
+        return static_cast<jint>(wpe_input_method_context_get_input_purpose(
+            WPE_INPUT_METHOD_CONTEXT(JNI::from_jlong<WPEInputMethodContextAndroid>(nativePtr))));
+    }
+
+    static jint nativeGetInputHints(JNIEnv*, jobject, jlong nativePtr)
+    {
+        return static_cast<jint>(wpe_input_method_context_get_input_hints(
+            WPE_INPUT_METHOD_CONTEXT(JNI::from_jlong<WPEInputMethodContextAndroid>(nativePtr))));
     }
 
     static jlong nativeGetForView(JNIEnv*, jclass, jlong viewPtr)
@@ -148,7 +225,7 @@ private:
     }
 };
 
-const JNIWPEInputMethodContextCache& getJNIWPEInputMethodContextCache()
+static const JNIWPEInputMethodContextCache& getJNIWPEInputMethodContextCache()
 {
     static const JNIWPEInputMethodContextCache s_singleton;
     return s_singleton;
@@ -156,7 +233,7 @@ const JNIWPEInputMethodContextCache& getJNIWPEInputMethodContextCache()
 
 void configureWPEInputMethodContextJNIMappings()
 {
-    getJNIFocusListenerCache();
+    getJNIListenerCache();
     getJNIWPEInputMethodContextCache();
 }
 

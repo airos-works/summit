@@ -29,13 +29,17 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.ParcelFileDescriptor;
+import android.os.RemoteException;
 import android.util.Log;
 
 import androidx.annotation.NonNull;
 
 import org.wpewebkit.wpe.IWPEService;
 import org.wpewebkit.wpe.IWPEServiceHost;
+import org.wpewebkit.wpe.LocalNetworkAccess;
 import org.wpewebkit.wpe.WPEProcessType;
+
+import java.io.IOException;
 
 public final class WPEServiceConnection implements ServiceConnection {
     private static final String LOGTAG = "WPEServiceConnection";
@@ -43,6 +47,11 @@ public final class WPEServiceConnection implements ServiceConnection {
     private final long pid;
     private final WPEProcessType processType;
     private ParcelFileDescriptor parcelFd;
+    // Whether the service connected, so that its process is watched, and whether that process ended. The binder is
+    // kept until then, as Android drops the death link of a binder nobody holds.
+    private boolean connected;
+    private boolean processGone;
+    private IBinder serviceBinder;
 
     protected final WPEServiceConnectionListener listener;
     protected final Handler handler = new Handler(Looper.myLooper());
@@ -58,19 +67,44 @@ public final class WPEServiceConnection implements ServiceConnection {
     public long getPid() { return pid; }
     public @NonNull WPEProcessType getProcessType() { return processType; }
 
+    /**
+     * Whether the process of the service may still be running: the service connected, and its process has not ended
+     * yet. Android starts the service again in a new process only once that one has ended.
+     */
+    public boolean mayHaveProcess() { return connected && !processGone; }
+
+    /** Whether the service connected, from when the end of its process is followed. */
+    public boolean isConnected() { return connected; }
+
     @Override
     public void onServiceConnected(@NonNull ComponentName name, IBinder service) {
-        if (parcelFd == null) {
+        if (connected) {
             Log.w(LOGTAG, "onServiceConnected() for " + name + " called more than once");
+            return;
+        }
+
+        connected = true;
+        try {
+            // Called on a binder thread.
+            service.linkToDeath(() -> handler.post(this::onProcessGone), 0);
+            serviceBinder = service;
+        } catch (RemoteException e) {
+            // The process is already gone.
+            processGone = true;
+        }
+
+        if (parcelFd == null) {
+            Log.d(LOGTAG, "onServiceConnected() for " + name + " (pid: " + pid + ") after dispose()");
+            listener.onDisposedServiceConnected(this);
             return;
         }
 
         Log.d(LOGTAG, "onServiceConnected() for " + name + " (pid: " + pid + ", fd: " + parcelFd.getFd() + ")");
         IWPEService wpeService = IWPEService.Stub.asInterface(service);
-
+        ParcelFileDescriptor fd = parcelFd;
         Bundle bundle = new Bundle();
         bundle.putLong("pid", pid);
-        bundle.putParcelable("fd", parcelFd);
+        bundle.putParcelable("fd", fd);
         parcelFd = null;
 
         IWPEServiceHost serviceHost = new IWPEServiceHost.Stub() {
@@ -81,12 +115,50 @@ public final class WPEServiceConnection implements ServiceConnection {
                 else
                     handler.post(() -> listener.onCleanExit(WPEServiceConnection.this));
             }
+
+            @Override
+            public void notifyLocalNetworkBlocked(String host) {
+                LocalNetworkAccess.getInstance().onBlocked(host);
+            }
         };
 
         try {
             wpeService.connect(bundle, serviceHost);
         } catch (android.os.RemoteException e) {
             Log.e(LOGTAG, "Failed to connect to service", e);
+        } finally {
+            // The service has its own copy of the socket now. Keeping this one open would keep the connection open
+            // after the service's process ends, as when Android ends it, and WebKit would not know that it is gone.
+            closeSocket(fd);
+        }
+    }
+
+    // Package-private: called from the DeathRecipient lambda (avoids a synthetic accessor).
+    void onProcessGone() {
+        if (processGone)
+            return;
+        processGone = true;
+        serviceBinder = null;
+        Log.d(LOGTAG, "The process of the service ended (pid: " + pid + ")");
+        listener.onProcessGone(this);
+    }
+
+    /**
+     * Lets go of the socket of a service that is no longer needed before it connected. If it connects later, the
+     * listener is told so with onDisposedServiceConnected(), and the service gets no socket.
+     */
+    public void dispose() {
+        if (parcelFd != null) {
+            closeSocket(parcelFd);
+            parcelFd = null;
+        }
+    }
+
+    private static void closeSocket(@NonNull ParcelFileDescriptor fd) {
+        try {
+            fd.close();
+        } catch (IOException e) {
+            Log.w(LOGTAG, "Cannot close the socket of the service", e);
         }
     }
 

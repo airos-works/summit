@@ -5,6 +5,7 @@
 // static natives of works.airos.summit.core.SummitCore; structured results are
 // JSON strings.
 #include "core/Address.h"
+#include "core/LoadError.h"
 #include "core/Profile.h"
 #include "core/ReadingList.h"
 #include "core/Suggest.h"
@@ -359,4 +360,48 @@ SUMMIT_JNI(jstring, mobileUserAgent)(JNIEnv* env, jclass)
 SUMMIT_JNI(jstring, shortAddress)(JNIEnv* env, jclass, jstring url)
 {
     return ToJava(env, summit::ShortAddress(ToString(env, url)));
+}
+
+// A site's saved answer for a permission (Profile::sitePermissions, the same
+// list air/OS's Preferences › Site Permissions edits): "allow", "deny" or "".
+SUMMIT_JNI(jstring, sitePermission)(JNIEnv* env, jclass, jstring permissionString, jstring originString)
+{
+    std::lock_guard lock(gLock);
+    auto permission = gProfile.sitePermissions.find(ToString(env, permissionString));
+    if (permission == gProfile.sitePermissions.end())
+        return ToJava(env, "");
+    auto entry = permission->second.find(ToString(env, originString));
+    if (entry == permission->second.end())
+        return ToJava(env, "");
+    return ToJava(env, entry->second ? "allow" : "deny");
+}
+
+// Saves (or, with "", forgets) an answer. Returns false for permissions and
+// origins the profile does not keep.
+SUMMIT_JNI(jboolean, setSitePermission)(JNIEnv* env, jclass, jstring permission, jstring origin, jstring answer)
+{
+    std::lock_guard lock(gLock);
+    std::string value = ToString(env, answer);
+    std::optional<bool> allowed;
+    if (value == "allow") allowed = true;
+    else if (value == "deny") allowed = false;
+    return gProfile.SetSitePermission(ToString(env, permission), ToString(env, origin), allowed);
+}
+
+// The error page's text for a failed load, the same words air/OS's Summit
+// uses (core/LoadError.h). kind: "host", "refused", "reset", "timeout",
+// "offline", "secure" or anything else. Returns {"title", "explanation"}.
+SUMMIT_JNI(jstring, describeLoadFailure)(JNIEnv* env, jclass, jstring kindString, jstring url, jstring description)
+{
+    std::string kind = ToString(env, kindString);
+    summit::LoadFailure failure = summit::LoadFailure::Other;
+    if (kind == "host") failure = summit::LoadFailure::HostNotFound;
+    else if (kind == "refused") failure = summit::LoadFailure::Refused;
+    else if (kind == "reset") failure = summit::LoadFailure::Reset;
+    else if (kind == "timeout") failure = summit::LoadFailure::TimedOut;
+    else if (kind == "offline") failure = summit::LoadFailure::Offline;
+    else if (kind == "secure") failure = summit::LoadFailure::Secure;
+    auto text = summit::DescribeLoadFailure(failure, ToString(env, url), ToString(env, description));
+    json result = {{"title", text.title}, {"explanation", text.explanation}};
+    return ToJava(env, result.dump());
 }

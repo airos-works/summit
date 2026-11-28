@@ -17,6 +17,7 @@
  */
 
 #include "JNI/JNI.h"
+#include "JNIMappings.h"
 #include "Logging.h"
 
 #include <wpe/webkit.h>
@@ -50,13 +51,42 @@ public:
             JNI::NativeMethod<void(jlong, jboolean)>(
                 "nativeSetDeveloperExtrasEnabled", nativeSetDeveloperExtrasEnabled),
             JNI::NativeMethod<jboolean(jlong)>("nativeGetDisableWebSecurity", nativeGetDisableWebSecurity),
-            JNI::NativeMethod<void(jlong, jboolean)>("nativeSetDisableWebSecurity", nativeSetDisableWebSecurity));
+            JNI::NativeMethod<void(jlong, jboolean)>("nativeSetDisableWebSecurity", nativeSetDisableWebSecurity),
+            JNI::NativeMethod<jboolean(jlong)>(
+                "nativeGetAudiblePlaybackRequiresPageVisibility", nativeGetAudiblePlaybackRequiresPageVisibility),
+            JNI::NativeMethod<void(jlong, jboolean)>(
+                "nativeSetAudiblePlaybackRequiresPageVisibility", nativeSetAudiblePlaybackRequiresPageVisibility),
+            JNI::NativeMethod<jboolean(jlong)>("nativeGetZoomTextOnly", nativeGetZoomTextOnly),
+            JNI::NativeMethod<void(jlong, jboolean)>("nativeSetZoomTextOnly", nativeSetZoomTextOnly));
     }
 
 private:
+    // WPEView does not show the notifications of service workers yet: WebKit would send them to a notification service
+    // of desktop systems, which Android does not have, and resolve the page's promise as if they showed. Without the
+    // feature, pages find registration.showNotification() missing, as it is, and those that check for it can show
+    // their notifications with new Notification() instead.
     static jlong nativeInit(JNIEnv*, jobject)
     {
-        return reinterpret_cast<jlong>(webkit_settings_new());
+        auto* settings = webkit_settings_new();
+        if (WebKitFeature* feature = notificationEvent())
+            webkit_settings_set_feature_enabled(settings, feature, FALSE);
+        return reinterpret_cast<jlong>(settings);
+    }
+
+    // The WebKit preference for ServiceWorkerRegistration.showNotification() and the notification events of service
+    // workers.
+    static WebKitFeature* notificationEvent()
+    {
+        static WebKitFeature* const feature = [] {
+            g_autoptr(WebKitFeatureList) features = webkit_settings_get_all_features();
+            WebKitFeature* found = webkit_feature_list_find(features, "NotificationEvent");
+            if (!found) {
+                Logging::logError("WebKitSettings: WebKit has no NotificationEvent feature");
+                return static_cast<WebKitFeature*>(nullptr);
+            }
+            return webkit_feature_ref(found);
+        }();
+        return feature;
     }
 
     static void nativeDestroy(JNIEnv*, jobject, jlong settingsPtr)
@@ -64,10 +94,11 @@ private:
         g_object_unref(JNI::from_jlong<WebKitSettings>(settingsPtr));
     }
 
-    static jstring nativeGetUserAgentString(JNIEnv*, jobject, jlong settingsPtr)
+    static jstring nativeGetUserAgentString(JNIEnv* env, jobject, jlong settingsPtr)
     {
-        return static_cast<jstring>(
-            JNI::String(webkit_settings_get_user_agent(JNI::from_jlong<WebKitSettings>(settingsPtr))));
+        // Not a JNI::String: it deletes its reference when it goes away, before Java gets the result.
+        const char* userAgent = webkit_settings_get_user_agent(JNI::from_jlong<WebKitSettings>(settingsPtr));
+        return userAgent ? env->NewStringUTF(userAgent) : nullptr;
     }
 
     static void nativeSetUserAgentString(JNIEnv*, jobject, jlong settingsPtr, jstring userAgent)
@@ -92,12 +123,44 @@ private:
     DEFINE_BOOL_SETTER_GETTER(AllowFileAccessFromFileURLs, allow_file_access_from_file_urls)
     DEFINE_BOOL_SETTER_GETTER(DeveloperExtrasEnabled, enable_developer_extras)
     DEFINE_BOOL_SETTER_GETTER(DisableWebSecurity, disable_web_security)
+    DEFINE_BOOL_SETTER_GETTER(ZoomTextOnly, zoom_text_only)
 
 #undef DEFINE_BOOL_SETTER_GETTER
     // NOLINTEND(cppcoreguidelines-macro-usage)
+
+    // A WebKit preference for embedders, without a webkit_settings function of its own: WebKit pauses the
+    // audible media of a hidden page, resumes it when the page is shown, and does not let a hidden page start it.
+    static WebKitFeature* requiresPageVisibilityToPlayAudio()
+    {
+        static WebKitFeature* const feature = [] {
+            g_autoptr(WebKitFeatureList) features = webkit_settings_get_all_features();
+            WebKitFeature* found = webkit_feature_list_find(features, "RequiresPageVisibilityToPlayAudio");
+            if (!found) {
+                Logging::logError("WebKitSettings: WebKit has no RequiresPageVisibilityToPlayAudio feature");
+                return static_cast<WebKitFeature*>(nullptr);
+            }
+            return webkit_feature_ref(found);
+        }();
+        return feature;
+    }
+
+    static jboolean nativeGetAudiblePlaybackRequiresPageVisibility(JNIEnv*, jobject, jlong settingsPtr)
+    {
+        WebKitFeature* feature = requiresPageVisibilityToPlayAudio();
+        return static_cast<jboolean>(
+            feature && webkit_settings_get_feature_enabled(JNI::from_jlong<WebKitSettings>(settingsPtr), feature));
+    }
+
+    static void nativeSetAudiblePlaybackRequiresPageVisibility(JNIEnv*, jobject, jlong settingsPtr, jboolean flag)
+    {
+        if (WebKitFeature* feature = requiresPageVisibilityToPlayAudio()) {
+            webkit_settings_set_feature_enabled(
+                JNI::from_jlong<WebKitSettings>(settingsPtr), feature, static_cast<gboolean>(flag));
+        }
+    }
 };
 
-const JNIWebKitSettingsCache& getJNIWebKitSettingsCache()
+static const JNIWebKitSettingsCache& getJNIWebKitSettingsCache()
 {
     static const JNIWebKitSettingsCache s_singleton;
     return s_singleton;

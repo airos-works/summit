@@ -3,6 +3,7 @@ package org.wpewebkit.wpe.httpserver;
 import android.util.Log;
 
 import androidx.annotation.GuardedBy;
+import androidx.annotation.Nullable;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -12,7 +13,10 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketException;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
+import javax.net.ServerSocketFactory;
 
 public class HttpServer {
     private static final String TAG = "HttpServer";
@@ -23,16 +27,30 @@ public class HttpServer {
 
     private final Object lock = new Object();
     private final Map<String, HttpResponse> responseMap = new HashMap<>();
+    private final Map<String, HttpRequest> requestMap = new HashMap<>();
 
-    private HttpServer(int port) throws Exception {
-        serverThread = new ServerThread(port);
+    private final String scheme;
+
+    private HttpServer(int port, ServerSocketFactory socketFactory, String scheme) throws Exception {
+        this.scheme = scheme;
+        serverThread = new ServerThread(port, socketFactory);
         setServerHost("localhost");
         serverThread.start();
 
         synchronized (serverThreadStarted) { serverThreadStarted.wait(10000); }
     }
 
-    public static HttpServer start() throws Exception { return new HttpServer(0); }
+    public static HttpServer start() throws Exception {
+        return new HttpServer(0, ServerSocketFactory.getDefault(), "http");
+    }
+
+    /**
+     * Starts a server that answers over TLS, as https addresses need. Its certificate, for localhost and 127.0.0.1, is
+     * signed by no authority, so the session of the pages must ignore TLS errors.
+     */
+    public static HttpServer startSecure() throws Exception {
+        return new HttpServer(0, TestCertificate.serverSocketFactory(), "https");
+    }
 
     public void shutdown() {
         try {
@@ -48,7 +66,7 @@ public class HttpServer {
     private void setServerHost(String hostname) {
         try {
             serverUri =
-                new java.net.URI("http", null, hostname, serverThread.serverSocket.getLocalPort(), null, null, null)
+                new java.net.URI(scheme, null, hostname, serverThread.serverSocket.getLocalPort(), null, null, null)
                     .toString();
         } catch (java.net.URISyntaxException e) {
             Log.wtf(TAG, e.getMessage());
@@ -58,6 +76,12 @@ public class HttpServer {
     public String setResponse(String requestPath, HttpResponse response) {
         synchronized (lock) { responseMap.put(requestPath, response); }
         return serverUri + requestPath;
+    }
+
+    /** The last request the server got for the path, or null if it got none. */
+    @Nullable
+    public HttpRequest getLastRequest(String requestPath) {
+        synchronized (lock) { return requestMap.get(requestPath); }
     }
 
     private class ServerThread extends Thread {
@@ -70,19 +94,20 @@ public class HttpServer {
         private boolean isCancelled;
 
         @GuardedBy("lock")
-        private Socket currentRequestSocket;
+        private final Set<Socket> openSockets = new HashSet<>();
 
-        public ServerThread(int port) throws Exception {
+        public ServerThread(int port, ServerSocketFactory socketFactory) throws Exception {
             int retryCount = 3;
             int delay = 1000; // Initial delay in milliseconds
 
-            tryToCreateServerSocket(port, retryCount, delay);
+            tryToCreateServerSocket(port, socketFactory, retryCount, delay);
         }
 
-        private void tryToCreateServerSocket(int port, int retryCount, int delay) throws Exception {
+        private void tryToCreateServerSocket(int port, ServerSocketFactory socketFactory, int retryCount, int delay)
+            throws Exception {
             while (retryCount > 0) {
                 try {
-                    serverSocket = new ServerSocket(port);
+                    serverSocket = socketFactory.createServerSocket(port);
                     Log.i(TAG, "ServerSocket created successfully on port: " + port);
                     return;
                 } catch (IOException e) {
@@ -108,9 +133,9 @@ public class HttpServer {
         public void cancelAllRequests() throws IOException {
             synchronized (lock) {
                 isCancelled = true;
-                if (currentRequestSocket != null) {
-                    closeSocket(currentRequestSocket);
-                }
+                for (Socket socket : openSockets)
+                    closeSocket(socket);
+                openSockets.clear();
             }
             cleanUp();
         }
@@ -123,7 +148,12 @@ public class HttpServer {
                 while (!isCancelled()) {
                     try {
                         Socket socket = serverSocket.accept();
-                        handleSocketConnection(socket);
+                        synchronized (lock) { openSockets.add(socket); }
+                        // Each connection has its own thread, so that one that sends no request, such as a connection
+                        // that WebKit opens ahead of time, does not hold up the others.
+                        Thread connectionThread = new Thread(() -> handleSocketConnection(socket), TAG);
+                        connectionThread.setDaemon(true);
+                        connectionThread.start();
                     } catch (SocketException e) {
                         if (isCancelled()) {
                             Log.i(TAG, "Server thread cancelled, exiting gracefully.");
@@ -143,9 +173,6 @@ public class HttpServer {
         private void handleSocketConnection(Socket socket) {
             try (InputStream inputStream = socket.getInputStream();
                  PrintStream outputStream = new PrintStream(socket.getOutputStream())) {
-
-                synchronized (lock) { currentRequestSocket = socket; }
-
                 HttpRequest request = HttpRequest.parse(inputStream);
                 handleRequest(request, outputStream);
 
@@ -153,6 +180,7 @@ public class HttpServer {
                 Log.e(TAG, "Error processing request: " + e.getMessage(), e);
             } finally {
                 closeSocket(socket);
+                synchronized (lock) { openSockets.remove(socket); }
             }
         }
 
@@ -178,7 +206,11 @@ public class HttpServer {
 
         private void handleRequest(HttpRequest request, PrintStream stream) throws IOException {
             HttpResponse response;
-            synchronized (lock) { response = responseMap.get(request.getURI()); }
+            // The server's lock, which guards the responses, not this thread's.
+            synchronized (HttpServer.this.lock) {
+                requestMap.put(request.getURI(), request);
+                response = responseMap.get(request.getURI());
+            }
             if (response != null) {
                 response.send(stream);
             }

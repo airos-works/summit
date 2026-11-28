@@ -19,12 +19,16 @@
 
 package org.wpewebkit.wpe;
 
+import android.content.ServiceConnection;
+
 import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
 
 import org.wpewebkit.wpe.services.WPEServiceConnection;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.function.Consumer;
 
 final class AuxiliaryProcessesContainer {
     private static final int MAX_AUX_PROCESSES = org.wpewebkit.wpe.services.WPEServices.MAX_AUX_PROCESSES;
@@ -33,6 +37,11 @@ final class AuxiliaryProcessesContainer {
         new AuxiliaryProcess[WPEProcessType.values().length][MAX_AUX_PROCESSES];
     private final Map<Long, AuxiliaryProcess> pidToProcessMap = new HashMap<>();
     private final int[] firstAvailableSlot = new int[WPEProcessType.values().length];
+    private final Consumer<ServiceConnection> unbindService;
+
+    AuxiliaryProcessesContainer(@NonNull Consumer<ServiceConnection> unbindService) {
+        this.unbindService = unbindService;
+    }
 
     public int getFirstAvailableSlot(@NonNull WPEProcessType processType) {
         return firstAvailableSlot[processType.getValue()];
@@ -55,13 +64,52 @@ final class AuxiliaryProcessesContainer {
         }
     }
 
+    // Unbinds the service of a process. Its slot stays taken until the process of the service has ended (see
+    // onProcessGone()), as binding the same service before would reach the process that is ending, and Android would
+    // only start a new one when it restarts the service. A service that has not connected yet stays bound until it
+    // connects (see onDisposedServiceConnected()): Android may have made it already, and unbinding it would end its
+    // process, whose end can only be followed once the service connected.
     public void unregister(long pid) {
         AuxiliaryProcess process = pidToProcessMap.remove(pid);
         if (process == null)
             return;
 
-        process.terminate();
+        process.getServiceConnection().dispose();
+        if (process.getServiceConnection().isConnected())
+            unbind(process);
+    }
 
+    public void onDisposedServiceConnected(@NonNull WPEServiceConnection connection) {
+        AuxiliaryProcess process = findUnregisteredProcess(connection);
+        if (process != null)
+            unbind(process);
+    }
+
+    public void onProcessGone(@NonNull WPEServiceConnection connection) {
+        // A process still registered is unregistered when its service disconnects, which releases its slot.
+        AuxiliaryProcess process = findUnregisteredProcess(connection);
+        if (process != null)
+            releaseSlot(process);
+    }
+
+    private void unbind(@NonNull AuxiliaryProcess process) {
+        WPEServiceConnection connection = process.getServiceConnection();
+        unbindService.accept(connection);
+        if (!connection.mayHaveProcess())
+            releaseSlot(process);
+    }
+
+    // The process of a connection that was unregistered and still holds its slot.
+    private @Nullable AuxiliaryProcess findUnregisteredProcess(@NonNull WPEServiceConnection connection) {
+        for (AuxiliaryProcess process : processes[connection.getProcessType().getValue()]) {
+            if (process != null && process.getServiceConnection() == connection &&
+                pidToProcessMap.get(connection.getPid()) != process)
+                return process;
+        }
+        return null;
+    }
+
+    private void releaseSlot(@NonNull AuxiliaryProcess process) {
         int typeIdx = process.getProcessType().getValue();
         processes[typeIdx][process.getProcessSlot()] = null;
         firstAvailableSlot[typeIdx] = Math.min(process.getProcessSlot(), firstAvailableSlot[typeIdx]);
@@ -78,8 +126,8 @@ final class AuxiliaryProcessesContainer {
 
         public int getProcessSlot() { return processSlot; }
 
-        public WPEProcessType getProcessType() { return serviceConnection.getProcessType(); }
+        public @NonNull WPEServiceConnection getServiceConnection() { return serviceConnection; }
 
-        public void terminate() { WPERuntime.getInstance().getApplicationContext().unbindService(serviceConnection); }
+        public WPEProcessType getProcessType() { return serviceConnection.getProcessType(); }
     }
 }

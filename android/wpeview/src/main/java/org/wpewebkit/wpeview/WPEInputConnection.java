@@ -30,28 +30,39 @@ import org.wpewebkit.wpe.WPEInputMethodContext;
  * Bridges Android IME input to WebKit by translating BaseInputConnection callbacks into
  * WPEInputMethodContext operations. deleteSurroundingText is split into before/after halves
  * because WPE's "delete-surrounding" signal is single-sided; sendKeyEvent goes through the parent
- * WebView so IME-synthesised hardware keys follow the same path as physical key presses.
+ * WebView so IME-synthesised hardware keys follow the same path as physical key presses. Composing
+ * text becomes a WebKit preedit, so the page shows it as a composition rather than as final text.
+ * A connection goes to the page that the WebView showed when it was made: once that page leaves the WebView, its
+ * calls do nothing, until the input method asks for a new connection.
  */
 public class WPEInputConnection extends BaseInputConnection {
     private final WebView webView;
     private final WPEInputMethodContext imContext;
+    private final int pageGeneration;
 
     public WPEInputConnection(@NonNull WebView webView, boolean fullEditor, @NonNull WPEInputMethodContext imContext) {
         super(webView, fullEditor);
         this.webView = webView;
         this.imContext = imContext;
+        this.pageGeneration = webView.getPageGeneration();
     }
+
+    // Whether the page that the connection was made for is still the one the WebView shows.
+    private boolean isCurrent() { return webView.isInputConnectionCurrent(pageGeneration); }
 
     @Override
     public boolean commitText(@Nullable CharSequence text, int newCursorPosition) {
-        if (text == null || text.length() == 0)
-            return true;
-        imContext.commitText(text.toString());
+        if (!isCurrent())
+            return false;
+        // Empty text still matters while composing: it replaces the composing text with nothing.
+        imContext.commitText(text != null ? text.toString() : "");
         return true;
     }
 
     @Override
     public boolean deleteSurroundingText(int beforeLength, int afterLength) {
+        if (!isCurrent())
+            return false;
         // Java char units per BaseInputConnection contract: supplementary chars count as 2.
         if (beforeLength > 0)
             imContext.deleteSurrounding(-beforeLength, beforeLength);
@@ -69,17 +80,32 @@ public class WPEInputConnection extends BaseInputConnection {
 
     @Override
     public boolean setComposingText(@Nullable CharSequence text, int newCursorPosition) {
-        // Preedit is not wired through WPE yet; commit as final text.
-        return commitText(text, newCursorPosition);
-    }
-
-    @Override
-    public boolean finishComposingText() {
+        if (!isCurrent())
+            return false;
+        String composing = text != null ? text.toString() : "";
+        imContext.setPreedit(composing, preeditCursorOffset(composing.length(), newCursorPosition));
         return true;
     }
 
     @Override
+    public boolean finishComposingText() {
+        if (!isCurrent())
+            return false;
+        imContext.finishPreedit();
+        return true;
+    }
+
+    /**
+     * Turns InputConnection's newCursorPosition into an offset in the preedit. A positive one is at or after the end
+     * of the composing text, any other at or before its start, and WebKit keeps the caret inside the preedit, so the
+     * caret ends up at the nearest end.
+     */
+    private static int preeditCursorOffset(int length, int newCursorPosition) {
+        return newCursorPosition > 0 ? length : 0;
+    }
+
+    @Override
     public boolean sendKeyEvent(@NonNull KeyEvent event) {
-        return webView.dispatchKeyEvent(event);
+        return isCurrent() && webView.dispatchKeyEvent(event);
     }
 }

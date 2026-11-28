@@ -79,17 +79,21 @@ private enum class Panel { Page, Tabs, Library, Settings }
  * the top, like the desktop.
  */
 @Composable
-fun BrowserScreen(browser: Browser, onExit: () -> Unit) {
+fun BrowserScreen(browser: Browser, onExit: () -> Unit, onFullscreen: (Boolean) -> Unit) {
   val tab = browser.selected
+  val fullscreen = browser.fullscreen
+  LaunchedEffect(fullscreen) { onFullscreen(fullscreen) }
   var panel by remember { mutableStateOf(Panel.Page) }
   var menuOpen by remember { mutableStateOf(false) }
   var editing by remember { mutableStateOf(false) }
 
   BackHandler(enabled = panel != Panel.Page || menuOpen || editing || tab?.canGoBack == true || tab != null) {
     when {
+      fullscreen -> browser.exitFullscreen()
       menuOpen -> menuOpen = false
       panel != Panel.Page -> panel = Panel.Page
-      tab?.canGoBack == true -> tab.webView?.goBack()
+      tab?.canGoBack == true -> tab.page?.goBack()
+      tab != null && browser.closeToOpener(tab) -> Unit
       else -> onExit()
     }
   }
@@ -98,6 +102,10 @@ fun BrowserScreen(browser: Browser, onExit: () -> Unit) {
     Surface(color = MaterialTheme.colorScheme.surface, modifier = Modifier.fillMaxSize()) {
       BoxWithConstraints(Modifier.fillMaxSize()) {
         val wide = maxWidth >= 600.dp
+        if (fullscreen) {
+          PageHost(browser)
+          return@BoxWithConstraints
+        }
         Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().imePadding()) {
           when (panel) {
             Panel.Tabs -> TabSwitcher(browser, columns = if (wide) 4 else 2, onDone = { panel = Panel.Page })
@@ -117,7 +125,8 @@ fun BrowserScreen(browser: Browser, onExit: () -> Unit) {
               }
               Progress(tab)
               Box(Modifier.weight(1f).fillMaxWidth()) {
-                PageHost(tab)
+                PageHost(browser)
+                if (tab?.crashed == true) Crashed(tab)
               }
               if (!wide && !editing) {
                 BottomBar(browser, tab, onTabs = {
@@ -128,6 +137,7 @@ fun BrowserScreen(browser: Browser, onExit: () -> Unit) {
             }
           }
         }
+        browser.permissionPrompt?.let { PermissionDialog(browser, it) }
         if (menuOpen && tab != null) {
           PageMenu(browser, tab, onDismiss = { menuOpen = false }, onSettings = {
             menuOpen = false
@@ -142,14 +152,14 @@ fun BrowserScreen(browser: Browser, onExit: () -> Unit) {
   }
 }
 
-/** The shown tab's page. Only this page has a surface; the others are hidden to the engine. */
+/** The view that shows the selected tab's page. Only that page is in a window; the others are hidden to the engine. */
 @Composable
-private fun PageHost(tab: Tab?) {
+private fun PageHost(browser: Browser) {
+  val view = browser.view
   AndroidView(
     modifier = Modifier.fillMaxSize(),
     factory = { context -> FrameLayout(context) },
     update = { container ->
-      val view = tab?.webView
       if (container.childCount == 1 && container.getChildAt(0) === view) return@AndroidView
       container.removeAllViews()
       if (view != null) {
@@ -159,6 +169,23 @@ private fun PageHost(tab: Tab?) {
     },
     onRelease = { container -> container.removeAllViews() },
   )
+}
+
+/** The page's web process ended while it was shown. */
+@Composable
+private fun Crashed(tab: Tab) {
+  Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface).padding(32.dp),
+    verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
+    Text("This page stopped", style = MaterialTheme.typography.titleLarge)
+    Spacer(Modifier.height(8.dp))
+    Text("Its web content ended unexpectedly. Reloading usually brings it back.",
+      color = MaterialTheme.colorScheme.onSurfaceVariant)
+    Spacer(Modifier.height(16.dp))
+    androidx.compose.material3.Button(onClick = {
+      tab.crashed = false
+      tab.page?.reload()
+    }) { Text("Reload") }
+  }
 }
 
 @Composable
@@ -187,8 +214,8 @@ private fun Toolbar(
       verticalAlignment = Alignment.CenterVertically,
     ) {
       if (wide && !focused) {
-        ToolIcon(SummitIcons.Back, "Back", enabled = tab?.canGoBack == true) { tab?.webView?.goBack() }
-        ToolIcon(SummitIcons.Forward, "Forward", enabled = tab?.canGoForward == true) { tab?.webView?.goForward() }
+        ToolIcon(SummitIcons.Back, "Back", enabled = tab?.canGoBack == true) { tab?.page?.goBack() }
+        ToolIcon(SummitIcons.Forward, "Forward", enabled = tab?.canGoForward == true) { tab?.page?.goForward() }
         ReloadStop(tab)
       }
       AddressField(browser, tab, Modifier.weight(1f), onFocus = {
@@ -210,8 +237,8 @@ private fun Toolbar(
 
 @Composable
 private fun ReloadStop(tab: Tab?) {
-  if (tab?.loading == true) ToolIcon(SummitIcons.Close, "Stop") { tab.webView?.stopLoading() }
-  else ToolIcon(SummitIcons.Reload, "Reload", enabled = tab != null) { tab?.webView?.reload() }
+  if (tab?.loading == true) ToolIcon(SummitIcons.Close, "Stop") { tab.page?.stopLoading() }
+  else ToolIcon(SummitIcons.Reload, "Reload", enabled = tab != null) { tab?.page?.reload() }
 }
 
 @Composable
@@ -237,9 +264,12 @@ private fun AddressField(browser: Browser, tab: Tab?, modifier: Modifier, onFocu
   val url = tab?.url.orEmpty()
   val secure = url.startsWith("https://")
 
-  LaunchedEffect(tab?.id, url.isEmpty()) {
-    // A blank new tab starts with the keyboard up.
-    if (tab != null && (url.isEmpty() || url == "about:blank")) runCatching { requester.requestFocus() }
+  LaunchedEffect(tab?.id, tab?.focusAddress) {
+    // A blank tab the person opened starts with the keyboard up.
+    if (tab != null && tab.focusAddress) {
+      tab.focusAddress = false
+      runCatching { requester.requestFocus() }
+    }
   }
 
   val shape = RoundedCornerShape(22.dp)
@@ -351,8 +381,8 @@ private fun BottomBar(browser: Browser, tab: Tab?, onTabs: () -> Unit, onLibrary
     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
     Row(Modifier.fillMaxWidth().height(52.dp), horizontalArrangement = Arrangement.SpaceEvenly,
       verticalAlignment = Alignment.CenterVertically) {
-      ToolIcon(SummitIcons.Back, "Back", enabled = tab?.canGoBack == true) { tab?.webView?.goBack() }
-      ToolIcon(SummitIcons.Forward, "Forward", enabled = tab?.canGoForward == true) { tab?.webView?.goForward() }
+      ToolIcon(SummitIcons.Back, "Back", enabled = tab?.canGoBack == true) { tab?.page?.goBack() }
+      ToolIcon(SummitIcons.Forward, "Forward", enabled = tab?.canGoForward == true) { tab?.page?.goForward() }
       ToolIcon(SummitIcons.Share, "Share and more", onClick = onMenu)
       ToolIcon(SummitIcons.Bookmarks, "Bookmarks and history", onClick = onLibrary)
       TabCountButton(browser.tabs.count { it.private == (tab?.private == true) }, onTabs)
@@ -430,7 +460,7 @@ private fun PageMenu(browser: Browser, tab: Tab, onDismiss: () -> Unit, onSettin
     SheetAction(if (tab.desktopSite) "Request Mobile Site" else "Request Desktop Site") {
       tab.desktopSite = !tab.desktopSite
       browser.applySettings(tab)
-      tab.webView?.reload()
+      tab.page?.reload()
       onDismiss()
     }
     HorizontalDivider()
@@ -474,4 +504,40 @@ fun SheetAction(label: String, destructive: Boolean = false, onClick: () -> Unit
     Text(label, modifier = Modifier.fillMaxWidth(), style = MaterialTheme.typography.bodyLarge,
       color = if (destructive) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface)
   }
+}
+
+private val permissionWords = mapOf(
+  "camera" to "use your camera",
+  "microphone" to "use your microphone",
+  "geolocation" to "know your location",
+  "notifications" to "show notifications",
+  "display" to "see your screen",
+  "storage-access" to "use its cookies and data on this site",
+  "clipboard" to "read the clipboard",
+)
+
+/** A site asks for a permission: Allow or Block, remembered for the site unless the tab is private. */
+@Composable
+private fun PermissionDialog(browser: Browser, prompt: Browser.PermissionPrompt) {
+  val kinds = prompt.permissions
+  val what = when {
+    "camera" in kinds && "microphone" in kinds -> "use your camera and microphone"
+    else -> kinds.firstNotNullOfOrNull { permissionWords[it] } ?: "use a feature of this device"
+  }
+  val canRemember = prompt.permissions.isNotEmpty() && !prompt.tab.private
+  var remember by remember(prompt) { mutableStateOf(true) }
+  androidx.compose.material3.AlertDialog(
+    onDismissRequest = { browser.answerPermission(allow = false, remember = false) },
+    title = { Text("${prompt.site} wants to $what") },
+    text = if (canRemember) {
+      {
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.clickable { remember = !remember }) {
+          androidx.compose.material3.Checkbox(checked = remember, onCheckedChange = { remember = it })
+          Text("Remember for this site")
+        }
+      }
+    } else null,
+    confirmButton = { TextButton(onClick = { browser.answerPermission(true, canRemember && remember) }) { Text("Allow") } },
+    dismissButton = { TextButton(onClick = { browser.answerPermission(false, canRemember && remember) }) { Text("Block") } },
+  )
 }

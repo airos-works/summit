@@ -19,8 +19,11 @@
 
 package org.wpewebkit.wpe;
 
+import androidx.annotation.Keep;
 import androidx.annotation.NonNull;
 
+// The native code sets these fields when WPEView loads.
+@Keep
 public class WPEVersions {
     public static int WEBKIT_MAJOR = 0;
     public static int WEBKIT_MINOR = 0;
@@ -32,8 +35,4 @@ public class WPEVersions {
     public static int GSTREAMER_MICRO = 0;
     public static int GSTREAMER_NANO = 0;
     public static @NonNull String GSTREAMER = "";
-
-    public static @NonNull String versionedAssets(@NonNull String componentName) {
-        return componentName + "_" + WEBKIT + "_gst_" + GSTREAMER;
-    }
 }

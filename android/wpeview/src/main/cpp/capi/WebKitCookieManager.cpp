@@ -17,6 +17,7 @@
  */
 
 #include "JNI/JNI.h"
+#include "JNIMappings.h"
 #include "Logging.h"
 
 #include <memory>
@@ -47,7 +48,8 @@ private:
     const JNI::Method<void(jint)> m_commitResult; // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members)
 };
 
-const JNIWebKitCookieManagerAcceptPolicyCallbackHolderCache& getJNIWebKitCookieManagerAcceptPolicyCallbackHolderCache()
+static const JNIWebKitCookieManagerAcceptPolicyCallbackHolderCache&
+getJNIWebKitCookieManagerAcceptPolicyCallbackHolderCache()
 {
     static const JNIWebKitCookieManagerAcceptPolicyCallbackHolderCache s_singleton;
     return s_singleton;
@@ -79,8 +81,13 @@ private:
 
     static jlong nativeInit(JNIEnv*, jobject, jlong sessionPtr)
     {
-        return reinterpret_cast<jlong>(
-            g_object_ref(webkit_network_session_get_cookie_manager(JNI::from_jlong<WebKitNetworkSession>(sessionPtr))));
+        auto* session = JNI::from_jlong<WebKitNetworkSession>(sessionPtr);
+        auto* cookieManager = webkit_network_session_get_cookie_manager(session);
+        // WebKit's cookie manager uses the website data manager of its session until it is finalized, without keeping
+        // it alive, and its calls keep the cookie manager. GObject lets go of this data as the finalization ends.
+        g_object_set_data_full(G_OBJECT(cookieManager), "wpe-android-website-data-manager",
+            g_object_ref(webkit_network_session_get_website_data_manager(session)), g_object_unref);
+        return reinterpret_cast<jlong>(g_object_ref(cookieManager));
     }
 
     static void nativeDestroy(JNIEnv*, jobject, jlong nativePtr)
@@ -105,7 +112,7 @@ private:
     }
 };
 
-const JNIWebKitCookieManagerCache& getJNIWebKitCookieManagerCache()
+static const JNIWebKitCookieManagerCache& getJNIWebKitCookieManagerCache()
 {
     static const JNIWebKitCookieManagerCache s_singleton;
     return s_singleton;

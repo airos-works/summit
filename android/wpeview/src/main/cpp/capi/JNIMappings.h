@@ -22,4 +22,23 @@ namespace WebKit {
 
 void configureJNIMappings();
 
+void configureSoupTLDJNIMappings();
+void configureWebKitCookieManagerJNIMappings();
+void configureWebKitCookieManagerAcceptPolicyCallbackHolderJNIMappings();
+void configureWebKitDownloadJNIMappings();
+void configureWebKitNetworkSessionJNIMappings();
+void configureWebKitNetworkSessionITPSummaryCallbackHolderJNIMappings();
+void configureWebKitSettingsJNIMappings();
+void configureWebKitWebContextJNIMappings();
+void configureWebKitWebViewJNIMappings();
+void configureWebKitWebViewEvalCallbackHolderJNIMappings();
+void configureWebKitWebViewSnapshotCallbackHolderJNIMappings();
+void configureWebKitWebsiteDataManagerJNIMappings();
+void configureWebKitWebsiteDataManagerCallbackHolderJNIMappings();
+void configureWPEDisplayJNIMappings();
+void configureWPEInputMethodContextJNIMappings();
+void configureWPEScreenJNIMappings();
+void configureWPEToplevelJNIMappings();
+void configureWPEViewJNIMappings();
+
 } // namespace WebKit

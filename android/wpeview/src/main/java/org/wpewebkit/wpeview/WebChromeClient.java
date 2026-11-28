@@ -18,26 +18,94 @@
 
 package org.wpewebkit.wpeview;
 
-import android.view.View;
-
+import androidx.annotation.ColorInt;
+import androidx.annotation.IntDef;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
+
 /**
  * WebChromeClient provides the high-level chrome and UI callbacks for {@link WebView}.
+ *
+ * <p>The JavaScript dialog callbacks are not called for the pages of a {@link WebContext} made for automation:
+ * WebDriver answers their dialogs.
  */
 public class WebChromeClient {
+    /**
+     * Asks the app to open a new window for the page in {@code view}: for a link to a new window, as with
+     * target=_blank, or for window.open(). WebKit lets window.open() open one only from a user gesture, such as a tap,
+     * and {@code isUserGesture} tells whether one asked for this window.
+     *
+     * <p>To open the window, make its WebView with {@link WebView#WebView(android.content.Context, WebView)}, give it
+     * its clients, show it, and return it, all before this returns: WebKit needs it right away. WebKit then loads the
+     * page into it, so load nothing into it. The page there has the page in {@code view} as its window.opener, unless
+     * it asked for none, as links with target=_blank do. When it closes its window, {@link #onCloseWindow} is called
+     * with the new WebView.
+     *
+     * <p>Return null to open no window, which is the default: window.open() then returns null, and the link does
+     * nothing. A WebView made for the window but not returned is the app's to destroy. Returning any other WebView
+     * opens no window either, and logs an error. The app may destroy {@code view} here, once it made the window.
+     *
+     * <p>Unlike android.webkit.WebChromeClient, this does not tell whether the window is a dialog: WebKit knows the
+     * features the page asked for only once the window is made.
+     */
+    public @Nullable WebView onCreateWindow(@NonNull WebView view, boolean isUserGesture) { return null; }
+
+    /**
+     * Asks the app to close {@code window}, for window.close() in its page, which WebKit allows in a window that a page
+     * opened ({@link #onCreateWindow}), or with a single page in its history. The app takes the WebView out of its
+     * layout and destroys it, which it can do right away.
+     */
     public void onCloseWindow(@NonNull WebView window) {}
     public void onProgressChanged(@NonNull WebView view, int newProgress) {}
+    /**
+     * Reports a new title of the page, as {@link WebView#getTitle()} returns it: its address while it has none. While a
+     * new page loads, the title stays the one of the page loaded before, which can still set a new one, until the new
+     * page commits, also when {@link WebView#getUrl()} already returns the new address.
+     */
     public void onReceivedTitle(@NonNull WebView view, @NonNull String title) {}
 
-    public interface CustomViewCallback {
-        void onCustomViewHidden();
-    }
+    /**
+     * Tells the app that the page started or stopped playing sound, as {@link WebView#isPlayingAudio()} returns it, for
+     * example to show which tab plays and offer to mute it.
+     */
+    public void onPlayingAudioChanged(@NonNull WebView view, boolean isPlayingAudio) {}
 
-    // FIXME: wire WebKit enter-fullscreen / leave-fullscreen signals to invoke these callbacks.
-    public void onShowCustomView(@NonNull View view, @NonNull CustomViewCallback callback) {}
-    public void onHideCustomView() {}
+    /**
+     * Tells the app that the icon of the page changed, as {@link WebView#getFavicon} returns it, for example to show it
+     * in the page's tab: see {@link WebPageChromeClient#onFaviconChanged}.
+     */
+    public void onFaviconChanged(@NonNull WebView view) {}
+
+    /**
+     * Tells the app that an element of the page went fullscreen, as a video does with its fullscreen button, or any
+     * element with {@code element.requestFullscreen()}. The element now fills the {@link WebView}, which draws the page
+     * itself, so there is no other view to show: the app gives the WebView the whole screen where it is, for example
+     * by hiding the controls around it and the system bars, until {@link #onExitFullscreen}. Fullscreen ends when the
+     * WebView is hidden or leaves its window, as when it is moved to another parent or its activity stops, and when
+     * the web process of the page ends.
+     *
+     * <p>The app takes the page out of fullscreen with {@link WebView#exitFullscreen()}, for example on Back or when
+     * it shows another page. An app that does not show pages fullscreen can call it from here. If the app does
+     * nothing, the element fills the WebView where it is.
+     */
+    public void onEnterFullscreen(@NonNull WebView view) {}
+
+    /**
+     * Tells the app that the page left fullscreen, by itself, as with {@code document.exitFullscreen()} or the
+     * controls of a video, or because of {@link WebView#exitFullscreen()}. The app brings back what it changed in
+     * {@link #onEnterFullscreen}.
+     *
+     * <p>A page that is not shown cannot stay fullscreen. When the view is hidden, this comes at once. When the page
+     * leaves the window, as when the view is taken out of its parent or its activity stops, or leaves the view, with
+     * {@link WebView#setPage}, {@link WebView#releasePage()} or {@link WebPage#destroy()}, this comes once the view is
+     * done with the page, so that the app may show another page or destroy the view from here.
+     * {@link WebView#destroy()} calls it first, while the page is still in the view. When the web process of the page
+     * ends, this comes before {@link WebViewClient#onWebProcessTerminated}.
+     */
+    public void onExitFullscreen(@NonNull WebView view) {}
 
     /**
      * Notifies the host of a JavaScript {@code alert()}. Return {@code true} to take over the
@@ -76,5 +144,133 @@ public class WebChromeClient {
     public boolean onJsBeforeUnload(@NonNull WebView view, @Nullable String url, @Nullable String message,
                                     @NonNull WPEJsResult result) {
         return false;
+    }
+
+    /**
+     * Asks the host to choose files for a file field of the page, as when the user taps one. Return {@code true} to
+     * take over, and call {@code filePathCallback} once with the absolute paths of the chosen local files, or with
+     * {@code null} if the user chose none; for a path that is null or relative, it cancels the request and throws
+     * IllegalArgumentException. WebKit reads the files by their paths, also later, when the page uploads them, so a
+     * content URI is copied to a local file first, which stays while the page may need it. The page sees the last
+     * component of each path as the name of the file. Return {@code false} to cancel the request, which leaves the
+     * field as it was.
+     */
+    public boolean onShowFileChooser(@NonNull WebView webView, @NonNull FileChooserParams fileChooserParams,
+                                     @NonNull WPECallback<String[]> filePathCallback) {
+        return false;
+    }
+
+    /** What a file field of the page asks for, given to {@link #onShowFileChooser}. */
+    public static final class FileChooserParams {
+        /** One file, the same as {@link WebPageChromeClient.FileChooserParams#MODE_OPEN}. */
+        public static final int MODE_OPEN = WebPageChromeClient.FileChooserParams.MODE_OPEN;
+        /**
+         * One file or more, for a field with the multiple attribute, the same as
+         * {@link WebPageChromeClient.FileChooserParams#MODE_OPEN_MULTIPLE}.
+         */
+        public static final int MODE_OPEN_MULTIPLE = WebPageChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE;
+
+        // The constants of this class and of WebPageChromeClient.FileChooserParams, so that lint takes either one. It
+        // must list the same constants as WebPageChromeClient.FileChooserParams.Mode, so that a mode passes from one
+        // class to the other.
+        @Retention(RetentionPolicy.SOURCE)
+        @IntDef({MODE_OPEN, MODE_OPEN_MULTIPLE, WebPageChromeClient.FileChooserParams.MODE_OPEN,
+                 WebPageChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE})
+        public @interface Mode {}
+
+        private final @Mode int mode;
+        private final @NonNull String[] acceptTypes;
+
+        FileChooserParams(@Mode int mode, @NonNull String[] acceptTypes) {
+            this.mode = mode;
+            this.acceptTypes = acceptTypes;
+        }
+
+        public @Mode int getMode() { return mode; }
+
+        /**
+         * The MIME types in the accept attribute of the field, such as {@code image/*} or {@code application/pdf},
+         * or none if the field takes any file. The file name extensions in that attribute are not given.
+         */
+        public @NonNull String[] getAcceptTypes() { return acceptTypes.clone(); }
+    }
+
+    /**
+     * Asks the host to choose a color for a color field of the page, as when the user taps one. Return {@code true} to
+     * take over, and end with {@link ColorChooserCallback#confirm} or {@link ColorChooserCallback#cancel}. The page may
+     * end it first, with {@link #onHideColorChooser}. Return {@code false} to cancel the request, which leaves the
+     * field as it was.
+     */
+    public boolean onShowColorChooser(@NonNull WebView view, @NonNull ColorChooserParams params,
+                                      @NonNull ColorChooserCallback callback) {
+        return false;
+    }
+
+    /**
+     * Tells the host that the page ended the color request it is showing, for example because the field went away or
+     * the page was left, or that the page that the view made left it, with {@link WebView#setPage},
+     * {@link WebView#releasePage()} or {@link WebPage#destroy()}. Its callback does nothing any more. Not called for
+     * the request of a view that is destroyed.
+     */
+    public void onHideColorChooser(@NonNull WebView view) {}
+
+    /**
+     * Asks the host whether the page in {@code view} may use something that needs the user's consent, such as the
+     * location of the device, as android.webkit.WebChromeClient does: call {@link WPEPermissionRequest#grant()} or
+     * {@link WPEPermissionRequest#deny()}, now or later. The default denies it, as does a client that throws. Unlike
+     * android.webkit.WebView, location requests come here too, rather than to a callback of their own.
+     */
+    public void onPermissionRequest(@NonNull WebView view, @NonNull WPEPermissionRequest request) { request.deny(); }
+
+    /**
+     * Tells the host that a request it has not answered ended without an answer, because the page that asked went
+     * away, or the page that the view made left it with {@link WebView#releasePage()}, so that it takes down what it
+     * shows for it. See {@link WPEPermissionRequest}.
+     */
+    public void onPermissionRequestCanceled(@NonNull WebView view, @NonNull WPEPermissionRequest request) {}
+
+    /**
+     * Asks the host what a permission request of the page in {@code view} would get, for
+     * {@code navigator.permissions.query()}. Return true to take the query, and answer it with
+     * {@link WPEPermissionStateQuery#answer}, now or later; return false, the default, to let WebKit answer, which
+     * says prompt.
+     */
+    public boolean onQueryPermissionState(@NonNull WebView view, @NonNull WPEPermissionStateQuery query) {
+        return false;
+    }
+
+    /**
+     * Gives the host a notification that the page in {@code view} shows, to show the user, for example as an Android
+     * notification: see {@link WPENotification}. The default closes it, as does a client that throws, and so does a
+     * view that no longer shows the page that it made.
+     */
+    public void onShowNotification(@NonNull WebView view, @NonNull WPENotification notification) {
+        notification.close();
+    }
+
+    /**
+     * Tells the host that a notification it was given closed, so that it takes it down: the page closed it, went into
+     * the back forward cache, or loaded another document. See {@link WPENotification}.
+     */
+    public void onCloseNotification(@NonNull WebView view, @NonNull WPENotification notification) {}
+
+    /** A {@link WebPageChromeClient.ColorChooserCallback}, as {@link #onShowColorChooser} gets it. */
+    public interface ColorChooserCallback extends WebPageChromeClient.ColorChooserCallback {}
+
+    /** What a color field of the page asks for, given to {@link #onShowColorChooser}. */
+    public static final class ColorChooserParams {
+        private final @ColorInt int color;
+        private final boolean supportsAlpha;
+
+        ColorChooserParams(@ColorInt int color, boolean supportsAlpha) {
+            this.color = color;
+            this.supportsAlpha = supportsAlpha;
+        }
+
+        /** The color of the field when it asked. */
+        public @ColorInt int getColor() { return color; }
+
+        /** Whether the field takes a color with an alpha, for its alpha attribute. If not, its colors are opaque. */
+        public boolean supportsAlpha() { return supportsAlpha; }
     }
 }

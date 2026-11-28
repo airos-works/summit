@@ -18,9 +18,21 @@
 
 package org.wpewebkit.wpe;
 
+import android.graphics.Bitmap;
+import android.graphics.Color;
+import android.util.Log;
+
+import androidx.annotation.ColorInt;
 import androidx.annotation.Keep;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
+import androidx.annotation.UiThread;
+
+import org.json.JSONObject;
+
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.Set;
 
 /**
  * WebKitWebView is an owning JNI proxy for a native WebKitWebView object.
@@ -32,15 +44,48 @@ public final class WebKitWebView {
     public static final int SCRIPT_DIALOG_PROMPT = 2;
     public static final int SCRIPT_DIALOG_BEFORE_UNLOAD_CONFIRM = 3;
 
+    // Values mapped to WebKitSnapshotRegion by nativeCaptureSnapshot. WebPage checks the region.
+    public static final int SNAPSHOT_REGION_VISIBLE = 0;
+    public static final int SNAPSHOT_REGION_FULL_DOCUMENT = 1;
+
+    // The isolated world of the scripts that warnInConsole runs.
+    private static final String CONSOLE_WORLD = "WPEView";
+
+    // Mirrors WebKitFindOptions.
+    public static final int FIND_OPTIONS_CASE_INSENSITIVE = 1;
+    public static final int FIND_OPTIONS_AT_WORD_STARTS = 1 << 1;
+    public static final int FIND_OPTIONS_BACKWARDS = 1 << 3;
+    public static final int FIND_OPTIONS_WRAP_AROUND = 1 << 4;
+
+    // What a permission request asks for, as a set of these flags, which the native side maps WebKit's requests to.
+    public static final int PERMISSION_LOCATION = 1;
+    public static final int PERMISSION_NOTIFICATIONS = 1 << 1;
+
+    // Mirrors WebKitPermissionState.
+    public static final int PERMISSION_STATE_GRANTED = 0;
+    public static final int PERMISSION_STATE_DENIED = 1;
+    public static final int PERMISSION_STATE_PROMPT = 2;
+
+    // Mirrors WebKitWebProcessTerminationReason.
+    public static final int WEB_PROCESS_CRASHED = 0;
+    public static final int WEB_PROCESS_EXCEEDED_MEMORY_LIMIT = 1;
+    public static final int WEB_PROCESS_TERMINATED_BY_API = 2;
+
     private long mNativePtr = 0;
     private final WPEView wpeView;
     private final WPEInputMethodContext inputMethodContext;
     private final WebKitSettings settings;
     private final WebKitNetworkSession networkSession;
+    // The downloads of the view's pages that wait for the listener to set their destination or cancel them.
+    private final Set<WebKitDownload> undecidedDownloads = new HashSet<>();
+    // The file chooser requests taken from WebKit and not answered yet.
+    private final Set<Long> fileChoosers = new HashSet<>();
+    // The color chooser requests taken from WebKit and not ended yet.
+    private final Set<Long> colorChoosers = new HashSet<>();
 
     public long getNativePtr() { return mNativePtr; }
 
-    long getWebKitWebViewPtr() { return nativeGetWebKitWebViewPtr(mNativePtr); }
+    long getWebKitWebViewPtr() { return mNativePtr != 0 ? nativeGetWebKitWebViewPtr(mNativePtr) : 0; }
 
     public WebKitWebView(@NonNull WPEDisplay display, @NonNull WebKitWebContext context, @Nullable WPEToplevel toplevel,
                          @Nullable WebKitNetworkSession networkSession, @Nullable WebKitSettings settings) {
@@ -49,6 +94,21 @@ public final class WebKitWebView {
         mNativePtr = nativeInit(
             display.getNativePtr(), context.getWebKitWebContextPtr(), toplevel != null ? toplevel.getNativePtr() : 0,
             networkSession != null ? networkSession.getNativePtr() : 0, settings != null ? settings.getNativePtr() : 0);
+        wpeView = new WPEView(nativeGetWPEView(mNativePtr));
+        inputMethodContext = new WPEInputMethodContext(WPEInputMethodContext.getForView(wpeView));
+    }
+
+    /**
+     * Makes the view of a new window that the page in {@code relatedView} asks for, in {@link Listener#onCreateWindow}
+     * of {@code relatedView}, which returns it: WebKit puts the page of the window only in a view made then. It shares
+     * the display, the web context and the network session of {@code relatedView}.
+     */
+    public WebKitWebView(@NonNull WebKitWebView relatedView, @Nullable WebKitSettings settings) {
+        if (relatedView.mNativePtr == 0)
+            throw new IllegalStateException("The related WebKitWebView was destroyed");
+        this.networkSession = relatedView.networkSession;
+        this.settings = settings;
+        mNativePtr = nativeInitRelated(relatedView.mNativePtr, settings != null ? settings.getNativePtr() : 0);
         wpeView = new WPEView(nativeGetWPEView(mNativePtr));
         inputMethodContext = new WPEInputMethodContext(WPEInputMethodContext.getForView(wpeView));
     }
@@ -67,9 +127,56 @@ public final class WebKitWebView {
         }
     }
 
+    // The addresses that the app may download: those of the web, and the data and blobs of the pages. The network
+    // process reads any other that WebKit can load, such as a file: address, as the app, which may then save its own
+    // files, as its cookies, where other apps read them.
+    private static final String[] downloadSchemes = {"http:", "https:", "data:", "blob:"};
+
+    /**
+     * Downloads the address in the network session of the view. The listener hears of the download in
+     * {@link Listener#onDownloadStarted}, as of those of the pages, as requested by the app. An address that the app
+     * may not download comes at once as failed.
+     */
+    public void downloadUri(@NonNull String uri) {
+        if (mNativePtr == 0)
+            return;
+        for (String scheme : downloadSchemes) {
+            if (startsWithScheme(uri, scheme)) {
+                nativeDownloadUri(mNativePtr, uri);
+                return;
+            }
+        }
+        onDownloadFailedBeforeResponse(uri, WebKitDownload.ERROR_UNKNOWN,
+                                       "Only http, https, data and blob addresses can be downloaded");
+    }
+
+    // Whether the address has the scheme, given in lower case with its colon. WebKit reads the scheme up to the first
+    // colon, with ASCII letters in either case, so only those are compared without regard to case.
+    private static boolean startsWithScheme(@NonNull String uri, @NonNull String scheme) {
+        if (uri.length() < scheme.length())
+            return false;
+        for (int i = 0; i < scheme.length(); i++) {
+            char c = uri.charAt(i);
+            if (c >= 'A' && c <= 'Z')
+                c += 'a' - 'A';
+            if (c != scheme.charAt(i))
+                return false;
+        }
+        return true;
+    }
+
     public void loadHtml(@NonNull String content, @NonNull String baseUri) {
         if (mNativePtr != 0) {
             nativeLoadHtml(mNativePtr, content, baseUri);
+        }
+    }
+
+    // Shows the content in place of the page at contentUri, which stays the address of the view. While a failed load is
+    // reported, it takes the entry of that load in the Back/Forward list, and at other times a new one. A reload loads
+    // contentUri. A null base is about:blank.
+    public void loadAlternateHtml(@NonNull String content, @NonNull String contentUri, @Nullable String baseUri) {
+        if (mNativePtr != 0) {
+            nativeLoadAlternateHtml(mNativePtr, content, contentUri, baseUri);
         }
     }
 
@@ -85,6 +192,12 @@ public final class WebKitWebView {
         }
     }
 
+    public void reloadBypassCache() {
+        if (mNativePtr != 0) {
+            nativeReloadBypassCache(mNativePtr);
+        }
+    }
+
     public void goBack() {
         if (mNativePtr != 0) {
             nativeGoBack(mNativePtr);
@@ -97,7 +210,68 @@ public final class WebKitWebView {
         }
     }
 
-    public void setZoomLevel(double zoomLevel) { nativeSetZoomLevel(mNativePtr, zoomLevel); }
+    public void terminateWebProcess() {
+        if (mNativePtr != 0) {
+            nativeTerminateWebProcess(mNativePtr);
+        }
+    }
+
+    public @Nullable byte[] saveState() { return mNativePtr != 0 ? nativeSaveState(mNativePtr) : null; }
+
+    // Restores the Back/Forward list and loads its current page. Returns false if WebKit cannot read the state, or if
+    // it has no page.
+    public boolean restoreState(@NonNull byte[] state) {
+        return mNativePtr != 0 && nativeRestoreState(mNativePtr, state);
+    }
+
+    public boolean canGoBack() { return mNativePtr != 0 && nativeCanGoBack(mNativePtr); }
+
+    public boolean canGoForward() { return mNativePtr != 0 && nativeCanGoForward(mNativePtr); }
+
+    public void setMuted(boolean muted) {
+        if (mNativePtr != 0)
+            nativeSetIsMuted(mNativePtr, muted);
+    }
+
+    public boolean isMuted() { return mNativePtr != 0 && nativeIsMuted(mNativePtr); }
+
+    /**
+     * Highlights the matches of {@code text} in the page, counting up to {@code maxMatchCount} of them, and selects the
+     * first one from the start of the selection of the page, or of the page, but not the selected text itself, or with
+     * {@link #FIND_OPTIONS_BACKWARDS} the last one before. {@link Listener#onFindResult} tells the result.
+     */
+    public void findSearch(@NonNull String text, int options, int maxMatchCount) {
+        if (mNativePtr != 0)
+            nativeFindSearch(mNativePtr, text, options, maxMatchCount);
+    }
+
+    /** Takes the highlights of the matches away. */
+    public void findFinish() {
+        if (mNativePtr != 0)
+            nativeFindFinish(mNativePtr);
+    }
+
+    public void setZoomLevel(double zoomLevel) {
+        if (mNativePtr != 0)
+            nativeSetZoomLevel(mNativePtr, zoomLevel);
+    }
+
+    public void setBackgroundColor(@ColorInt int color) {
+        if (mNativePtr != 0) {
+            Color rgba = Color.valueOf(color);
+            nativeSetBackgroundColor(mNativePtr, rgba.red(), rgba.green(), rgba.blue(), rgba.alpha());
+        }
+    }
+
+    // A maxWidth or maxHeight of 0 or less leaves that side unlimited. WebView checks the arguments.
+    @UiThread
+    public void captureSnapshot(int region, int maxWidth, int maxHeight, @NonNull SnapshotCallback callback) {
+        if (mNativePtr == 0) {
+            MainLooperDispatcher.postLater(() -> callback.onResult(null));
+            return;
+        }
+        nativeCaptureSnapshot(mNativePtr, region, maxWidth, maxHeight, new SnapshotCallbackHolder(callback));
+    }
 
     public void evaluateJavascript(@NonNull String script, @Nullable EvalCallback callback) {
         if (mNativePtr == 0) {
@@ -106,18 +280,40 @@ public final class WebKitWebView {
             }
             return;
         }
-        nativeEvaluateJavascript(mNativePtr, script, callback != null ? new EvalCallbackHolder(callback) : null);
+        nativeEvaluateJavascript(mNativePtr, script, null, callback != null ? new EvalCallbackHolder(callback) : null);
+    }
+
+    /**
+     * Shows a warning in the console of the page, as its developers see it in the Web Inspector. The script that logs
+     * it runs in a world of its own, so the scripts of the page neither see it nor change what it does.
+     */
+    public void warnInConsole(@NonNull String message) {
+        if (mNativePtr != 0)
+            nativeEvaluateJavascript(mNativePtr, "console.warn(" + JSONObject.quote(message) + ")", CONSOLE_WORLD,
+                                     null);
     }
 
     public void destroy() {
-        // Must run before nativeDestroy: the focus listener cleanup needs the live IM context.
-        inputMethodContext.setFocusListener(null);
+        // Nothing else would end the downloads that still wait for a destination. Those already started go on.
+        for (WebKitDownload download : new ArrayList<>(undecidedDownloads))
+            download.cancel();
+        // Must run before nativeDestroy: the listener cleanup needs the live IM context.
+        inputMethodContext.setListener(null);
+        for (long requestPtr : new ArrayList<>(fileChoosers))
+            fileChooserCancel(requestPtr);
+        for (long requestPtr : new ArrayList<>(colorChoosers))
+            colorChooserCancel(requestPtr);
         if (mNativePtr != 0) {
             nativeDestroy(mNativePtr);
             mNativePtr = 0;
         }
         inputMethodContext.invalidate();
         wpeView.invalidate();
+    }
+
+    @FunctionalInterface
+    public interface SnapshotCallback {
+        void onResult(@Nullable Bitmap bitmap);
     }
 
     public interface EvalCallback {
@@ -130,10 +326,96 @@ public final class WebKitWebView {
         void onPageFinished(@NonNull String url);
         void onURLChanged(@NonNull String uri);
         void onLoadProgress(double progress);
-        void onTitleChanged(@NonNull String title, boolean canGoBack, boolean canGoForward);
-        void onReceivedHttpError(@NonNull String uri, @NonNull String method, @NonNull String mimeType, int statusCode);
-        void onScriptDialog(long dialogPtr, int type, @Nullable String url, @Nullable String message,
+        void onTitleChanged(@NonNull String title);
+        void onHistoryChanged(@NonNull String uri, boolean canGoBack, boolean canGoForward);
+        void onReceivedHttpError(@NonNull String uri, @NonNull String method, @NonNull String mimeType, int statusCode,
+                                 boolean isMainFrame);
+        void onReceivedError(@NonNull String uri, @NonNull String method, int errorCode, @NonNull String description);
+        /**
+         * A script of the page opens a dialog, and waits until it is answered once with {@link #scriptDialogAnswer}.
+         * If this throws, the dialog is cancelled unless it was answered.
+         */
+        void onScriptDialog(long dialogId, int type, @Nullable String url, @Nullable String message,
                             @NonNull String defaultText);
+        void onWebProcessTerminated(int reason);
+
+        /**
+         * Asks for the view of a new window that the page opens, made with
+         * {@link #WebKitWebView(WebKitWebView, WebKitSettings)} before this returns, or null to open none.
+         */
+        @Nullable
+        WebKitWebView onCreateWindow(boolean isUserGesture);
+
+        boolean shouldOverrideUrlLoading(@NonNull String uri, @NonNull String method, boolean isMainFrame,
+                                         boolean hasGesture, boolean isRedirect);
+        void onDownloadStarted(@NonNull WebKitDownload download);
+
+        /**
+         * A file field of the page asks for files, on the main thread. Returns whether the request is taken, to be
+         * answered later with {@link #fileChooserSelect} or {@link #fileChooserCancel}; one that is not is cancelled.
+         */
+        boolean onRunFileChooser(long requestPtr, @NonNull String[] mimeTypes, boolean selectMultiple);
+        /**
+         * A color field of the page asks for a color, on the main thread. Returns whether the request is taken, to be
+         * ended later with {@link #colorChooserFinish} or {@link #colorChooserCancel}; one that is not is cancelled.
+         */
+        boolean onRunColorChooser(long requestPtr, @ColorInt int color, boolean supportsAlpha);
+        /** The page ended a color chooser request that was taken, for example because the field went away. */
+        void onColorChooserFinished(long requestPtr);
+
+        // The scheme is the one of the address that is loaded, also when a proxy asks.
+        void onHttpAuthRequest(long requestId, @NonNull String host, int port, @NonNull String scheme,
+                               @NonNull String realm, boolean isProxy, boolean isRetry);
+        void onHttpAuthRequestCancelled(long requestId);
+
+        void onPlayingAudioChanged(boolean isPlayingAudio);
+
+        /**
+         * The web process of the page stopped answering in time, or answers again. WebKit makes it responsive again
+         * after it reports the end of the process with {@link #onWebProcessTerminated}.
+         */
+        void onWebProcessResponsiveChanged(boolean isResponsive);
+
+        /**
+         * Answers a search with the number of matches in the page, 0 if none was found, or -1 if there are more than
+         * the search could count. WebKit answers each search once, in the order they were asked for, also when the web
+         * process ends meanwhile.
+         */
+        void onFindResult(int matchCount);
+        /**
+         * The page asks for permission to use {@code resources}, a set of {@code PERMISSION_*} flags, for the origin of
+         * its main document. It waits until it is answered once with {@link #permissionRequestAnswer}.
+         */
+        void onPermissionRequest(long requestId, int resources, @NonNull String origin);
+        /**
+         * A request that was not answered ended with the document that asked, or with its web process, and was denied.
+         * Answers to it do nothing.
+         */
+        void onPermissionRequestCancelled(long requestId);
+        /**
+         * The page asks what a request for {@code resource}, a {@code PERMISSION_*} flag, would get, on the main
+         * thread. Returns whether the query is taken, to be answered later with {@link #permissionStateQueryAnswer};
+         * WebKit answers one that is not.
+         */
+        boolean onQueryPermissionState(long queryId, int resource, @NonNull String origin);
+        /**
+         * The page shows a notification, for the origin of its main document, with its title and body cut to what
+         * Android shows, and its tag, if it has one. The listener clicks it or closes it later with
+         * {@link #notificationClick} and {@link #notificationClose}, on the main thread.
+         */
+        void onShowNotification(long notificationId, @NonNull String origin, @NonNull String title,
+                                @NonNull String body, @Nullable String tag);
+        /**
+         * WebKit closed a notification that was shown and not closed with {@link #notificationClose}: the page closed
+         * it, showed another one with its tag, or went away. This comes while WebKit runs, which the listener must not
+         * reenter, for example by destroying the view.
+         */
+        void onNotificationClosed(long notificationId);
+        /**
+         * The icons of the page changed, as {@link #getPageIcon} gives them: a new page committed, with none of the
+         * icons of the old one, or the page got the icons that WebKit keeps for its address or loaded its own.
+         */
+        void onPageIconsChanged();
     }
 
     private @Nullable Listener listener;
@@ -176,38 +458,349 @@ public final class WebKitWebView {
     }
 
     @Keep
-    private void onTitleChanged(String title, boolean canGoBack, boolean canGoForward) {
+    private void onTitleChanged(String title) {
         Listener currentListener = listener;
         if (currentListener != null)
-            MainLooperDispatcher.post(() -> currentListener.onTitleChanged(title, canGoBack, canGoForward));
+            MainLooperDispatcher.post(() -> currentListener.onTitleChanged(title));
     }
 
     @Keep
-    private void onReceivedHttpError(String uri, String method, String mimeType, int statusCode) {
+    private void onHistoryChanged(String uri, boolean canGoBack, boolean canGoForward) {
         Listener currentListener = listener;
         if (currentListener != null)
-            MainLooperDispatcher.post(() -> currentListener.onReceivedHttpError(uri, method, mimeType, statusCode));
+            MainLooperDispatcher.post(() -> currentListener.onHistoryChanged(uri, canGoBack, canGoForward));
     }
 
     @Keep
-    private void onScriptDialog(long dialogPtr, int type, String url, String message, String defaultText) {
+    private void onReceivedHttpError(String uri, String method, String mimeType, int statusCode, boolean isMainFrame) {
         Listener currentListener = listener;
         if (currentListener != null)
-            MainLooperDispatcher.post(() -> currentListener.onScriptDialog(dialogPtr, type, url, message, defaultText));
+            MainLooperDispatcher.post(
+                () -> currentListener.onReceivedHttpError(uri, method, mimeType, statusCode, isMainFrame));
+    }
+
+    @Keep
+    private void onLoadFailed(String uri, String method, int errorCode, String description) {
+        Listener currentListener = listener;
+        if (currentListener != null)
+            MainLooperDispatcher.post(() -> currentListener.onReceivedError(uri, method, errorCode, description));
+    }
+
+    @Keep
+    private void onScriptDialog(long dialogId, int type, String url, String message, String defaultText) {
+        Listener currentListener = listener;
+        if (currentListener != null)
+            MainLooperDispatcher.post(() -> currentListener.onScriptDialog(dialogId, type, url, message, defaultText));
         else
-            nativeScriptDialogClose(dialogPtr);
+            scriptDialogAnswer(dialogId, false, null);
+    }
+
+    @Keep
+    private void onWebProcessTerminated(int reason) {
+        Listener currentListener = listener;
+        if (currentListener != null)
+            MainLooperDispatcher.post(() -> currentListener.onWebProcessTerminated(reason));
+    }
+
+    // WebKit needs the view of the new window before this returns, so the listener is called right away. Like every
+    // signal of the view, this comes on the main thread, which runs WebKit's main loop.
+    @Keep
+    private long onCreateWindow(boolean isUserGesture) {
+        Listener currentListener = listener;
+        WebKitWebView newView = currentListener != null ? currentListener.onCreateWindow(isUserGesture) : null;
+        return newView != null && newView.mNativePtr != 0 ? newView.getWebKitWebViewPtr() : 0;
+    }
+
+    // WebKit waits for the answer, so it is given right away, on the main thread, where WebKit runs.
+    @Keep
+    private boolean shouldOverrideUrlLoading(String uri, String method, boolean isMainFrame, boolean hasGesture,
+                                             boolean isRedirect) {
+        Listener currentListener = listener;
+        return currentListener != null &&
+            currentListener.shouldOverrideUrlLoading(uri, method, isMainFrame, hasGesture, isRedirect);
+    }
+
+    // The download waits until the listener sets its destination or cancels it, maybe later, or until the view is
+    // destroyed.
+    @Keep
+    private void onDownloadStarted(long downloadPtr, String uri, String suggestedFilename, String mimeType,
+                                   long contentLength, boolean hasGesture, @Nullable String requestedUri) {
+        WebKitDownload download =
+            new WebKitDownload(downloadPtr, uri, suggestedFilename, mimeType, contentLength, hasGesture, requestedUri);
+        Listener currentListener = listener;
+        if (currentListener == null) {
+            download.cancel();
+            return;
+        }
+        undecidedDownloads.add(download);
+        download.setDecidedCallback(() -> undecidedDownloads.remove(download));
+        MainLooperDispatcher.post(() -> currentListener.onDownloadStarted(download));
+    }
+
+    // A download that the app asked for (downloadUri) failed before its response. The listener is told of it as of one
+    // that already failed, which it reports once it is started. It is told later, also of an address that downloadUri
+    // refused, as of any download, so that the app can first note what it asked for.
+    @Keep
+    private void onDownloadFailedBeforeResponse(String uri, int errorCode, String description) {
+        Listener currentListener = listener;
+        if (currentListener == null)
+            return;
+        WebKitDownload download = WebKitDownload.failedBeforeResponse(uri, errorCode, description);
+        MainLooperDispatcher.postLater(() -> currentListener.onDownloadStarted(download));
     }
 
     /**
-     * Answers a script dialog reported via {@link Listener#onScriptDialog}. Must be paired with
-     *  {@link #scriptDialogClose}. For prompts, {@code text} carries the user's input.
+     * Answers a script dialog reported via {@link Listener#onScriptDialog}: {@code confirm} for a confirmation, and
+     * {@code text} for a prompt, null when it is cancelled. Only the first answer counts, and none counts once the view
+     * is destroyed, which cancels the dialogs that are left.
      */
-    public void scriptDialogConfirm(long dialogPtr, boolean confirm, @Nullable String text) {
-        nativeScriptDialogConfirm(dialogPtr, confirm, text);
+    public void scriptDialogAnswer(long dialogId, boolean confirm, @Nullable String text) {
+        if (mNativePtr != 0)
+            nativeScriptDialogAnswer(mNativePtr, dialogId, confirm, text);
     }
 
-    /** Releases the native script dialog reported via {@link Listener#onScriptDialog}. */
-    public void scriptDialogClose(long dialogPtr) { nativeScriptDialogClose(dialogPtr); }
+    // Called by WebKit on the main thread, where its main loop runs. The request is taken first, so that it is
+    // cancelled if anything fails.
+    @Keep
+    private void onRunFileChooser(long requestPtr, String[] mimeTypes, boolean selectMultiple) {
+        fileChoosers.add(requestPtr);
+        boolean taken = false;
+        try {
+            Listener currentListener = listener;
+            taken = currentListener != null && currentListener.onRunFileChooser(requestPtr, mimeTypes, selectMultiple);
+        } finally {
+            if (!taken)
+                fileChooserCancel(requestPtr);
+        }
+    }
+
+    /**
+     * Answers a file chooser request reported via {@link Listener#onRunFileChooser} with the paths of local files. A
+     * request that was already answered, or cancelled when the view was destroyed, is left alone.
+     */
+    public void fileChooserSelect(long requestPtr, @NonNull String[] paths) {
+        if (fileChoosers.remove(requestPtr))
+            nativeFileChooserSelect(requestPtr, paths);
+    }
+
+    /** Cancels a file chooser request reported via {@link Listener#onRunFileChooser}, if it is not answered yet. */
+    public void fileChooserCancel(long requestPtr) {
+        if (fileChoosers.remove(requestPtr))
+            nativeFileChooserCancel(requestPtr);
+    }
+
+    // Called by WebKit on the main thread, where its main loop runs. The request is taken first, so that it is
+    // cancelled if anything fails.
+    @Keep
+    private void onRunColorChooser(long requestPtr, int color, boolean supportsAlpha) {
+        colorChoosers.add(requestPtr);
+        boolean taken = false;
+        try {
+            Listener currentListener = listener;
+            taken = currentListener != null && currentListener.onRunColorChooser(requestPtr, color, supportsAlpha);
+        } finally {
+            if (!taken)
+                colorChooserCancel(requestPtr);
+        }
+    }
+
+    // WebKit tells the end of every request, also of the ones ended here, which are not reported again.
+    @Keep
+    private void onColorChooserFinished(long requestPtr) {
+        if (!colorChoosers.remove(requestPtr))
+            return;
+        Listener currentListener = listener;
+        if (currentListener != null)
+            currentListener.onColorChooserFinished(requestPtr);
+    }
+
+    /** Gives the field of a color chooser request that is not ended a color, which the page gets at once. */
+    public void colorChooserSetColor(long requestPtr, @ColorInt int color) {
+        if (colorChoosers.contains(requestPtr)) {
+            Color rgba = Color.valueOf(color);
+            nativeColorChooserSetColor(requestPtr, rgba.red(), rgba.green(), rgba.blue(), rgba.alpha());
+        }
+    }
+
+    /** Ends a color chooser request with the color set last, if it is not ended yet. */
+    public void colorChooserFinish(long requestPtr) {
+        if (colorChoosers.remove(requestPtr))
+            nativeColorChooserFinish(requestPtr);
+    }
+
+    /** Ends a color chooser request with the color its field had, if it is not ended yet. */
+    public void colorChooserCancel(long requestPtr) {
+        if (colorChoosers.remove(requestPtr))
+            nativeColorChooserCancel(requestPtr);
+    }
+
+    @Keep
+    private void onAuthenticate(long requestId, String host, int port, String scheme, String realm, boolean isProxy,
+                                boolean isRetry) {
+        Listener currentListener = listener;
+        if (currentListener != null)
+            MainLooperDispatcher.post(
+                () -> currentListener.onHttpAuthRequest(requestId, host, port, scheme, realm, isProxy, isRetry));
+        else
+            nativeAuthenticationCancel(mNativePtr, requestId);
+    }
+
+    @Keep
+    private void onAuthenticationCancelled(long requestId) {
+        Listener currentListener = listener;
+        if (currentListener != null)
+            MainLooperDispatcher.post(() -> currentListener.onHttpAuthRequestCancelled(requestId));
+    }
+
+    @Keep
+    private void onFindResult(int matchCount) {
+        Listener currentListener = listener;
+        if (currentListener != null)
+            MainLooperDispatcher.post(() -> currentListener.onFindResult(matchCount));
+    }
+
+    @Keep
+    private void onIsPlayingAudioChanged(boolean isPlayingAudio) {
+        Listener currentListener = listener;
+        if (currentListener != null)
+            MainLooperDispatcher.post(() -> currentListener.onPlayingAudioChanged(isPlayingAudio));
+    }
+
+    @Keep
+    private void onIsWebProcessResponsiveChanged(boolean isResponsive) {
+        Listener currentListener = listener;
+        if (currentListener != null)
+            MainLooperDispatcher.post(() -> currentListener.onWebProcessResponsiveChanged(isResponsive));
+    }
+
+    @Keep
+    private void onPermissionRequest(long requestId, int resources, String origin) {
+        Listener currentListener = listener;
+        if (currentListener != null)
+            MainLooperDispatcher.post(() -> currentListener.onPermissionRequest(requestId, resources, origin));
+        else
+            permissionRequestAnswer(requestId, false);
+    }
+
+    @Keep
+    private void onPermissionRequestCancelled(long requestId) {
+        Listener currentListener = listener;
+        if (currentListener != null)
+            MainLooperDispatcher.post(() -> currentListener.onPermissionRequestCancelled(requestId));
+    }
+
+    // WebKit answers a query that is not taken when this returns, so the listener is called right away, on the main
+    // thread, where WebKit runs.
+    @Keep
+    private boolean onQueryPermissionState(long queryId, int resource, String origin) {
+        Listener currentListener = listener;
+        return currentListener != null && currentListener.onQueryPermissionState(queryId, resource, origin);
+    }
+
+    @Keep
+    private void onShowNotification(long notificationId, String origin, String title, String body,
+                                    @Nullable String tag) {
+        Listener currentListener = listener;
+        if (currentListener != null)
+            MainLooperDispatcher.post(
+                () -> currentListener.onShowNotification(notificationId, origin, title, body, tag));
+        else
+            notificationClose(notificationId);
+    }
+
+    @Keep
+    private void onNotificationClosed(long notificationId) {
+        Listener currentListener = listener;
+        if (currentListener != null)
+            MainLooperDispatcher.post(() -> currentListener.onNotificationClosed(notificationId));
+    }
+
+    @Keep
+    private void onPageIconsChanged() {
+        Listener currentListener = listener;
+        if (currentListener != null)
+            MainLooperDispatcher.post(currentListener::onPageIconsChanged);
+    }
+
+    /**
+     * The icon of the page that best fits a square of size by size pixels: of the images it has, the smallest whose
+     * longer side is at least size, scaled down to fit, or else the biggest, as it is. Null while the page has none.
+     */
+    public @Nullable Bitmap getPageIcon(int size) {
+        return mNativePtr != 0 ? nativeGetPageIcon(mNativePtr, size) : null;
+    }
+
+    /** Tells the page that the user tapped a notification, unless it is closed. */
+    public void notificationClick(long notificationId) {
+        if (mNativePtr != 0)
+            nativeNotificationClick(mNativePtr, notificationId);
+    }
+
+    /** Closes a notification that is not closed yet, which the listener then does not hear of. */
+    public void notificationClose(long notificationId) {
+        if (mNativePtr != 0)
+            nativeNotificationClose(mNativePtr, notificationId);
+    }
+
+    /**
+     * Answers a request reported via {@link Listener#onPermissionRequest}. Only the first answer counts, and none
+     * counts once the request ended, or the view is destroyed, which denies the requests that are left.
+     */
+    public void permissionRequestAnswer(long requestId, boolean allow) {
+        if (mNativePtr != 0)
+            nativePermissionRequestAnswer(mNativePtr, requestId, allow);
+    }
+
+    /**
+     * Answers a query taken in {@link Listener#onQueryPermissionState} with a {@code PERMISSION_STATE_*} value. Only
+     * the first answer counts, and none counts once the page loaded another document.
+     */
+    public void permissionStateQueryAnswer(long queryId, int state) {
+        if (mNativePtr != 0)
+            nativePermissionStateQueryAnswer(mNativePtr, queryId, state);
+    }
+
+    /**
+     * Answers a request reported via {@link Listener#onHttpAuthRequest} with these credentials. Only the first answer
+     * counts, and none counts once WebKit cancelled the request, because its load ended or another one started.
+     */
+    public void authenticate(long requestId, @NonNull String username, @NonNull String password) {
+        if (mNativePtr != 0)
+            nativeAuthenticate(mNativePtr, requestId, username, password);
+    }
+
+    /**
+     * Answers a request reported via {@link Listener#onHttpAuthRequest} without credentials, so that the load goes on
+     * and shows what the server sent with its request for them, such as its 401 page.
+     */
+    public void cancelAuthentication(long requestId) {
+        if (mNativePtr != 0)
+            nativeAuthenticationCancel(mNativePtr, requestId);
+    }
+
+    private static class SnapshotCallbackHolder {
+        private final SnapshotCallback callback;
+
+        SnapshotCallbackHolder(@NonNull SnapshotCallback callback) { this.callback = callback; }
+
+        // Called from the native snapshot thread, or from the main thread if that thread could not be started, which
+        // fills the returned bitmap's pixels in place. commitResult can be called from any thread: it posts the
+        // callback to the main thread.
+        @Keep
+        public @Nullable Bitmap createBitmap(int width, int height) {
+            try {
+                return Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+            } catch (OutOfMemoryError | RuntimeException error) {
+                Log.e("WPEAndroid", "Cannot create snapshot bitmap", error);
+                return null;
+            }
+        }
+
+        @Keep
+        public void commitResult(@Nullable Bitmap bitmap) {
+            MainLooperDispatcher.postLater(() -> callback.onResult(bitmap));
+        }
+    }
 
     private static class EvalCallbackHolder {
         private final EvalCallback callback;
@@ -222,18 +815,46 @@ public final class WebKitWebView {
 
     private native long nativeInit(long displayPtr, long contextPtr, long toplevelPtr, long networkSessionPtr,
                                    long settingsPtr);
+    private native long nativeInitRelated(long relatedPtr, long settingsPtr);
     private native void nativeDestroy(long nativePtr);
     private native void nativeLoadUrl(long nativePtr, String url);
+    private native void nativeDownloadUri(long nativePtr, String uri);
     private native void nativeLoadHtml(long nativePtr, String content, String baseUri);
+    private native void nativeLoadAlternateHtml(long nativePtr, String content, String contentUri,
+                                                @Nullable String baseUri);
     private native void nativeStopLoading(long nativePtr);
     private native void nativeReload(long nativePtr);
+    private native void nativeReloadBypassCache(long nativePtr);
     private native void nativeGoBack(long nativePtr);
     private native void nativeGoForward(long nativePtr);
     private native long nativeGetWPEView(long nativePtr);
     private native long nativeGetWebKitWebViewPtr(long nativePtr);
     private native void nativeSetZoomLevel(long nativePtr, double zoomLevel);
-    private native void nativeEvaluateJavascript(long nativePtr, String script,
+    private native void nativeSetBackgroundColor(long nativePtr, float red, float green, float blue, float alpha);
+    private native void nativeCaptureSnapshot(long nativePtr, int region, int maxWidth, int maxHeight,
+                                              @NonNull SnapshotCallbackHolder callbackHolder);
+    private native void nativeEvaluateJavascript(long nativePtr, String script, @Nullable String worldName,
                                                  @Nullable EvalCallbackHolder callbackHolder);
-    private native void nativeScriptDialogConfirm(long dialogPtr, boolean confirm, @Nullable String text);
-    private native void nativeScriptDialogClose(long dialogPtr);
+    private native void nativeScriptDialogAnswer(long nativePtr, long dialogId, boolean confirm, @Nullable String text);
+    private native void nativeTerminateWebProcess(long nativePtr);
+    private native byte[] nativeSaveState(long nativePtr);
+    private native boolean nativeRestoreState(long nativePtr, @NonNull byte[] state);
+    private native boolean nativeCanGoBack(long nativePtr);
+    private native boolean nativeCanGoForward(long nativePtr);
+    private native void nativeFileChooserSelect(long requestPtr, @NonNull String[] paths);
+    private native void nativeFileChooserCancel(long requestPtr);
+    private native void nativeColorChooserSetColor(long requestPtr, float red, float green, float blue, float alpha);
+    private native void nativeColorChooserFinish(long requestPtr);
+    private native void nativeColorChooserCancel(long requestPtr);
+    private native void nativeAuthenticate(long nativePtr, long requestId, String username, String password);
+    private native void nativeAuthenticationCancel(long nativePtr, long requestId);
+    private native void nativeSetIsMuted(long nativePtr, boolean muted);
+    private native boolean nativeIsMuted(long nativePtr);
+    private native void nativeFindSearch(long nativePtr, @NonNull String text, int options, int maxMatchCount);
+    private native void nativeFindFinish(long nativePtr);
+    private native void nativePermissionRequestAnswer(long nativePtr, long requestId, boolean allow);
+    private native void nativePermissionStateQueryAnswer(long nativePtr, long queryId, int state);
+    private native void nativeNotificationClick(long nativePtr, long notificationId);
+    private native void nativeNotificationClose(long nativePtr, long notificationId);
+    private native @Nullable Bitmap nativeGetPageIcon(long nativePtr, int size);
 }

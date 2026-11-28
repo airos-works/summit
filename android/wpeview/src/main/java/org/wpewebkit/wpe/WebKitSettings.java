@@ -36,7 +36,10 @@ public final class WebKitSettings {
         }
     }
 
-    public @NonNull String getUserAgentString() { return nativeGetUserAgentString(mNativePtr); }
+    public @NonNull String getUserAgentString() {
+        String userAgent = nativeGetUserAgentString(mNativePtr);
+        return userAgent != null ? userAgent : "";
+    }
     public void setUserAgentString(@NonNull String userAgent) { nativeSetUserAgentString(mNativePtr, userAgent); }
 
     public boolean getMediaPlaybackRequiresUserGesture() {
@@ -62,6 +65,17 @@ public final class WebKitSettings {
     public boolean getDisableWebSecurity() { return nativeGetDisableWebSecurity(mNativePtr); }
     public void setDisableWebSecurity(boolean disable) { nativeSetDisableWebSecurity(mNativePtr, disable); }
 
+    public boolean getAudiblePlaybackRequiresPageVisibility() {
+        return nativeGetAudiblePlaybackRequiresPageVisibility(mNativePtr);
+    }
+    public void setAudiblePlaybackRequiresPageVisibility(boolean requires) {
+        nativeSetAudiblePlaybackRequiresPageVisibility(mNativePtr, requires);
+    }
+
+    // Whether the zoom level of the web view scales only the text of the page, and not the whole page.
+    public boolean getZoomTextOnly() { return nativeGetZoomTextOnly(mNativePtr); }
+    public void setZoomTextOnly(boolean zoomTextOnly) { nativeSetZoomTextOnly(mNativePtr, zoomTextOnly); }
+
     private native long nativeInit();
     private native void nativeDestroy(long nativePtr);
     private native String nativeGetUserAgentString(long nativePtr);
@@ -76,4 +90,8 @@ public final class WebKitSettings {
     private native void nativeSetDeveloperExtrasEnabled(long nativePtr, boolean flag);
     private native boolean nativeGetDisableWebSecurity(long nativePtr);
     private native void nativeSetDisableWebSecurity(long nativePtr, boolean disable);
+    private native boolean nativeGetAudiblePlaybackRequiresPageVisibility(long nativePtr);
+    private native void nativeSetAudiblePlaybackRequiresPageVisibility(long nativePtr, boolean requires);
+    private native boolean nativeGetZoomTextOnly(long nativePtr);
+    private native void nativeSetZoomTextOnly(long nativePtr, boolean zoomTextOnly);
 }

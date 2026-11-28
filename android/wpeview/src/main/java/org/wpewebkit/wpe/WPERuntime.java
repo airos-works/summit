@@ -65,6 +65,28 @@ public final class WPERuntime {
 
     public @Nullable Context getApplicationContext() { return applicationContext; }
 
+    private WPEDisplay display = null;
+
+    /**
+     * Returns the WPEDisplay of the process, creating it on first use. Like WebKit's own
+     * {@code wpe_display_get_default()}, there is one per process, and every WebContext shares it.
+     *
+     * @throws IllegalStateException if the display cannot connect to EGL; a later call tries again.
+     */
+    public @NonNull WPEDisplay getDisplay() {
+        if (applicationContext == null)
+            throw new IllegalStateException("WPERuntime.initialize() must be called before getDisplay()");
+        if (display == null) {
+            WPEDisplay newDisplay = new WPEDisplay(applicationContext);
+            if (newDisplay.getNativePtr() == 0) {
+                newDisplay.destroy();
+                throw new IllegalStateException("The WPEDisplay could not connect to EGL");
+            }
+            display = newDisplay;
+        }
+        return display;
+    }
+
     public static void enableRemoteInspector(int inspectorPort, boolean useHttpInspector) {
         WPERuntime.inspectorPort = inspectorPort;
         WPERuntime.useHttpInspector = useHttpInspector;
@@ -75,16 +97,13 @@ public final class WPERuntime {
             applicationContext = context.getApplicationContext();
             setApplicationContext(applicationContext);
 
-            final String assetsVersion = WPEVersions.versionedAssets("ui_process");
-            if (ServiceUtils.needAssets(applicationContext, assetsVersion)) {
-                ServiceUtils.copyFileOrDir(applicationContext, applicationContext.getAssets(), "injected-bundles",
-                                           true);
-                ServiceUtils.copyFileOrDir(applicationContext, applicationContext.getAssets(), "mime", false);
-                ServiceUtils.saveAssetsVersion(applicationContext, assetsVersion);
-            }
+            ServiceUtils.installAssets(applicationContext, applicationContext.getAssets(), "injected-bundles", true);
+            ServiceUtils.installAssets(applicationContext, applicationContext.getAssets(), "mime", false);
+            // Every process loads the GIO modules, so they are copied here, before this process starts the others.
+            ServiceUtils.installAssets(applicationContext, applicationContext.getAssets(), "gio", true);
 
             ApplicationInfo appInfo = applicationContext.getApplicationInfo();
-            List<String> envStrings = new ArrayList<>(46);
+            List<String> envStrings = new ArrayList<>();
             envStrings.add("GIO_EXTRA_MODULES");
             envStrings.add(new File(context.getFilesDir(), "gio").getAbsolutePath());
             envStrings.add("WEBKIT_INJECTED_BUNDLE_PATH");
@@ -111,7 +130,8 @@ public final class WPERuntime {
         }
     }
 
-    protected final AuxiliaryProcessesContainer auxiliaryProcesses = new AuxiliaryProcessesContainer();
+    protected final AuxiliaryProcessesContainer auxiliaryProcesses =
+        new AuxiliaryProcessesContainer(connection -> getApplicationContext().unbindService(connection));
 
     private final WPEServiceConnectionListener serviceConnectionDelegate = new WPEServiceConnectionListener() {
         public void onCleanExit(@NonNull WPEServiceConnection connection) {
@@ -124,6 +144,14 @@ public final class WPERuntime {
             // Unbind the service to prevent restarting on crash,
             // wpewebkit will restart the auxiliary process if needed
             auxiliaryProcesses.unregister(connection.getPid());
+        }
+
+        public void onDisposedServiceConnected(@NonNull WPEServiceConnection connection) {
+            auxiliaryProcesses.onDisposedServiceConnected(connection);
+        }
+
+        public void onProcessGone(@NonNull WPEServiceConnection connection) {
+            auxiliaryProcesses.onProcessGone(connection);
         }
     };
 
@@ -167,8 +195,15 @@ public final class WPERuntime {
 
             WPEServiceConnection serviceConnection =
                 new WPEServiceConnection(pid, processType, parcelFd, serviceConnectionDelegate);
-            applicationContext.bindService(intent, serviceConnection,
-                                           Context.BIND_AUTO_CREATE | Context.BIND_IMPORTANT);
+            if (!applicationContext.bindService(intent, serviceConnection,
+                                                Context.BIND_AUTO_CREATE | Context.BIND_IMPORTANT)) {
+                // The service never connects, so it is not registered, as it would keep its slot, and no service takes
+                // the socket.
+                Log.e(LOGTAG, "Cannot bind " + serviceClass.getSimpleName());
+                serviceConnection.dispose();
+                applicationContext.unbindService(serviceConnection);
+                return;
+            }
             auxiliaryProcesses.register(pid, serviceConnection);
         } catch (Exception e) {
             Log.e(LOGTAG, "Cannot launch auxiliary process", e);

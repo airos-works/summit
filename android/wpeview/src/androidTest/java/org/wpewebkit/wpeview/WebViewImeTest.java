@@ -1,99 +1,1173 @@
 package org.wpewebkit.wpeview;
 
+import android.content.Context;
+import android.os.Process;
+import android.os.SystemClock;
+import android.util.Log;
+import android.view.InputDevice;
+import android.view.MotionEvent;
+import android.view.ViewConfiguration;
+import android.view.ViewGroup;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
+import android.widget.EditText;
 
 import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
 import androidx.lifecycle.Lifecycle;
 import androidx.test.core.app.ActivityScenario;
 import androidx.test.ext.junit.rules.ActivityScenarioRule;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
+import androidx.test.platform.app.InstrumentationRegistry;
 
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.wpewebkit.wpe.WPEInputMethodContext;
 
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Predicate;
 
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
+import static org.junit.Assume.assumeTrue;
 
+/**
+ * These tests act as the input method: they get the WebView's InputConnection and send text through it. So their
+ * activity keeps Android's input method away from its window, see {@link WebViewTestActivity#withoutInputMethod}.
+ * The tests of input method restarts need Android's input method, so they start an activity of their own.
+ */
 @RunWith(AndroidJUnit4.class)
 public class WebViewImeTest {
     @Rule
-    public ActivityScenarioRule<WebViewTestActivity> webViewActivityTestRule =
-        new ActivityScenarioRule<>(WebViewTestActivity.class);
+    public ActivityScenarioRule<WebViewTestActivity> webViewActivityTestRule = new ActivityScenarioRule<>(
+        WebViewTestActivity.withoutInputMethod(InstrumentationRegistry.getInstrumentation().getTargetContext()));
 
     /**
-     * Verifies that focusing an editable element in the page makes the WebView an active text
-     * editor and produces a valid {@link InputConnection} through the WPE input-method bridge
-     * (WebKit input-method-context focus-in -> WPEInputMethodContext focus listener ->
-     * WebView.onImeFieldFocused). This is the part of IME handling this widget owns; whether the
-     * soft keyboard is actually rendered additionally depends on the window holding focus, which is
-     * not guaranteed under ActivityScenario instrumentation.
+     * Focusing an editable element in the page makes the WebView a text editor with an {@link InputConnection} for
+     * text, through the input method context of WPE (its focus-in reaches WebView.onImeFieldFocused). This needs the
+     * focus of the view, not that of the window, which only decides whether the keyboard shows.
      */
     @Test
     public void testEditableFocusEngagesInputConnection() throws Throwable {
-        CountDownLatch focusScriptDone = new CountDownLatch(1);
         ActivityScenario<WebViewTestActivity> scenario = webViewActivityTestRule.getScenario();
-        scenario
-            .onActivity(activity -> {
-                activity.getWebView().setWebViewClient(new WebViewClient() {
-                    @Override
-                    public void onPageFinished(@NonNull WebView view, @NonNull String url) {
-                        // hasFocus() is true once the view has focus; otherwise focus the editor as
-                        // soon as the document gains focus.
-                        String focusScript = "(function() {\n"
-                                             +
-                                             "  function focusEditor() { document.getElementById('editor').focus(); }\n"
-                                             + "  if (document.hasFocus()) { focusEditor(); }\n"
-                                             + "  else { window.addEventListener('focus', focusEditor); }\n"
-                                             + "})();";
-                        view.evaluateJavascript(focusScript, value -> focusScriptDone.countDown());
-                    }
-                });
+        // A user focuses the view by tapping it, and the test focuses the editable from a script.
+        scenario.onActivity(activity -> activity.getWebView().requestFocus());
+        WebViewActivityScenarioHelper.loadHtmlSync(scenario, new TestWebViewClient(),
+                                                   "<html><body contenteditable id='editor'></body></html>");
+        scenario.moveToState(Lifecycle.State.RESUMED);
 
-                // A real user focuses the view by tapping it; the test focuses the editable via JS,
-                // so it must give the WebView focus first for the IME to engage.
-                activity.getWebView().requestFocus();
-
-                String htmlDocument = "<html><body contenteditable id='editor'></body></html>";
-                activity.getWebView().loadHtml(htmlDocument, null);
-            })
-            .moveToState(Lifecycle.State.RESUMED);
-
-        assertTrue("Focus script never ran", focusScriptDone.await(30, TimeUnit.SECONDS));
-
-        // The editable focus travels WebKit -> WPEInputMethodContext -> WebView asynchronously; poll
-        // until the WebView reports itself as a text editor.
-        AtomicBoolean isTextEditor = new AtomicBoolean(false);
-        for (int i = 0; i < 60 && !isTextEditor.get(); i++) {
-            CountDownLatch pollLatch = new CountDownLatch(1);
-            scenario.onActivity(activity -> {
-                isTextEditor.set(activity.getWebView().onCheckIsTextEditor());
-                pollLatch.countDown();
-            });
-            assertTrue(pollLatch.await(5, TimeUnit.SECONDS));
-            if (!isTextEditor.get())
-                Thread.sleep(250);
-        }
-        assertTrue("WebView did not become a text editor after the editable was focused", isTextEditor.get());
-
-        // A valid InputConnection with a web-text input type proves the IME bridge is wired up.
-        AtomicReference<InputConnection> connection = new AtomicReference<>();
         EditorInfo editorInfo = new EditorInfo();
-        CountDownLatch icLatch = new CountDownLatch(1);
-        scenario.onActivity(activity -> {
-            connection.set(activity.getWebView().onCreateInputConnection(editorInfo));
-            icLatch.countDown();
-        });
-        assertTrue(icLatch.await(5, TimeUnit.SECONDS));
-
-        assertNotNull("Focused editable did not yield an InputConnection", connection.get());
+        focusEditor(scenario, "editor", editorInfo);
         assertTrue("InputConnection is not configured for text input",
                    (editorInfo.inputType & EditorInfo.TYPE_CLASS_TEXT) == EditorInfo.TYPE_CLASS_TEXT);
+    }
+
+    /**
+     * A WebView destroyed while an input method is connected to its page: the connection the input method still
+     * holds takes text without reaching the destroyed page, the WebView gives out no new connection, and a focus
+     * change that arrives late does not make it a text editor again.
+     */
+    @Test
+    public void testInputMethodOfADestroyedWebView() throws Throwable {
+        ActivityScenario<WebViewTestActivity> scenario = webViewActivityTestRule.getScenario();
+        scenario.moveToState(Lifecycle.State.RESUMED);
+        AtomicReference<WebContext> webContext = new AtomicReference<>();
+        AtomicReference<WebView> webView = new AtomicReference<>();
+        CountDownLatch loaded = new CountDownLatch(1);
+        try {
+            scenario.onActivity(activity -> {
+                webContext.set(new WebContext(activity, false, true));
+                webView.set(new WebView(activity, webContext.get()));
+                webView.get().setWebViewClient(new WebViewClient() {
+                    @Override
+                    public void onPageFinished(@NonNull WebView view, @NonNull String url) {
+                        loaded.countDown();
+                    }
+                });
+                activity.addContentView(webView.get(), new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                                                                                  ViewGroup.LayoutParams.MATCH_PARENT));
+                webView.get().requestFocus();
+                webView.get().loadHtml("<html><body contenteditable id='editor'></body></html>", null);
+            });
+            assertTrue("The page did not load", loaded.await(30, TimeUnit.SECONDS));
+
+            AtomicBoolean isTextEditor = new AtomicBoolean(false);
+            for (int i = 0; i < 60 && !isTextEditor.get(); i++) {
+                scenario.onActivity(activity -> {
+                    webView.get().evaluateJavascript("document.getElementById('editor').focus()", null);
+                    isTextEditor.set(webView.get().onCheckIsTextEditor());
+                });
+                if (!isTextEditor.get())
+                    Thread.sleep(250);
+            }
+            assertTrue("The WebView did not become a text editor", isTextEditor.get());
+
+            String marker = "testInputMethodOfADestroyedWebView " + System.nanoTime();
+            Log.i("WebViewImeTest", marker);
+            AtomicReference<InputConnection> connection = new AtomicReference<>();
+            AtomicBoolean textEditorAfterDestroy = new AtomicBoolean(true);
+            AtomicReference<InputConnection> connectionAfterDestroy = new AtomicReference<>();
+            scenario.onActivity(activity -> {
+                WebView view = webView.get();
+                connection.set(view.onCreateInputConnection(new EditorInfo()));
+                view.destroy();
+                if (connection.get() != null) {
+                    connection.get().commitText("text", 1);
+                    connection.get().deleteSurroundingText(1, 1);
+                }
+                view.onImeFieldFocused(true);
+                textEditorAfterDestroy.set(view.onCheckIsTextEditor());
+                connectionAfterDestroy.set(view.onCreateInputConnection(new EditorInfo()));
+            });
+
+            assertNotNull("The focused editable did not yield an InputConnection", connection.get());
+            assertFalse("A late focus change made a destroyed WebView a text editor", textEditorAfterDestroy.get());
+            assertNull("A destroyed WebView gave out an InputConnection", connectionAfterDestroy.get());
+            String log = WebViewActivityScenarioHelper.shell("logcat -d -v raw --pid=" + Process.myPid());
+            String afterMarker = log.substring(Math.max(0, log.lastIndexOf(marker)));
+            assertFalse("Text sent to a destroyed WebView reached native code:\n" + afterMarker,
+                        afterMarker.contains("assertion '"));
+        } finally {
+            scenario.onActivity(activity -> {
+                WebView view = webView.get();
+                if (view != null) {
+                    if (view.getParent() != null)
+                        ((ViewGroup)view.getParent()).removeView(view);
+                    view.destroy();
+                }
+                if (webContext.get() != null)
+                    webContext.get().destroy();
+            });
+        }
+    }
+
+    private static final String COMPOSITION_PAGE =
+        "<html><body><input id='editor'><input id='other'><script>\n"
+        + "window.events = [];\n"
+        + "const editor = document.getElementById('editor');\n"
+        + "for (const type of ['compositionstart', 'compositionupdate', 'compositionend'])\n"
+        + "  editor.addEventListener(type, e => window.events.push(type + ':' + e.data));\n"
+        + "</script></body></html>";
+
+    // Focuses the page's #editor and returns the WebView's connection to it.
+    private static InputConnection focusEditor(ActivityScenario<WebViewTestActivity> scenario) throws Throwable {
+        return focusEditor(scenario, "editor");
+    }
+
+    // Focuses the element with the given id until the condition holds for the WebView, and tells whether it did.
+    private static boolean focusUntil(ActivityScenario<WebViewTestActivity> scenario, String id,
+                                      Predicate<WebView> condition) throws Throwable {
+        AtomicBoolean holds = new AtomicBoolean(false);
+        for (int i = 0; i < 60 && !holds.get(); i++) {
+            scenario.onActivity(activity -> {
+                activity.getWebView().evaluateJavascript("document.getElementById('" + id + "').focus()", null);
+                holds.set(condition.test(activity.getWebView()));
+            });
+            if (!holds.get())
+                Thread.sleep(250);
+        }
+        return holds.get();
+    }
+
+    // Focuses the element with the given id and returns the WebView's connection to it.
+    private static InputConnection focusEditor(ActivityScenario<WebViewTestActivity> scenario, String id)
+        throws Throwable {
+        return focusEditor(scenario, id, new EditorInfo());
+    }
+
+    // Like focusEditor(scenario, id), and fills editorInfo for the connection.
+    private static InputConnection focusEditor(ActivityScenario<WebViewTestActivity> scenario, String id,
+                                               EditorInfo editorInfo) throws Throwable {
+        assertTrue("The WebView did not become a text editor", focusUntil(scenario, id, WebView::onCheckIsTextEditor));
+        AtomicReference<InputConnection> connection = new AtomicReference<>();
+        scenario.onActivity(activity -> connection.set(activity.getWebView().onCreateInputConnection(editorInfo)));
+        assertNotNull("The focused editable did not yield an InputConnection", connection.get());
+        return connection.get();
+    }
+
+    /**
+     * Composing text reaches the page as a composition, a commit while composing replaces the composing text, and
+     * finishing the composition keeps its text.
+     */
+    @Test
+    public void testComposingTextIsAComposition() throws Throwable {
+        ActivityScenario<WebViewTestActivity> scenario = webViewActivityTestRule.getScenario();
+        scenario.onActivity(activity -> activity.getWebView().requestFocus());
+        WebViewActivityScenarioHelper.loadHtmlSync(scenario, new TestWebViewClient(), COMPOSITION_PAGE);
+        scenario.moveToState(Lifecycle.State.RESUMED);
+        InputConnection connection = focusEditor(scenario);
+
+        scenario.onActivity(activity -> {
+            connection.setComposingText("h", 1);
+            connection.setComposingText("he", 1);
+            connection.setComposingText("hel", 1);
+        });
+        String composing = "document.getElementById('editor').value === 'hel' && window.events.join() === "
+                           + "'compositionstart:,compositionupdate:h,compositionupdate:he,compositionupdate:hel'";
+        assertComposition(scenario, "The composing text is not a composition", composing);
+
+        scenario.onActivity(activity -> {
+            connection.commitText("hello ", 1);
+            connection.setComposingText("wor", 1);
+            connection.finishComposingText();
+        });
+        String finished = "document.getElementById('editor').value === 'hello wor' && window.events.join().endsWith("
+                          + "'compositionend:hello ,compositionstart:,compositionupdate:wor,compositionend:wor')";
+        assertComposition(scenario, "Committing or finishing the composition went wrong", finished);
+
+        scenario.onActivity(activity -> {
+            connection.setComposingText("ld", 1);
+            connection.commitText("", 1);
+        });
+        String cleared = "document.getElementById('editor').value === 'hello wor' && "
+                         + "window.events.join().endsWith('compositionstart:,compositionupdate:ld,compositionend:')";
+        assertComposition(scenario, "Committing no text did not remove the composing text", cleared);
+    }
+
+    /**
+     * Composing text that WebKit ignores because no field is focused (an input method that still holds the connection
+     * of a blurred field) is not committed into the field focused next when that connection finishes composing.
+     */
+    @Test
+    public void testComposingWithoutAFocusedFieldIsForgotten() throws Throwable {
+        ActivityScenario<WebViewTestActivity> scenario = webViewActivityTestRule.getScenario();
+        scenario.onActivity(activity -> activity.getWebView().requestFocus());
+        WebViewActivityScenarioHelper.loadHtmlSync(scenario, new TestWebViewClient(), COMPOSITION_PAGE);
+        scenario.moveToState(Lifecycle.State.RESUMED);
+        InputConnection blurred = focusEditor(scenario);
+
+        AtomicBoolean isTextEditor = new AtomicBoolean(true);
+        for (int i = 0; i < 60 && isTextEditor.get(); i++) {
+            scenario.onActivity(activity -> {
+                activity.getWebView().evaluateJavascript("document.getElementById('editor').blur()", null);
+                isTextEditor.set(activity.getWebView().onCheckIsTextEditor());
+            });
+            if (isTextEditor.get())
+                Thread.sleep(250);
+        }
+        assertFalse("The WebView is still a text editor after the editable was blurred", isTextEditor.get());
+
+        scenario.onActivity(activity -> blurred.setComposingText("stale", 1));
+        InputConnection other = focusEditor(scenario, "other");
+        scenario.onActivity(activity -> {
+            blurred.finishComposingText();
+            // Commits go through the same queue, so this lands after anything the line above commits.
+            other.commitText("new", 1);
+        });
+        assertComposition(scenario, "Composing text from the blurred field reached the next one",
+                          "document.getElementById('other').value === 'new' && "
+                              + "document.getElementById('editor').value === ''");
+    }
+
+    /**
+     * When a tap ends the composition, WebKit keeps its text and the WebView restarts the input method, which has the
+     * old connection finish its composition right away. That must not commit the text a second time.
+     */
+    @Test
+    public void testCompositionEndedByATapIsNotCommittedAgain() throws Throwable {
+        ActivityScenario<WebViewTestActivity> scenario = webViewActivityTestRule.getScenario();
+        scenario.onActivity(activity -> activity.getWebView().requestFocus());
+        // Each field fills half of the view, so a tap at three quarters of its height lands on #other.
+        WebViewActivityScenarioHelper.loadHtmlSync(
+            scenario, new TestWebViewClient(),
+            COMPOSITION_PAGE.replace("<html>", "<html><style>html, body { margin: 0 } input { display: block; "
+                                                   + "box-sizing: border-box; width: 100%; height: 50vh }</style>"));
+        scenario.moveToState(Lifecycle.State.RESUMED);
+        InputConnection connection = focusEditor(scenario);
+
+        // Stands in for Android closing the old connection when the input method restarts, since no input method
+        // connects to this window.
+        CountDownLatch reset = new CountDownLatch(1);
+        scenario.onActivity(activity -> {
+            WebView view = activity.getWebView();
+            view.getInternalWebKitWebView().getInputMethodContext().setListener(new WPEInputMethodContext.Listener() {
+                @Override
+                public void onFocusIn() {
+                    view.onImeFieldFocused(true);
+                }
+                @Override
+                public void onFocusOut() {
+                    view.onImeFieldFocused(false);
+                }
+                @Override
+                public void onPreeditReset() {
+                    reset.countDown();
+                    connection.finishComposingText();
+                    view.onImePreeditReset();
+                }
+            });
+            connection.setComposingText("wor", 1);
+        });
+        assertComposition(scenario, "The composing text is not a composition",
+                          "document.getElementById('editor').value === 'wor'");
+
+        scenario.onActivity(activity -> {
+            WebView view = activity.getWebView();
+            tap(view, view.getWidth() / 2f, view.getHeight() * 3 / 4f);
+        });
+        assertTrue("The tap did not end the composition", reset.await(10, TimeUnit.SECONDS));
+
+        InputConnection other = focusEditor(scenario, "other");
+        // Commits go through the same queue, so this lands after anything finishing the composition commits.
+        scenario.onActivity(activity -> other.commitText("x", 1));
+        assertComposition(scenario, "The composition ended by the tap was committed again",
+                          "document.getElementById('other').value === 'x' && "
+                              + "document.getElementById('editor').value === 'wor'");
+    }
+
+    // A tap: the finger moves a few pixels and comes back, well within the touch slop.
+    private static final float[][] TAP = {{0, 0}, {2, 1}, {3, 3}, {1, 2}, {1, 2}};
+
+    // A drag of 600 pixels upwards, which scrolls the page down.
+    private static final float[][] DRAG = {{0, 0},    {0, -100}, {0, -200}, {0, -300},
+                                           {0, -400}, {0, -500}, {0, -600}, {0, -600}};
+
+    // The finger goes far and comes back to where it started before it is lifted: not a tap.
+    private static final float[][] AWAY_AND_BACK = {{0, 0}, {0, -150}, {0, -300}, {0, -150}, {0, 0}, {0, 0}};
+
+    // Event times go on from the last touch, so that a touch never starts before the one before it ended.
+    private long lastEventTime;
+
+    /**
+     * A tap on the page brings back the keyboard of the field that the user focused, which Back may have hidden. A
+     * scroll does not, nor a touch of two fingers, nor a long press. The page is all one field, tall enough to scroll.
+     */
+    @Test
+    public void testOnlyATapShowsTheKeyboard() throws Throwable {
+        ActivityScenario<WebViewTestActivity> scenario = webViewActivityTestRule.getScenario();
+        scenario.moveToState(Lifecycle.State.RESUMED);
+        AtomicReference<WebContext> webContext = new AtomicReference<>();
+        AtomicReference<WebView> webView = new AtomicReference<>();
+        AtomicInteger keyboardRequests = new AtomicInteger();
+        CountDownLatch loaded = new CountDownLatch(1);
+        try {
+            scenario.onActivity(activity -> {
+                webContext.set(new WebContext(activity, false, true));
+                webView.set(new WebView(activity, webContext.get()) {
+                    @Override
+                    void showSoftInput() {
+                        keyboardRequests.incrementAndGet();
+                        super.showSoftInput();
+                    }
+                });
+                webView.get().setWebViewClient(new WebViewClient() {
+                    @Override
+                    public void onPageFinished(@NonNull WebView view, @NonNull String url) {
+                        loaded.countDown();
+                    }
+                });
+                activity.addContentView(webView.get(), new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                                                                                  ViewGroup.LayoutParams.MATCH_PARENT));
+                webView.get().requestFocus();
+                webView.get().loadHtml("<html><head><meta name=viewport content='width=device-width'><style>"
+                                           + "body { margin: 0; height: 5000px }</style></head>"
+                                           + "<body contenteditable id='editor'></body></html>",
+                                       null);
+            });
+            assertTrue("The page did not load", loaded.await(30, TimeUnit.SECONDS));
+
+            // The user focuses the field with a tap. WebKit keeps the keyboard down for a field that a script focused.
+            scenario.onActivity(activity -> moveFinger(webView.get(), TAP));
+            WebPageTestHelper.waitFor("The WebView did not become a text editor",
+                                      () -> webView.get().onCheckIsTextEditor());
+
+            // Each touch is sent and counted in one go on the main thread, so that only its own requests count.
+            AtomicInteger dragRequests = new AtomicInteger();
+            scenario.onActivity(activity -> {
+                keyboardRequests.set(0);
+                moveFinger(webView.get(), DRAG);
+                dragRequests.set(keyboardRequests.get());
+            });
+            assertEquals("The drag did not scroll the page", "true",
+                         WebViewActivityScenarioHelper.waitForJavaScriptResult(
+                             scenario, activity -> webView.get(), "scrollY > 0", "true"));
+            assertEquals("A scroll showed the keyboard", 0, dragRequests.get());
+
+            AtomicInteger twoFingerRequests = new AtomicInteger();
+            scenario.onActivity(activity -> {
+                keyboardRequests.set(0);
+                touchWithTwoFingers(webView.get());
+                twoFingerRequests.set(keyboardRequests.get());
+            });
+            assertEquals("A touch of two fingers showed the keyboard", 0, twoFingerRequests.get());
+
+            AtomicInteger awayAndBackRequests = new AtomicInteger();
+            scenario.onActivity(activity -> {
+                keyboardRequests.set(0);
+                moveFinger(webView.get(), AWAY_AND_BACK);
+                awayAndBackRequests.set(keyboardRequests.get());
+            });
+            assertEquals("A finger that went away and came back showed the keyboard", 0, awayAndBackRequests.get());
+
+            // The finger stays down past the long press timeout, on the clock of the main thread's messages.
+            long pressTime = ViewConfiguration.getLongPressTimeout() + 500;
+            AtomicLong pressDownTime = new AtomicLong();
+            AtomicInteger longPressRequests = new AtomicInteger();
+            scenario.onActivity(activity -> {
+                keyboardRequests.set(0);
+                pressDownTime.set(Math.max(SystemClock.uptimeMillis(), lastEventTime + 50));
+                WebView view = webView.get();
+                sendTouch(view, pressDownTime.get(), 0, MotionEvent.ACTION_DOWN, new int[] {0},
+                          new float[] {view.getWidth() / 2f}, view.getHeight() / 2f);
+            });
+            Thread.sleep(pressTime + pressDownTime.get() - SystemClock.uptimeMillis());
+            scenario.onActivity(activity -> {
+                WebView view = webView.get();
+                sendTouch(view, pressDownTime.get(), pressTime, MotionEvent.ACTION_UP, new int[] {0},
+                          new float[] {view.getWidth() / 2f}, view.getHeight() / 2f);
+                longPressRequests.set(keyboardRequests.get());
+            });
+            assertEquals("A long press showed the keyboard", 0, longPressRequests.get());
+
+            // Two taps in a row, as quick as a double tap, each bring back the keyboard.
+            AtomicInteger tapRequests = new AtomicInteger();
+            scenario.onActivity(activity -> {
+                keyboardRequests.set(0);
+                moveFinger(webView.get(), TAP);
+                moveFinger(webView.get(), TAP);
+                tapRequests.set(keyboardRequests.get());
+            });
+            assertEquals("Taps did not show the keyboard", 2, tapRequests.get());
+        } finally {
+            scenario.onActivity(activity -> {
+                WebView view = webView.get();
+                if (view != null) {
+                    if (view.getParent() != null)
+                        ((ViewGroup)view.getParent()).removeView(view);
+                    view.destroy();
+                }
+                if (webContext.get() != null)
+                    webContext.get().destroy();
+            });
+        }
+    }
+
+    // A field that fills the page, and counts its blurs and clicks.
+    private static final String FIELD_PAGE = "<input id='field' onblur='blurs++' onclick='clicks++' style='display: "
+                                             + "block; width: 100%; height: 100vh; border: 0'>"
+                                             + "<script>var blurs = 0, clicks = 0</script>";
+
+    /**
+     * The user focuses a field with a tap, which brings the keyboard. Another view takes the focus, as the address
+     * field of a browser does, and gives it back: WebKit gives the focus back to the field and asks to keep the
+     * keyboard down, so the keyboard comes with the next tap on the field.
+     */
+    @Test
+    public void testKeyboardWaitsForATapWhenThePageGetsTheFocusBack() throws Throwable {
+        ActivityScenario<WebViewTestActivity> scenario = webViewActivityTestRule.getScenario();
+        scenario.moveToState(Lifecycle.State.RESUMED);
+        KeyboardViews views = new KeyboardViews();
+        try {
+            loadInKeyboardViews(scenario, views, FIELD_PAGE);
+            WebView view = views.webView;
+            scenario.onActivity(activity -> tapAt(view, 0.5f));
+            WebPageTestHelper.waitFor("The tap did not focus the field", view::onCheckIsTextEditor);
+            assertTrue("The field that the user focused did not get the keyboard", views.keyboardRequests.get() > 0);
+
+            views.keyboardShown.set(true);
+            views.keyboardRequests.set(0);
+            scenario.onActivity(activity -> views.otherView.requestFocus());
+            waitForPage(scenario, view, "blurs === 1");
+            assertFalse("The field kept the focus of the input method",
+                        WebPageTestHelper.onMainGet(view::onCheckIsTextEditor));
+            scenario.onActivity(activity -> view.requestFocus());
+            WebPageTestHelper.waitFor("The field did not get the focus back", view::onCheckIsTextEditor);
+            assertEquals("The field got the keyboard when its page got the focus back", 0,
+                         views.keyboardRequests.get());
+
+            scenario.onActivity(activity -> tapAt(view, 0.5f));
+            WebPageTestHelper.waitFor("A tap on the field did not bring the keyboard",
+                                      () -> views.keyboardRequests.get() > 0);
+        } finally {
+            destroyKeyboardViews(scenario, views);
+        }
+    }
+
+    /**
+     * The window loses the focus to a dialog, as to the notification shade or another app, while the user types in a
+     * field: the keyboard comes back with the window. If the user had hidden it, it stays down.
+     */
+    @Test
+    public void testKeyboardComesBackWithTheWindow() throws Throwable {
+        ActivityScenario<WebViewTestActivity> scenario = webViewActivityTestRule.getScenario();
+        scenario.moveToState(Lifecycle.State.RESUMED);
+        KeyboardViews views = new KeyboardViews();
+        try {
+            loadInKeyboardViews(scenario, views, FIELD_PAGE);
+            WebView view = views.webView;
+            scenario.onActivity(activity -> tapAt(view, 0.5f));
+            WebPageTestHelper.waitFor("The tap did not focus the field", view::onCheckIsTextEditor);
+
+            views.keyboardShown.set(true);
+            views.keyboardRequests.set(0);
+            leaveTheWindowAndComeBack(scenario, views, "blurs === 1");
+            WebPageTestHelper.waitFor("The keyboard did not come back with the window",
+                                      () -> views.keyboardRequests.get() > 0);
+
+            views.keyboardShown.set(false);
+            views.keyboardRequests.set(0);
+            leaveTheWindowAndComeBack(scenario, views, "blurs === 2");
+            WebPageTestHelper.waitFor("The field did not get the focus back", view::onCheckIsTextEditor);
+            waitForPage(scenario, view, "document.activeElement.id == 'field'");
+            assertEquals("The keyboard that the user hid came back with the window", 0, views.keyboardRequests.get());
+        } finally {
+            destroyKeyboardViews(scenario, views);
+        }
+    }
+
+    // A dialog takes the focus of the window, until the page has let its field go, and closes.
+    private static void leaveTheWindowAndComeBack(ActivityScenario<WebViewTestActivity> scenario, KeyboardViews views,
+                                                  String blurred) throws Throwable {
+        AtomicReference<android.app.Dialog> dialog = new AtomicReference<>();
+        scenario.onActivity(activity -> {
+            dialog.set(new android.app.Dialog(activity));
+            dialog.get().show();
+        });
+        WebPageTestHelper.waitFor("The dialog did not take the focus", () -> !views.webView.hasWindowFocus());
+        waitForPage(scenario, views.webView, blurred);
+        scenario.onActivity(activity -> dialog.get().dismiss());
+        WebPageTestHelper.waitFor("The window did not get the focus back", views.webView::hasWindowFocus);
+    }
+
+    /**
+     * A page that handles taps itself cancels their touch end and focuses the tapped field, so WebKit gets no click
+     * and keeps the keyboard down: the tap brings the keyboard. The field fills the top half of the page.
+     */
+    @Test
+    public void testTapThatThePageCancelledBringsTheKeyboard() throws Throwable {
+        ActivityScenario<WebViewTestActivity> scenario = webViewActivityTestRule.getScenario();
+        scenario.moveToState(Lifecycle.State.RESUMED);
+        KeyboardViews views = new KeyboardViews();
+        try {
+            loadInKeyboardViews(scenario, views,
+                                "<input id='field' style='display: block; width: 100%; height: 50vh; border: 0'>"
+                                    + "<script>var ends = 0; document.addEventListener('touchend', event => { ends++;"
+                                    + " event.preventDefault(); if (event.target.id == 'field') event.target.focus();"
+                                    + " }, {passive: false})</script>");
+            WebView view = views.webView;
+            focusFieldWithScript(view);
+            assertEquals("The field that a script focused got the keyboard", 0, views.keyboardRequests.get());
+            scenario.onActivity(activity -> tapAt(view, 0.25f));
+            WebPageTestHelper.waitFor("The tap that the page cancelled did not bring the keyboard",
+                                      () -> views.keyboardRequests.get() > 0);
+            waitForPage(scenario, view, "ends === 1");
+            assertEquals("The tap brought the keyboard more than once", 1, views.keyboardRequests.get());
+        } finally {
+            destroyKeyboardViews(scenario, views);
+        }
+    }
+
+    /**
+     * A page that cancels the touch moves, as a map does, still gets clicks from taps: a tap away from the field that
+     * a script focused brings no keyboard. The field fills the top half of the page.
+     */
+    @Test
+    public void testTapAwayOnAPageThatCancelsMovesBringsNoKeyboard() throws Throwable {
+        ActivityScenario<WebViewTestActivity> scenario = webViewActivityTestRule.getScenario();
+        scenario.moveToState(Lifecycle.State.RESUMED);
+        KeyboardViews views = new KeyboardViews();
+        try {
+            loadInKeyboardViews(scenario, views,
+                                "<input id='field' style='display: block; width: 100%; height: 50vh; border: 0'>"
+                                    + "<script>document.addEventListener('touchmove', event => "
+                                    + "event.preventDefault(), {passive: false})</script>");
+            WebView view = views.webView;
+            focusFieldWithScript(view);
+            scenario.onActivity(activity -> tapAt(view, 0.75f));
+            WebPageTestHelper.waitFor("A tap away from the field left it the focus", () -> !view.onCheckIsTextEditor());
+            assertEquals("A tap away from the field showed the keyboard", 0, views.keyboardRequests.get());
+        } finally {
+            destroyKeyboardViews(scenario, views);
+        }
+    }
+
+    /**
+     * A script focuses a field without the user, and WebKit asks to keep the keyboard down: a tap elsewhere on the page
+     * does not bring the keyboard, and a tap on the field does. The field fills the top half of the page.
+     */
+    @Test
+    public void testKeyboardWaitsForATapOnAFieldThatAScriptFocused() throws Throwable {
+        ActivityScenario<WebViewTestActivity> scenario = webViewActivityTestRule.getScenario();
+        scenario.moveToState(Lifecycle.State.RESUMED);
+        KeyboardViews views = new KeyboardViews();
+        try {
+            loadInKeyboardViews(scenario, views,
+                                "<input id='field' style='display: block; width: 100%; height: 50vh; border: 0'>");
+            WebView view = views.webView;
+            focusFieldWithScript(view);
+            assertEquals("The field that a script focused got the keyboard", 0, views.keyboardRequests.get());
+
+            scenario.onActivity(activity -> tapAt(view, 0.75f));
+            WebPageTestHelper.waitFor("A tap away from the field left it the focus", () -> !view.onCheckIsTextEditor());
+            assertEquals("A tap away from the field showed the keyboard", 0, views.keyboardRequests.get());
+
+            focusFieldWithScript(view);
+            assertEquals("The field that a script focused again got the keyboard", 0, views.keyboardRequests.get());
+            scenario.onActivity(activity -> tapAt(view, 0.25f));
+            WebPageTestHelper.waitFor("A tap on the field did not bring the keyboard",
+                                      () -> views.keyboardRequests.get() > 0);
+        } finally {
+            destroyKeyboardViews(scenario, views);
+        }
+    }
+
+    /**
+     * A field with inputmode=none gets no keyboard, not even from taps on it: the page shows keys of its own for it.
+     */
+    @Test
+    public void testFieldWithInputModeNoneGetsNoKeyboard() throws Throwable {
+        ActivityScenario<WebViewTestActivity> scenario = webViewActivityTestRule.getScenario();
+        scenario.moveToState(Lifecycle.State.RESUMED);
+        KeyboardViews views = new KeyboardViews();
+        try {
+            loadInKeyboardViews(scenario, views, FIELD_PAGE.replace("<input ", "<input inputmode='none' "));
+            WebView view = views.webView;
+            scenario.onActivity(activity -> tapAt(view, 0.5f));
+            WebPageTestHelper.waitFor("The tap did not focus the field", view::onCheckIsTextEditor);
+            scenario.onActivity(activity -> tapAt(view, 0.5f));
+            waitForPage(scenario, view, "clicks === 2");
+            assertEquals("A field with inputmode=none got the keyboard", 0, views.keyboardRequests.get());
+        } finally {
+            destroyKeyboardViews(scenario, views);
+        }
+    }
+
+    // A WebView that counts its requests for the keyboard, and a text field under it that can take the focus from it,
+    // as the address field of a browser does.
+    private static final class KeyboardViews {
+        final AtomicInteger keyboardRequests = new AtomicInteger();
+        // Whether the WebView takes the keyboard for up. The activity keeps the input method away.
+        final AtomicBoolean keyboardShown = new AtomicBoolean();
+        WebContext webContext;
+        WebView webView;
+        EditText otherView;
+    }
+
+    private static void loadInKeyboardViews(ActivityScenario<WebViewTestActivity> scenario, KeyboardViews views,
+                                            String body) throws InterruptedException {
+        CountDownLatch loaded = new CountDownLatch(1);
+        scenario.onActivity(activity -> {
+            views.webContext = new WebContext(activity, false, true);
+            views.otherView = new EditText(activity);
+            activity.addContentView(views.otherView, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
+                                                                                ViewGroup.LayoutParams.WRAP_CONTENT));
+            views.webView = new WebView(activity, views.webContext) {
+                @Override
+                void showSoftInput() {
+                    views.keyboardRequests.incrementAndGet();
+                    super.showSoftInput();
+                }
+
+                @Override
+                boolean isKeyboardShown() {
+                    return views.keyboardShown.get();
+                }
+            };
+            views.webView.setWebViewClient(new WebViewClient() {
+                @Override
+                public void onPageFinished(@NonNull WebView view, @NonNull String url) {
+                    loaded.countDown();
+                }
+            });
+            activity.addContentView(views.webView, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                                                                              ViewGroup.LayoutParams.MATCH_PARENT));
+            views.webView.requestFocus();
+            views.webView.loadHtml("<html><head><meta name=viewport content='width=device-width'></head>"
+                                       + "<body style='margin: 0'>" + body + "</body></html>",
+                                   null);
+        });
+        assertTrue("The page did not load", loaded.await(30, TimeUnit.SECONDS));
+    }
+
+    private static void destroyKeyboardViews(ActivityScenario<WebViewTestActivity> scenario, KeyboardViews views) {
+        scenario.onActivity(activity -> {
+            if (views.webView != null) {
+                if (views.webView.getParent() != null)
+                    ((ViewGroup)views.webView.getParent()).removeView(views.webView);
+                views.webView.destroy();
+            }
+            if (views.webContext != null)
+                views.webContext.destroy();
+        });
+    }
+
+    private static void focusFieldWithScript(WebView view) throws InterruptedException {
+        WebPageTestHelper.waitFor("The script did not focus the field", () -> {
+            view.evaluateJavascript("document.getElementById('field').focus()", null);
+            return view.onCheckIsTextEditor();
+        });
+    }
+
+    // Waits for the condition to hold in the page. One more script round trip then lets what WebKit sent with the
+    // last event reach the view first, as the field it lets go after a blur.
+    private static void waitForPage(ActivityScenario<WebViewTestActivity> scenario, WebView view, String condition)
+        throws Throwable {
+        String result =
+            WebViewActivityScenarioHelper.waitForJavaScriptResult(scenario, activity -> view, condition, "true");
+        assertEquals("The page did not see " + condition, "true", result);
+        WebViewActivityScenarioHelper.waitForJavaScriptResult(scenario, activity -> view, condition, "true");
+    }
+
+    // A tap at the given height in the view, as a fraction of its height from the top.
+    private void tapAt(WebView view, float height) {
+        float offset = view.getHeight() * (height - 0.5f);
+        float[][] path = new float[TAP.length][];
+        for (int i = 0; i < TAP.length; i++)
+            path[i] = new float[] {TAP[i][0], TAP[i][1] + offset};
+        moveFinger(view, path);
+    }
+
+    /**
+     * Moves a finger over the view: down at the first point, through the others, and up at the last one. Each point
+     * is an offset in pixels from the middle of the view.
+     */
+    private void moveFinger(WebView view, float[][] path) {
+        long downTime = Math.max(SystemClock.uptimeMillis(), lastEventTime + 50);
+        for (int i = 0; i < path.length; i++) {
+            int action = i == 0                 ? MotionEvent.ACTION_DOWN
+                         : i == path.length - 1 ? MotionEvent.ACTION_UP
+                                                : MotionEvent.ACTION_MOVE;
+            sendTouch(view, downTime, 16L * i, action, new int[] {0}, new float[] {view.getWidth() / 2f + path[i][0]},
+                      view.getHeight() / 2f + path[i][1]);
+        }
+    }
+
+    // Puts two fingers on the view, as a pinch starts, and lifts them without moving.
+    private void touchWithTwoFingers(WebView view) {
+        long downTime = Math.max(SystemClock.uptimeMillis(), lastEventTime + 50);
+        float y = view.getHeight() / 2f;
+        float left = view.getWidth() / 4f;
+        float right = view.getWidth() * 3 / 4f;
+        int second = 1 << MotionEvent.ACTION_POINTER_INDEX_SHIFT;
+        sendTouch(view, downTime, 0, MotionEvent.ACTION_DOWN, new int[] {0}, new float[] {left}, y);
+        sendTouch(view, downTime, 16, MotionEvent.ACTION_POINTER_DOWN | second, new int[] {0, 1},
+                  new float[] {left, right}, y);
+        sendTouch(view, downTime, 32, MotionEvent.ACTION_POINTER_UP | second, new int[] {0, 1},
+                  new float[] {left, right}, y);
+        sendTouch(view, downTime, 48, MotionEvent.ACTION_UP, new int[] {0}, new float[] {left}, y);
+    }
+
+    private void sendTouch(WebView view, long downTime, long offset, int action, int[] ids, float[] xs, float y) {
+        MotionEvent.PointerProperties[] properties = new MotionEvent.PointerProperties[ids.length];
+        MotionEvent.PointerCoords[] coords = new MotionEvent.PointerCoords[ids.length];
+        for (int i = 0; i < ids.length; i++) {
+            properties[i] = new MotionEvent.PointerProperties();
+            properties[i].id = ids[i];
+            properties[i].toolType = MotionEvent.TOOL_TYPE_FINGER;
+            coords[i] = new MotionEvent.PointerCoords();
+            coords[i].x = xs[i];
+            coords[i].y = y;
+            coords[i].pressure = 1;
+            coords[i].size = 1;
+        }
+        lastEventTime = downTime + offset;
+        MotionEvent event = MotionEvent.obtain(downTime, lastEventTime, action, ids.length, properties, coords, 0, 0, 1,
+                                               1, 0, 0, InputDevice.SOURCE_TOUCHSCREEN, 0);
+        view.dispatchTouchEvent(event);
+        event.recycle();
+    }
+
+    /** Text with an unpaired surrogate (half an emoji) still reaches the page, with U+FFFD for the bad unit. */
+    @Test
+    public void testUnpairedSurrogateBecomesAReplacementCharacter() throws Throwable {
+        ActivityScenario<WebViewTestActivity> scenario = webViewActivityTestRule.getScenario();
+        scenario.onActivity(activity -> activity.getWebView().requestFocus());
+        WebViewActivityScenarioHelper.loadHtmlSync(scenario, new TestWebViewClient(), COMPOSITION_PAGE);
+        scenario.moveToState(Lifecycle.State.RESUMED);
+        InputConnection connection = focusEditor(scenario);
+
+        scenario.onActivity(activity -> connection.setComposingText("ab\uD83D", 1));
+        assertComposition(scenario, "Composing text with an unpaired surrogate was dropped",
+                          "document.getElementById('editor').value === 'ab\\uFFFD'");
+        scenario.onActivity(activity -> connection.commitText("cd\uDE00", 1));
+        assertComposition(scenario, "Committed text with an unpaired surrogate was dropped",
+                          "document.getElementById('editor').value === 'cd\\uFFFD'");
+    }
+
+    private static void tap(WebView view, float x, float y) {
+        long now = SystemClock.uptimeMillis();
+        MotionEvent down = MotionEvent.obtain(now, now, MotionEvent.ACTION_DOWN, x, y, 0);
+        MotionEvent up = MotionEvent.obtain(now, now + 50, MotionEvent.ACTION_UP, x, y, 0);
+        view.dispatchTouchEvent(down);
+        view.dispatchTouchEvent(up);
+        down.recycle();
+        up.recycle();
+    }
+
+    private static final String PURPOSE_PAGE =
+        "<html><body><input id='text'><input id='password' type='password'><input id='email' type='email'>"
+        + "<input id='tel' type='tel'><input id='url' type='url'><input id='number' type='number'>"
+        + "<input id='numeric' inputmode='numeric'><input id='revealed' type='password'>"
+        + "<input id='revealed-pin' type='password' inputmode='numeric'><input id='characters' "
+        + "autocapitalize='characters'><input id='words' autocapitalize='words'><input id='sentences' "
+        + "autocapitalize='sentences'><input id='none' autocapitalize='none'><form autocapitalize='words'>"
+        + "<input id='form-password' type='password'></form><input id='search' type='search'><script>"
+        + "document.getElementById('revealed').type = document.getElementById('revealed-pin').type = 'text'"
+        + "</script></body></html>";
+
+    private static int inputTypeOf(WebView view) {
+        EditorInfo editorInfo = new EditorInfo();
+        return view.onCreateInputConnection(editorInfo) != null ? editorInfo.inputType : 0;
+    }
+
+    private static void assertInputType(ActivityScenario<WebViewTestActivity> scenario, String id, int expected)
+        throws Throwable {
+        if (focusUntil(scenario, id, view -> inputTypeOf(view) == expected))
+            return;
+        AtomicInteger inputType = new AtomicInteger();
+        scenario.onActivity(activity -> inputType.set(inputTypeOf(activity.getWebView())));
+        assertEquals("Wrong input type for #" + id, Integer.toHexString(expected),
+                     Integer.toHexString(inputType.get()));
+    }
+
+    private static boolean inputMethodMayLearn(ActivityScenario<WebViewTestActivity> scenario) throws Throwable {
+        AtomicBoolean mayLearn = new AtomicBoolean();
+        scenario.onActivity(activity -> {
+            EditorInfo editorInfo = new EditorInfo();
+            activity.getWebView().onCreateInputConnection(editorInfo);
+            mayLearn.set((editorInfo.imeOptions & EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING) == 0);
+        });
+        return mayLearn.get();
+    }
+
+    private static int imeActionOf(ActivityScenario<WebViewTestActivity> scenario) throws Throwable {
+        AtomicInteger action = new AtomicInteger();
+        scenario.onActivity(activity -> {
+            EditorInfo editorInfo = new EditorInfo();
+            activity.getWebView().onCreateInputConnection(editorInfo);
+            action.set(editorInfo.imeOptions & EditorInfo.IME_MASK_ACTION);
+        });
+        return action.get();
+    }
+
+    /**
+     * Each kind of field gets the keyboard for it: password fields a password keyboard, and so on. The input method
+     * may not learn what is typed in a password field, also when it shows its text.
+     */
+    @Test
+    public void testFieldsGetTheirInputType() throws Throwable {
+        ActivityScenario<WebViewTestActivity> scenario = webViewActivityTestRule.getScenario();
+        scenario.onActivity(activity -> activity.getWebView().requestFocus());
+        WebViewActivityScenarioHelper.loadHtmlSync(scenario, new TestWebViewClient(), PURPOSE_PAGE);
+        scenario.moveToState(Lifecycle.State.RESUMED);
+
+        assertInputType(scenario, "text",
+                        EditorInfo.TYPE_CLASS_TEXT | EditorInfo.TYPE_TEXT_VARIATION_WEB_EDIT_TEXT |
+                            EditorInfo.TYPE_TEXT_FLAG_CAP_SENTENCES);
+        assertTrue("The input method may not learn from #text", inputMethodMayLearn(scenario));
+        assertInputType(scenario, "password", EditorInfo.TYPE_CLASS_TEXT | EditorInfo.TYPE_TEXT_VARIATION_WEB_PASSWORD);
+        assertFalse("The input method may learn from #password", inputMethodMayLearn(scenario));
+        assertInputType(scenario, "email",
+                        EditorInfo.TYPE_CLASS_TEXT | EditorInfo.TYPE_TEXT_VARIATION_WEB_EMAIL_ADDRESS);
+        assertInputType(scenario, "tel", EditorInfo.TYPE_CLASS_PHONE);
+        assertInputType(scenario, "url", EditorInfo.TYPE_CLASS_TEXT | EditorInfo.TYPE_TEXT_VARIATION_URI);
+        assertInputType(scenario, "number",
+                        EditorInfo.TYPE_CLASS_NUMBER | EditorInfo.TYPE_NUMBER_FLAG_SIGNED |
+                            EditorInfo.TYPE_NUMBER_FLAG_DECIMAL);
+        assertInputType(scenario, "numeric", EditorInfo.TYPE_CLASS_NUMBER);
+        assertInputType(scenario, "revealed",
+                        EditorInfo.TYPE_CLASS_TEXT | EditorInfo.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD);
+        assertFalse("The input method may learn from #revealed", inputMethodMayLearn(scenario));
+        assertInputType(scenario, "revealed-pin",
+                        EditorInfo.TYPE_CLASS_NUMBER | EditorInfo.TYPE_NUMBER_VARIATION_PASSWORD);
+        assertFalse("The input method may learn from #revealed-pin", inputMethodMayLearn(scenario));
+        int text = EditorInfo.TYPE_CLASS_TEXT | EditorInfo.TYPE_TEXT_VARIATION_WEB_EDIT_TEXT;
+        assertInputType(scenario, "characters", text | EditorInfo.TYPE_TEXT_FLAG_CAP_CHARACTERS);
+        assertInputType(scenario, "words", text | EditorInfo.TYPE_TEXT_FLAG_CAP_WORDS);
+        assertInputType(scenario, "sentences", text | EditorInfo.TYPE_TEXT_FLAG_CAP_SENTENCES);
+        assertInputType(scenario, "none", text);
+        assertInputType(scenario, "form-password",
+                        EditorInfo.TYPE_CLASS_TEXT | EditorInfo.TYPE_TEXT_VARIATION_WEB_PASSWORD);
+        assertEquals("Wrong action for #form-password", EditorInfo.IME_ACTION_NONE, imeActionOf(scenario));
+        assertInputType(scenario, "search", text);
+        assertEquals("Wrong action for #search", EditorInfo.IME_ACTION_SEARCH, imeActionOf(scenario));
+    }
+
+    /**
+     * A view whose settings do not allow it asks the input method not to learn from any of its fields, as a private
+     * browsing mode needs. A change applies to the next field that gets the focus.
+     */
+    @Test
+    public void testSettingsKeepTheInputMethodFromLearning() throws Throwable {
+        ActivityScenario<WebViewTestActivity> scenario = webViewActivityTestRule.getScenario();
+        scenario.onActivity(activity -> {
+            activity.getWebView().getSettings().setPersonalizedLearningEnabled(false);
+            activity.getWebView().requestFocus();
+        });
+        WebViewActivityScenarioHelper.loadHtmlSync(scenario, new TestWebViewClient(), PURPOSE_PAGE);
+        scenario.moveToState(Lifecycle.State.RESUMED);
+
+        int text = EditorInfo.TYPE_CLASS_TEXT | EditorInfo.TYPE_TEXT_VARIATION_WEB_EDIT_TEXT;
+        assertInputType(scenario, "text", text | EditorInfo.TYPE_TEXT_FLAG_CAP_SENTENCES);
+        assertFalse("The input method may learn from #text", inputMethodMayLearn(scenario));
+        assertInputType(scenario, "search", text);
+        assertFalse("The input method may learn from #search", inputMethodMayLearn(scenario));
+
+        scenario.onActivity(activity -> activity.getWebView().getSettings().setPersonalizedLearningEnabled(true));
+        assertInputType(scenario, "words", text | EditorInfo.TYPE_TEXT_FLAG_CAP_WORDS);
+        assertTrue("The input method may not learn from #words", inputMethodMayLearn(scenario));
+    }
+
+    /** The search key of the keyboard sends Enter to the search field, as the Enter key would. */
+    @Test
+    public void testTheSearchKeySendsEnter() throws Throwable {
+        ActivityScenario<WebViewTestActivity> scenario = webViewActivityTestRule.getScenario();
+        scenario.onActivity(activity -> activity.getWebView().requestFocus());
+        WebViewActivityScenarioHelper.loadHtmlSync(
+            scenario, new TestWebViewClient(),
+            "<html><body><input id='search' type='search'><script>window.keys = []; document.getElementById('search')"
+                + ".addEventListener('keydown', event => window.keys.push(event.key))</script></body></html>");
+        scenario.moveToState(Lifecycle.State.RESUMED);
+        InputConnection connection = focusEditor(scenario, "search");
+
+        scenario.onActivity(activity -> connection.performEditorAction(EditorInfo.IME_ACTION_SEARCH));
+        String keys =
+            WebViewActivityScenarioHelper.waitForJavaScriptResult(scenario, "window.keys.join(' ')", "\"Enter\"");
+        assertEquals("Keys the field got", "\"Enter\"", keys);
+    }
+
+    // Records the input type of each connection that Android asks the WebView for, as the input method gets it. It has
+    // a WebContext of its own, which destroyRecordingWebView() destroys with it.
+    private static class InputTypeRecordingWebView extends WebView {
+        final List<Integer> inputTypes = new ArrayList<>();
+        final WebContext webContext;
+
+        InputTypeRecordingWebView(@NonNull Context context, @NonNull WebContext webContext) {
+            super(context, webContext);
+            this.webContext = webContext;
+        }
+
+        @Override
+        public InputConnection onCreateInputConnection(@NonNull EditorInfo outAttrs) {
+            InputConnection connection = super.onCreateInputConnection(outAttrs);
+            if (connection != null)
+                inputTypes.add(outAttrs.inputType);
+            return connection;
+        }
+    }
+
+    // Waits for the input types of the connections that Android asked the WebView for to meet the condition.
+    private static boolean waitForInputTypes(ActivityScenario<WebViewTestActivity> scenario,
+                                             AtomicReference<InputTypeRecordingWebView> webView,
+                                             Predicate<List<Integer>> condition, @Nullable String focusId)
+        throws Throwable {
+        AtomicBoolean holds = new AtomicBoolean(false);
+        for (int i = 0; i < 40 && !holds.get(); i++) {
+            scenario.onActivity(activity -> {
+                holds.set(condition.test(webView.get().inputTypes));
+                if (!holds.get() && focusId != null)
+                    webView.get().evaluateJavascript("document.getElementById('" + focusId + "').focus()", null);
+            });
+            if (!holds.get())
+                Thread.sleep(250);
+        }
+        return holds.get();
+    }
+
+    // Waits for Android to ask the WebView for a connection with the input type, after the first `from` ones.
+    private static boolean waitForRestart(ActivityScenario<WebViewTestActivity> scenario,
+                                          AtomicReference<InputTypeRecordingWebView> webView, int from, int inputType,
+                                          @Nullable String focusId) throws Throwable {
+        Predicate<List<Integer>> restarted =
+            inputTypes -> inputTypes.size() > from && inputTypes.subList(from, inputTypes.size()).contains(inputType);
+        return waitForInputTypes(scenario, webView, restarted, focusId);
+    }
+
+    // Focuses the field and waits for the input method to ask the WebView for a connection of any input type.
+    private static boolean waitForInputMethod(ActivityScenario<WebViewTestActivity> scenario,
+                                              AtomicReference<InputTypeRecordingWebView> webView, String focusId)
+        throws Throwable {
+        return waitForInputTypes(scenario, webView, inputTypes -> !inputTypes.isEmpty(), focusId);
+    }
+
+    // Shows the page in a new InputTypeRecordingWebView that has the focus, and waits for it to load.
+    private static void loadInRecordingWebView(ActivityScenario<WebViewTestActivity> scenario,
+                                               AtomicReference<InputTypeRecordingWebView> webView, String html)
+        throws Throwable {
+        CountDownLatch loaded = new CountDownLatch(1);
+        scenario.onActivity(activity -> {
+            webView.set(new InputTypeRecordingWebView(activity, new WebContext(activity, false, true)));
+            webView.get().setWebViewClient(new WebViewClient() {
+                @Override
+                public void onPageFinished(@NonNull WebView view, @NonNull String url) {
+                    loaded.countDown();
+                }
+            });
+            activity.addContentView(webView.get(), new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                                                                              ViewGroup.LayoutParams.MATCH_PARENT));
+            webView.get().requestFocus();
+            webView.get().loadHtml(html, null);
+        });
+        assertTrue("The page did not load", loaded.await(30, TimeUnit.SECONDS));
+    }
+
+    private static void destroyRecordingWebView(ActivityScenario<WebViewTestActivity> scenario,
+                                                AtomicReference<InputTypeRecordingWebView> webView) {
+        scenario.onActivity(activity -> {
+            InputTypeRecordingWebView view = webView.get();
+            if (view != null) {
+                if (view.getParent() != null)
+                    ((ViewGroup)view.getParent()).removeView(view);
+                view.destroy();
+                view.webContext.destroy();
+            }
+        });
+    }
+
+    /**
+     * A script turns the focused password field into a text field and back, as a "show password" button that keeps
+     * the focus on the field does. WebKit tells the new purpose of the field, and the WebView restarts the input
+     * method, which gets the new input type: a visible password one while the field shows its text. Nothing taps the
+     * field, and the test never asks for a connection itself: each one it sees comes from Android.
+     */
+    @Test
+    public void testChangingTheTypeOfTheFocusedFieldRestartsTheInputMethod() throws Throwable {
+        ActivityScenario<WebViewTestActivity> scenario = ActivityScenario.launch(WebViewTestActivity.class);
+        int password = EditorInfo.TYPE_CLASS_TEXT | EditorInfo.TYPE_TEXT_VARIATION_WEB_PASSWORD;
+        int revealed = EditorInfo.TYPE_CLASS_TEXT | EditorInfo.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD;
+        AtomicReference<InputTypeRecordingWebView> webView = new AtomicReference<>();
+        try {
+            loadInRecordingWebView(scenario, webView,
+                                   "<html><body><input id='password' type='password'></body></html>");
+            assumeTrue("No input method connected to the WebView", waitForInputMethod(scenario, webView, "password"));
+            assertTrue("The input method did not get the input type of #password",
+                       waitForRestart(scenario, webView, 0, password, "password"));
+
+            for (String type : new String[] {"text", "password"}) {
+                AtomicInteger from = new AtomicInteger();
+                scenario.onActivity(activity -> {
+                    InputTypeRecordingWebView view = webView.get();
+                    from.set(view.inputTypes.size());
+                    view.evaluateJavascript("document.getElementById('password').type = '" + type + "'", null);
+                });
+                assertTrue(
+                    "The input method was not restarted with the input type for type " + type,
+                    waitForRestart(scenario, webView, from.get(), type.equals("text") ? revealed : password, null));
+            }
+        } finally {
+            destroyRecordingWebView(scenario, webView);
+            scenario.close();
+        }
+    }
+
+    /**
+     * The focus moves from a text field to a password field, back, and then to a password field shown as text.
+     * WebKit tells no focus out or focus in for that, only the new purpose and hints, and the WebView restarts the
+     * input method with the input type of each field. The text field and the password shown as text have the same
+     * purpose: only the private hint tells them apart.
+     */
+    @Test
+    public void testFocusingAFieldOfAnotherTypeRestartsTheInputMethod() throws Throwable {
+        ActivityScenario<WebViewTestActivity> scenario = ActivityScenario.launch(WebViewTestActivity.class);
+        int text = EditorInfo.TYPE_CLASS_TEXT | EditorInfo.TYPE_TEXT_VARIATION_WEB_EDIT_TEXT |
+                   EditorInfo.TYPE_TEXT_FLAG_CAP_SENTENCES;
+        int password = EditorInfo.TYPE_CLASS_TEXT | EditorInfo.TYPE_TEXT_VARIATION_WEB_PASSWORD;
+        int revealed = EditorInfo.TYPE_CLASS_TEXT | EditorInfo.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD;
+        Map<String, Integer> inputTypes = Map.of("text", text, "password", password, "revealed", revealed);
+        AtomicReference<InputTypeRecordingWebView> webView = new AtomicReference<>();
+        try {
+            loadInRecordingWebView(scenario, webView,
+                                   "<html><body><input id='text'><input id='password' type='password'>"
+                                       + "<input id='revealed' type='password'><script>"
+                                       + "document.getElementById('revealed').type = 'text'</script></body></html>");
+            assumeTrue("No input method connected to the WebView", waitForInputMethod(scenario, webView, "text"));
+            assertTrue("The input method did not get the input type of #text",
+                       waitForRestart(scenario, webView, 0, text, "text"));
+
+            for (String id : new String[] {"password", "text", "revealed", "text"}) {
+                AtomicInteger from = new AtomicInteger();
+                scenario.onActivity(activity -> from.set(webView.get().inputTypes.size()));
+                assertTrue("The input method was not restarted with the input type of #" + id,
+                           waitForRestart(scenario, webView, from.get(), inputTypes.get(id), id));
+            }
+        } finally {
+            destroyRecordingWebView(scenario, webView);
+            scenario.close();
+        }
+    }
+
+    /**
+     * A page that leaves its view during a composition: WebKit ends the composition, the view is no longer a text
+     * editor, and the connection that the input method still holds reaches neither the page that left nor the page
+     * that the view shows next, whose field gets a connection of its own.
+     */
+    @Test
+    public void testPageLeavesDuringAComposition() throws Throwable {
+        ActivityScenario<WebViewTestActivity> scenario = webViewActivityTestRule.getScenario();
+        scenario.moveToState(Lifecycle.State.RESUMED);
+        AtomicReference<WebContext> context = new AtomicReference<>();
+        scenario.onActivity(activity -> context.set(new WebContext(activity, false, true)));
+        WebPageTestHelper.RecordingClient client = new WebPageTestHelper.RecordingClient();
+        WebPage first = WebPageTestHelper.newPage(context.get(), client);
+        WebPage second = WebPageTestHelper.newPage(context.get(), client);
+        try {
+            WebPageTestHelper.loadHtml(first, client, COMPOSITION_PAGE);
+            WebPageTestHelper.loadHtml(second, client, COMPOSITION_PAGE);
+            scenario.onActivity(activity -> {
+                activity.getWebView().requestFocus();
+                activity.getWebView().setPage(first);
+            });
+            InputConnection connection = focusEditor(scenario);
+            scenario.onActivity(activity -> connection.setComposingText("hel", 1));
+            assertComposition(scenario, "The composing text is not a composition",
+                              "document.getElementById('editor').value === 'hel'");
+
+            AtomicBoolean isTextEditor = new AtomicBoolean(true);
+            AtomicBoolean committed = new AtomicBoolean(true);
+            scenario.onActivity(activity -> {
+                activity.getWebView().setPage(second);
+                isTextEditor.set(activity.getWebView().onCheckIsTextEditor());
+                committed.set(connection.commitText("stale", 1));
+            });
+            assertFalse("The view is a text editor for the page that left", isTextEditor.get());
+            assertFalse("The connection of the page that left took text", committed.get());
+            assertEquals("The composition of the page that left did not end", "true",
+                         WebPageTestHelper.waitForResult(
+                             first, "window.events.some(event => event.startsWith('compositionend'))", "true"));
+            assertEquals("\"\"", WebPageTestHelper.evaluate(second, "document.getElementById('editor').value"));
+
+            // The field of the page shown next gets a connection of its own, which the old one does not disturb.
+            InputConnection secondConnection = focusEditor(scenario);
+            scenario.onActivity(activity -> {
+                connection.commitText("stale", 1);
+                secondConnection.commitText("new", 1);
+            });
+            assertComposition(scenario, "The field of the page shown next did not get its own text",
+                              "document.getElementById('editor').value === 'new'");
+            assertFalse(WebPageTestHelper.evaluate(first, "document.getElementById('editor').value").contains("stale"));
+        } finally {
+            WebPageTestHelper.onMain(() -> {
+                first.destroy();
+                second.destroy();
+                context.get().destroy();
+            });
+        }
+    }
+
+    // Waits for the condition to hold in the page and reports the editor's value and events if it never does.
+    private static void assertComposition(ActivityScenario<WebViewTestActivity> scenario, String message,
+                                          String condition) throws Throwable {
+        if ("true".equals(WebViewActivityScenarioHelper.waitForJavaScriptResult(scenario, condition, "true")))
+            return;
+        TestWebViewClient client = new TestWebViewClient();
+        scenario.onActivity(activity -> activity.getWebView().setWebViewClient(client));
+        fail(message + ": " +
+             WebViewActivityScenarioHelper.evaluateJavaScriptAndWaitForResult(
+                 scenario, client,
+                 "JSON.stringify([document.getElementById('editor').value, document.getElementById('other').value, "
+                     + "window.events])"));
     }
 }

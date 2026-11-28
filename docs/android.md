@@ -9,7 +9,7 @@ build the APK, and what is still to do.
 | Layer | air/OS | Android | Shared |
 | --- | --- | --- | --- |
 | Engine | WebKit, upstream pin + `engine/patches/0001-haiku-port.patch`, `PORT=Haiku` | The same tree, `PORT=WPE` with `ANDROID` | Everything outside the platform directories: WebCore, JavaScriptCore, the WebKit process model, the WebExtensions implementation |
-| Engine embedding | `Source/WebKit/UIProcess/API/haiku` (BWebKitView) | WPE's GLib API, through `android/wpeview` (Igalia's WPE Android view, vendored) | — |
+| Engine embedding | `Source/WebKit/UIProcess/API/haiku` (BWebKitView) | WPE's GLib API, through `android/wpeview` (Igalia's WPE Android view, vendored at 205f39ae1) | — |
 | Browser logic | `src/core` | `src/core`, compiled into `libsummit.so` | All of it: profile.json (session, bookmarks, history, reading list, settings), address resolution and bookmark keywords, search engines, type-ahead, user agents |
 | Interface | `src/ui` (BeAPI) | `android/app` (Kotlin, Jetpack Compose) | — |
 
@@ -29,8 +29,15 @@ The rule that keeps the two in step:
 
 Examples already shared: the touch layouts' user agent (`summit::MobileUserAgent`,
 used by air/OS Mobile and by Android), search engines and bookmark keywords
-in the address field, history type-ahead, and profile.json, which has the same
-format on both systems.
+in the address field, history type-ahead, the words of the error page for a
+failed load (`core/LoadError`), saved site permissions, and profile.json,
+which has the same format on both systems.
+
+The Clang build for Android also catches engine code that GCC (air/OS)
+accepts, so a change that breaks it is a bug in the shared tree: attributes
+before declaration specifiers (`NODELETE static ...`), unnamed parameters in a
+constrained template's declaration that lambdas capture, and POSIX calls
+bionic lacks (`shm_open`).
 
 ## Building
 
@@ -78,17 +85,27 @@ build produces one APK per staged ABI.
   toolbar with a row of tabs under it. The activity handles size, density
   and posture changes itself, so folding, rotating and resizing keep the
   pages.
-- **Tabs**: a grid switcher with Tabs | Private segments, swipe or ✕ to close,
-  Close All, and pictures of the pages. Private tabs use an ephemeral engine
-  context that is destroyed with the last private tab.
+- **Tabs**: each tab owns an engine page (`WebPage`); the window's one
+  `WebView` shows the selected one. A grid switcher with Tabs | Private
+  segments, swipe or ✕ to close, Close All, and pictures of the pages.
+  Links with `target=_blank` and `window.open` open a tab next to the page;
+  Back on its first page closes it and returns to the opener. Private tabs
+  use an ephemeral engine context that is destroyed with the last private
+  tab.
+- **Pages**: permission prompts (location, notifications) remembered per
+  site in the profile, Android runtime permissions asked for when a site is
+  allowed, web notifications as Android notifications, downloads into the
+  shared Downloads collection, fullscreen with the system bars hidden, error
+  pages, and a page for a web process that ended.
 - **Resource use**: see *Tabs and memory* below.
 
 ### Tabs and memory
 
 Summit keeps at most a few pages loaded: 2 on low-memory devices and under
 3 GB, then 3, 4, 6, and 8 at 11 GB and more. Showing another tab discards the
-page that was shown least recently. The tab keeps its address, title and a
-picture, and loads again when it is shown. Only the shown page has a surface;
+page that was shown least recently. The tab keeps its address, title, picture
+and back/forward list, and loads again when it is shown. A page playing
+sound is not discarded. Only the shown page has a surface;
 the engine treats the others as hidden, so they stop painting and their
 timers and animation frames are throttled. Android's memory pressure
 (`onTrimMemory`) discards every page but the shown one. After five minutes
@@ -99,22 +116,23 @@ page processes.
 
 Done:
 
-- [x] The engine's dependencies cross-built for Android with cerbero (x86_64).
-- [x] Summit's engine tree configured and building as WPE for Android.
+- [x] The engine's dependencies cross-built for Android with cerbero (x86_64, arm64).
+- [x] Summit's engine tree builds as WPE for Android (x86_64) and runs the
+      app on the API 36 emulator. Five fixes to the shared tree (all no-ops on
+      air/OS) and two upstream backports (GLib FrameInfo, WPE press counts).
 - [x] The app: tabs, private tabs, the address field with shared resolution
       and type-ahead, bookmarks, reading list, history, settings, sharing,
-      links from other apps, phone and tablet layouts, and the tab memory
-      policy. It has been checked on the API 36 emulator with WPE 2.55.0.3
-      prebuilt libraries.
+      links from other apps, phone and tablet layouts, new windows, site
+      permissions, notifications, downloads, fullscreen, error and crash
+      pages, and the tab memory policy.
 
 Next, in order:
 
-1. Run the app on Summit's own engine build (x86_64, then arm64) and fix the
-   compile breaks that only the WPE/Clang build exposes.
-2. wpeview additions the browser needs: new-window requests (tabs from
-   `target=_blank` and `window.open`), downloads, permission prompts
-   (camera, microphone, location, notifications), file choosers, fullscreen
-   video, context menus, favicons, find in page, and a per-tab user agent.
+1. arm64 engine build and a run on a phone (location delivery, which the
+   emulator's provider never gave a page, is unverified).
+2. Browser features still missing on Android: find in page, file choosers,
+   context menus (long press on links and images), a downloads list,
+   favicons in the tab switcher and history, per-site zoom.
 3. Media: hardware decoding through GStreamer's `androidmedia` (MediaCodec)
    with zero-copy AHardwareBuffer frames; MSE playback on YouTube; WebRTC.
 4. WebExtensions: enable `ENABLE_WK_WEB_EXTENSIONS` for WPE and compile the

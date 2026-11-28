@@ -36,6 +36,10 @@ object SummitCore {
   @JvmStatic external fun userAgentPresets(): String
   @JvmStatic external fun mobileUserAgent(): String
   @JvmStatic external fun shortAddress(url: String): String
+  /** "allow", "deny" or "" for a permission (notifications, geolocation, camera, microphone, ...) and an origin. */
+  @JvmStatic external fun sitePermission(permission: String, origin: String): String
+  @JvmStatic external fun setSitePermission(permission: String, origin: String, answer: String): Boolean
+  @JvmStatic external fun describeLoadFailure(kind: String, url: String, description: String): String
 
   data class Resolved(val url: String, val search: Boolean, val error: String)
   data class Page(val url: String, val title: String, val visited: Long = 0, val bookmark: Boolean = false)

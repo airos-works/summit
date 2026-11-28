@@ -6,7 +6,7 @@ if(NOT EXISTS "${CMAKE_SOURCE_DIR}/imported/lib/${ANDROID_ABI}")
     message(FATAL_ERROR "Native dependencies not installed for ${ANDROID_ABI}")
 endif()
 
-option(USE_CODE_TIDY "Use code static analysis on build" OFF)
+option(USE_CODE_TIDY "Use code static analysis on build" ON)
 option(USE_CODE_WARNINGS_AS_ERRORS "Use code warnings as errors" ON)
 
 if(USE_CODE_TIDY)
@@ -112,6 +112,7 @@ target_link_libraries(
 add_library(
     WPEAndroidRuntime SHARED
     Platform/WPEDisplayAndroid.cpp
+    Platform/WPEGestureControllerAndroid.cpp
     Platform/WPEInputMethodContextAndroid.cpp
     Platform/WPEKeymapAndroid.cpp
     Platform/WPEProcessManagerAndroid.cpp
@@ -123,7 +124,10 @@ add_library(
     Runtime/MessagePump.cpp
     Runtime/WPERuntime.cpp
     capi/JNIMappings.cpp
+    capi/SoupTLD.cpp
     capi/WebKitCookieManager.cpp
+    capi/WebKitDownload.cpp
+    capi/WebKitImageBitmap.cpp
     capi/WebKitNetworkSession.cpp
     capi/WebKitSettings.cpp
     capi/WebKitWebContext.cpp
@@ -140,6 +144,7 @@ target_link_libraries(
     WPEAndroidRuntime
     EGL
     GLESv2
+    jnigraphics
     gio-2.0
     glib-2.0
     gobject-2.0
@@ -148,7 +153,7 @@ target_link_libraries(
     WPEAndroidCommon)
 
 # libWPEAndroidService
-add_library(WPEAndroidService SHARED Service/EntryPoint.cpp)
+add_library(WPEAndroidService SHARED Service/EntryPoint.cpp Service/LocalNetwork.cpp)
 target_configure_quality(WPEAndroidService)
 target_link_libraries(
     WPEAndroidService

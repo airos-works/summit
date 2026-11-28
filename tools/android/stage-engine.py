@@ -157,12 +157,19 @@ def main():
     for old, new in replacements:
         assert len(old) == len(new), (old, new)
 
+    # Debug information stays in the sysroot (for symbolizing crash reports);
+    # the staged copies are stripped, as the APK's would be anyway.
+    ndk = Path(os.environ.get("ANDROID_NDK_HOME", root / "cerbero-home" / "android-ndk-29"))
+    strip = next(iter(ndk.glob("toolchains/llvm/prebuilt/*/bin/llvm-strip")), None)
+
     def copy_patched(src, dst):
         dst.parent.mkdir(parents=True, exist_ok=True)
         data = src.read_bytes()
         for old, new in replacements:
             data = data.replace(old.encode(), new.encode())
         dst.write_bytes(data)
+        if strip:
+            subprocess.run([str(strip), "--strip-debug", str(dst)], check=True)
 
     imported = WPEVIEW_MAIN / "cpp" / "imported"
     imported_lib = imported / "lib" / abi
@@ -218,7 +225,8 @@ def main():
     # Android provides these.
     system = {"libandroid.so", "libc.so", "libdl.so", "libEGL.so", "libGLESv2.so", "libGLESv3.so", "liblog.so",
               "libm.so", "libmediandk.so", "libOpenSLES.so", "libvulkan.so", "libz.so", "libnativewindow.so",
-              "libsync.so", "libaaudio.so", "libjnigraphics.so", "libcamera2ndk.so", "libbinder_ndk.so"}
+              "libsync.so", "libaaudio.so", "libjnigraphics.so", "libcamera2ndk.so", "libbinder_ndk.so",
+              "libc++_shared.so"}
     unresolved = sorted(missing - system)
     print(f"staged {len(wanted)} libraries ({total / 1e6:.1f} MB), {len(plugin_paths)} GStreamer plugins")
     if unresolved:
