@@ -128004,10 +128004,10 @@ index 0000000000000000000000000000000000000000..9028ac92d50c26aa2ccbbb2d773a06e1
 +#endif
 diff --git a/Source/WebKit/Platform/summit/SummitHaikuTypes.h b/Source/WebKit/Platform/summit/SummitHaikuTypes.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..f3ddb1708c63fe658c7e74802033f5f85fb83dd7
+index 0000000000000000000000000000000000000000..f380f23d06ab809a379cdf0af7af1179e161c166
 --- /dev/null
 +++ b/Source/WebKit/Platform/summit/SummitHaikuTypes.h
-@@ -0,0 +1,86 @@
+@@ -0,0 +1,101 @@
 +/*
 + * Copyright (C) 2026 air/OS contributors. SPDX-License-Identifier: BSD-2-Clause
 + */
@@ -128028,7 +128028,9 @@ index 0000000000000000000000000000000000000000..f3ddb1708c63fe658c7e74802033f5f8
 +#include <Message.h>
 +#include <Messenger.h>
 +#include <OS.h>
++#include <InterfaceDefs.h>
 +#include <Rect.h>
++#include <StorageDefs.h>
 +#include <SupportDefs.h>
 +
 +#else
@@ -128078,6 +128080,19 @@ index 0000000000000000000000000000000000000000..f3ddb1708c63fe658c7e74802033f5f8
 +    BPoint LeftTop() const { return { left, top }; }
 +    bool operator==(const BRect&) const = default;
 +};
++
++constexpr int32_t B_FILE_NAME_LENGTH = 256;
++constexpr int32_t B_PATH_NAME_LENGTH = 1024;
++
++struct rgb_color {
++    uint8_t red, green, blue, alpha;
++};
++enum color_which { B_PANEL_BACKGROUND_COLOR = 1 };
++// The colors of the browser's interface, for drawing over it.
++inline rgb_color ui_color(color_which)
++{
++    return { 241, 241, 241, 255 };
++}
 +
 +// Processes, which Haiku calls teams: only whether one still runs.
 +using team_id = int32_t;
@@ -130385,6 +130400,18 @@ index 66271809620c823d465be4cee34c1806ab422cbe..3d48df24f8b11a0192305b8f1d6d8c14
  };
  
  #endif
+diff --git a/Source/WebKit/Shared/Extensions/WebExtensionFrameParameters.h b/Source/WebKit/Shared/Extensions/WebExtensionFrameParameters.h
+index 8561a7220d226490f958978f7733bd999edd4cd5..8ee421a79b2a32ae0e531e2503c0c31aa3cf5ae3 100644
+--- a/Source/WebKit/Shared/Extensions/WebExtensionFrameParameters.h
++++ b/Source/WebKit/Shared/Extensions/WebExtensionFrameParameters.h
+@@ -28,6 +28,7 @@
+ #if ENABLE(WK_WEB_EXTENSIONS)
+ 
+ #include "WebExtensionFrameIdentifier.h"
++#include <wtf/Markable.h>
+ #include <wtf/URL.h>
+ #include <wtf/UUID.h>
+ 
 diff --git a/Source/WebKit/Shared/Extensions/WebExtensionLocalization.cpp b/Source/WebKit/Shared/Extensions/WebExtensionLocalization.cpp
 index a007fc0dc973294c5aa707c3115bec7f8c396068..eaacd8475e817737dab5ac804309278fa0c1199e 100644
 --- a/Source/WebKit/Shared/Extensions/WebExtensionLocalization.cpp
@@ -134229,10 +134256,10 @@ index 0000000000000000000000000000000000000000..ccf742682b96c829d26b231a37510f66
 +} // namespace WebKit
 diff --git a/Source/WebKit/Shared/haiku/DownloadFilenameHaiku.h b/Source/WebKit/Shared/haiku/DownloadFilenameHaiku.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..ffd9b2ccd7a6dbd801ac9eb70f934a2b7e2945bf
+index 0000000000000000000000000000000000000000..304cf15668b687641f0b01db6329074e8d9f3973
 --- /dev/null
 +++ b/Source/WebKit/Shared/haiku/DownloadFilenameHaiku.h
-@@ -0,0 +1,51 @@
+@@ -0,0 +1,58 @@
 +/*
 + * Copyright (c) 2026 KunanyiOS contributors
 + * SPDX-License-Identifier: MIT
@@ -134240,7 +134267,14 @@ index 0000000000000000000000000000000000000000..ffd9b2ccd7a6dbd801ac9eb70f934a2b
 +
 +#pragma once
 +
++// WebKitLegacy includes this too, without Summit's include directories:
++// Haiku's own headers there.
++#if PLATFORM(HAIKU)
 +#include <StorageDefs.h>
++#include <SupportDefs.h>
++#else
++#include "SummitHaikuTypes.h"
++#endif
 +#include <String.h>
 +#include <algorithm>
 +
@@ -135909,10 +135943,10 @@ index db779aefcd6fa39e1b544159d7f0780b583445b6..78e1ce4036e2a889ca25f9f3ffed2420
  UIProcess/API/glib/WebKitImage.cpp @no-unify
 diff --git a/Source/WebKit/SummitExtensions.cmake b/Source/WebKit/SummitExtensions.cmake
 new file mode 100644
-index 0000000000000000000000000000000000000000..9badce381a1b38d7344d3f2c869b2b808bd46706
+index 0000000000000000000000000000000000000000..ab6f879880dafd26a3c89b3965f60266e16d1579
 --- /dev/null
 +++ b/Source/WebKit/SummitExtensions.cmake
-@@ -0,0 +1,232 @@
+@@ -0,0 +1,234 @@
 +# Summit's WebExtensions implementation (Firefox, Chrome and Safari web
 +# extensions), shared by the Haiku port (air/OS) and the WPE port on Android.
 +# The code lives mostly in */Extensions/haiku and is compiled where
@@ -136107,13 +136141,14 @@ index 0000000000000000000000000000000000000000..9badce381a1b38d7344d3f2c869b2b80
 +    set(_summitContextHeader "${WEBKIT_DIR}/UIProcess/API/haiku/WebKitContext.h")
 +    file(MAKE_DIRECTORY "${WebKit_DERIVED_SOURCES_DIR}")
 +    set(_summitViewHeader "${WEBKIT_DIR}/UIProcess/API/haiku/WebKitView.h")
++    set(_summitPermissionHeader "${WEBKIT_DIR}/UIProcess/API/haiku/WebKitExtensionPermission.h")
 +    execute_process(COMMAND ${Python_EXECUTABLE} "${WEBKIT_DIR}/Scripts/generate-browser-command-codes.py"
-+        "${WebKit_DERIVED_SOURCES_DIR}/WebKitBrowserCommandCodes.h" "${_summitContextHeader}" "${_summitViewHeader}"
++        "${WebKit_DERIVED_SOURCES_DIR}/WebKitBrowserCommandCodes.h" "${_summitContextHeader}" "${_summitViewHeader}" "${_summitPermissionHeader}"
 +        RESULT_VARIABLE _summitResult)
 +    if (_summitResult)
 +        message(FATAL_ERROR "generate-browser-command-codes.py failed")
 +    endif ()
-+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_summitContextHeader}" "${_summitViewHeader}")
++    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_summitContextHeader}" "${_summitViewHeader}" "${_summitPermissionHeader}")
 +    list(APPEND WebKit_SOURCES
 +        Platform/summit/StoragePathsWPE.cpp
 +        UIProcess/Extensions/wpe/NativeBrowserCommandWPE.cpp
@@ -136125,6 +136160,7 @@ index 0000000000000000000000000000000000000000..9badce381a1b38d7344d3f2c869b2b80
 +    file(MAKE_DIRECTORY "${_summitForwardingDir}")
 +    file(GLOB _summitHaikuHeaders
 +        "${WEBKIT_DIR}/Platform/haiku/*Haiku.h"
++        "${WEBKIT_DIR}/Shared/haiku/*Haiku.h"
 +        "${WEBKIT_DIR}/UIProcess/haiku/*Haiku.h"
 +        "${WEBKIT_DIR}/UIProcess/Extensions/haiku/*.h")
 +    foreach (_header IN LISTS _summitHaikuHeaders)
@@ -153901,7 +153937,7 @@ index 0000000000000000000000000000000000000000..523eb7374490116ae6077d2d02eed087
 +#endif
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionActionHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionActionHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..5526ed3b6d4793df2fe5dac7111c412e04e62cca
+index 0000000000000000000000000000000000000000..5083cd5caf5c696f0877c98a98373f64e173d49c
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionActionHaiku.cpp
 @@ -0,0 +1,459 @@
@@ -153937,7 +153973,7 @@ index 0000000000000000000000000000000000000000..5526ed3b6d4793df2fe5dac7111c412e
 +
 +#include "WebExtensionContext.h"
 +#include "WebExtensionUtilities.h"
-+#include <InterfaceDefs.h>
++#include "SummitHaikuTypes.h"
 +#include <cmath>
 +#include <limits>
 +
@@ -155978,10 +156014,10 @@ index 0000000000000000000000000000000000000000..94432b90ebf90223c5c4a082e495ee9e
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && USE(SUMMIT_EXTENSIONS)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPICookiesHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPICookiesHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..7ef7e7358c90d39b3d5d34bd6e2dd4e16f1aa137
+index 0000000000000000000000000000000000000000..63e4bf467e97718a234dbae8cd8fecb1bf9ce065
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPICookiesHaiku.cpp
-@@ -0,0 +1,393 @@
+@@ -0,0 +1,417 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "config.h"
 +#include "WebExtensionContext.h"
@@ -156001,11 +156037,35 @@ index 0000000000000000000000000000000000000000..7ef7e7358c90d39b3d5d34bd6e2dd4e1
 +#include "WebExtensionTab.h"
 +#include "WebPageProxy.h"
 +#include "WebsiteDataStore.h"
++#if USE(CURL)
 +#include <WebCore/CookieUtil.h>
++#else
++#include <wtf/URL.h>
++#endif
 +#include <algorithm>
 +#include <cmath>
 +#include <wtf/text/MakeString.h>
 +namespace WebKit {
++
++// Whether a cookie of the domain is sent to the host (RFC 6265 domain
++// matching, as libcurl's cookie store records domains: a leading dot for
++// domain cookies).
++static bool summitCookieDomainMatch(const String& cookieDomain, const String& host)
++{
++#if USE(CURL)
++    return WebCore::CookieUtil::domainMatch(cookieDomain, host);
++#else
++    if (cookieDomain.isEmpty() || host.isEmpty())
++        return false;
++    if (cookieDomain == host)
++        return true;
++    auto domain = cookieDomain.startsWith('.') ? cookieDomain.substring(1) : cookieDomain;
++    if (host == domain)
++        return true;
++    return host.length() > domain.length() && host.endsWith(makeString('.', domain)) && !URL::hostIsIPAddress(host);
++#endif
++}
++
 +static bool validCookieURL(const URL& url)
 +{
 +    return url.isValid() && url.protocolIsInHTTPFamily() && !url.host().isEmpty();
@@ -156125,7 +156185,7 @@ index 0000000000000000000000000000000000000000..7ef7e7358c90d39b3d5d34bd6e2dd4e1
 +                continue;
 +            if (!url.isEmpty()) {
 +                auto path = url.path();
-+                if (!WebCore::CookieUtil::domainMatch(cookie.domain, url.host().toString())
++                if (!summitCookieDomainMatch(cookie.domain, url.host().toString())
 +                    || (cookie.secure && !url.protocolIs("https"_s))
 +                    || !(path == cookie.path || (path.startsWith(cookie.path)
 +                        && (cookie.path.endsWith('/') || (path.length() > cookie.path.length() && path[cookie.path.length()] == '/')))))
@@ -159091,10 +159151,10 @@ index 0000000000000000000000000000000000000000..57ade24fb0bd03238eb4dd2bb9e31050
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && USE(SUMMIT_EXTENSIONS)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPIDownloadsHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPIDownloadsHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..26416da9e5f1f4dbf2f583e452920b7a885e5e02
+index 0000000000000000000000000000000000000000..3ae185169d87e44ebdd0be5f8366298d5b336bf1
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPIDownloadsHaiku.cpp
-@@ -0,0 +1,467 @@
+@@ -0,0 +1,486 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "config.h"
 +#include "WebExtensionContext.h"
@@ -159107,6 +159167,7 @@ index 0000000000000000000000000000000000000000..26416da9e5f1f4dbf2f583e452920b7a
 +#include "WebExtensionUtilities.h"
 +#include "WebPageProxy.h"
 +#include "WebKitContext.h"
++#if PLATFORM(HAIKU)
 +#include <Bitmap.h>
 +#include <BitmapStream.h>
 +#include <DataIO.h>
@@ -159116,6 +159177,7 @@ index 0000000000000000000000000000000000000000..26416da9e5f1f4dbf2f583e452920b7a
 +#include <Roster.h>
 +#include <TranslatorFormats.h>
 +#include <TranslatorRoster.h>
++#endif
 +#include <WebCore/FormData.h>
 +#include <WebCore/HTTPParsers.h>
 +#include <WebCore/ResourceRequest.h>
@@ -159144,8 +159206,14 @@ index 0000000000000000000000000000000000000000..26416da9e5f1f4dbf2f583e452920b7a
 +    return value ? value->asObject() : nullptr;
 +}
 +
++// FIXME (Summit, Android): opening a downloaded file or its folder is the
++// browser's to do; ask it with a browser command instead.
 +static std::expected<void, String> openFolder(const String& path)
 +{
++#if !PLATFORM(HAIKU)
++    UNUSED_PARAM(path);
++    return makeUnexpected("Opening folders is not supported"_s);
++#else
 +    BEntry entry(path.utf8().legacyCStringPointer(), true);
 +    entry_ref reference;
 +    if (entry.InitCheck() != B_OK || !entry.IsDirectory() || entry.GetRef(&reference) != B_OK)
@@ -159156,6 +159224,7 @@ index 0000000000000000000000000000000000000000..26416da9e5f1f4dbf2f583e452920b7a
 +    if (status != B_OK && status != B_ALREADY_RUNNING)
 +        return makeUnexpected("The folder could not be opened"_s);
 +    return { };
++#endif
 +}
 +
 +void WebExtensionContext::downloadsDownload(WebPageProxyIdentifier webPageProxyIdentifier, String&& optionsJSON, CompletionHandler<void(std::expected<double, WebExtensionError>&&)>&& completionHandler)
@@ -159417,6 +159486,11 @@ index 0000000000000000000000000000000000000000..26416da9e5f1f4dbf2f583e452920b7a
 +// The file's Tracker icon as a PNG data: URL.
 +static std::expected<String, String> fileIconURL(const String& path, int size)
 +{
++#if !PLATFORM(HAIKU)
++    UNUSED_PARAM(path);
++    UNUSED_PARAM(size);
++    return makeUnexpected("The file has no icon"_s);
++#else
 +    BNode node(path.utf8().legacyCStringPointer());
 +    BNodeInfo info(&node);
 +    if (node.InitCheck() != B_OK || info.InitCheck() != B_OK)
@@ -159436,6 +159510,7 @@ index 0000000000000000000000000000000000000000..26416da9e5f1f4dbf2f583e452920b7a
 +        return makeUnexpected("The icon could not be encoded"_s);
 +    std::span bytes { static_cast<const uint8_t*>(png.Buffer()), png.BufferLength() };
 +    return makeString("data:image/png;base64,"_s, base64EncodeToString(bytes));
++#endif
 +}
 +
 +void WebExtensionContext::downloadsItemAction(String&& action, double downloadIdentifier, String&& optionsJSON, CompletionHandler<void(std::expected<String, WebExtensionError>&&)>&& completionHandler)
@@ -159510,6 +159585,7 @@ index 0000000000000000000000000000000000000000..26416da9e5f1f4dbf2f583e452920b7a
 +            completionHandler(toWebExtensionError(apiName, nullString(), path.error()));
 +            return;
 +        }
++#if PLATFORM(HAIKU)
 +        // The file opens in its preferred application, as from Tracker.
 +        BEntry entry(path->utf8().legacyCStringPointer());
 +        entry_ref reference;
@@ -159517,6 +159593,9 @@ index 0000000000000000000000000000000000000000..26416da9e5f1f4dbf2f583e452920b7a
 +        if (status == B_OK)
 +            status = be_roster->Launch(&reference);
 +        if (status != B_OK && status != B_ALREADY_RUNNING) {
++#else
++        if (true) {
++#endif
 +            completionHandler(toWebExtensionError(apiName, nullString(), "the file could not be opened"_s));
 +            return;
 +        }
@@ -159937,10 +160016,10 @@ index 0000000000000000000000000000000000000000..1d1886ceafaca9a7672b07a75cfc12e3
 +#endif
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPINativeMessagingHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPINativeMessagingHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..161bcf8879a01e895bdb58bea15fbe5f4ee55216
+index 0000000000000000000000000000000000000000..746fe7d1f5bd5c775ea0e07bd86b73c24dcf9d02
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionContextAPINativeMessagingHaiku.cpp
-@@ -0,0 +1,380 @@
+@@ -0,0 +1,390 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +
 +#include "config.h"
@@ -159952,7 +160031,9 @@ index 0000000000000000000000000000000000000000..161bcf8879a01e895bdb58bea15fbe5f
 +#include "WebExtensionMessagePort.h"
 +#include "WebExtensionPermission.h"
 +#include "WebExtensionUtilities.h"
++#if PLATFORM(HAIKU)
 +#include <FindDirectory.h>
++#endif
 +#include <csignal>
 +#include <fcntl.h>
 +#include <spawn.h>
@@ -160005,8 +160086,15 @@ index 0000000000000000000000000000000000000000..161bcf8879a01e895bdb58bea15fbe5f
 +{
 +    if (!isValidNativeHostName(name))
 +        return std::nullopt;
++#if PLATFORM(HAIKU)
 +    static constexpr std::array directories { B_USER_SETTINGS_DIRECTORY, B_USER_NONPACKAGED_DATA_DIRECTORY, B_USER_DATA_DIRECTORY,
 +        B_SYSTEM_NONPACKAGED_DATA_DIRECTORY, B_SYSTEM_DATA_DIRECTORY };
++#else
++    // Android runs no native messaging hosts: apps cannot start other programs.
++    UNUSED_PARAM(context);
++    return std::nullopt;
++#endif
++#if PLATFORM(HAIKU)
 +    // The extension as Chrome (its origin) and Firefox (its add-on ID) name it.
 +    auto origin = makeString(context.baseURL().protocol(), "://"_s, context.baseURL().host(), '/');
 +    String geckoID;
@@ -160056,6 +160144,7 @@ index 0000000000000000000000000000000000000000..161bcf8879a01e895bdb58bea15fbe5f
 +        return std::nullopt;
 +    }
 +    return std::nullopt;
++#endif
 +}
 +
 +// A running host. Messages and its exit are reported on the main thread.
@@ -167459,10 +167548,10 @@ index 0000000000000000000000000000000000000000..384b8f6dd1a71cdd07d0f351beb4336d
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && USE(SUMMIT_EXTENSIONS)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionControllerConfigurationHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionControllerConfigurationHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..e070b5e4916bdd76c06ac948e2050fb8b88ff579
+index 0000000000000000000000000000000000000000..dadcbc1b77f913d54ffaabd9711b409ad28083e1
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionControllerConfigurationHaiku.cpp
-@@ -0,0 +1,66 @@
+@@ -0,0 +1,70 @@
 +/*
 + * Copyright (C) 2022 Apple Inc. All rights reserved.
 + * Copyright (C) 2026 KunanyiOS contributors.
@@ -167510,7 +167599,11 @@ index 0000000000000000000000000000000000000000..e070b5e4916bdd76c06ac948e2050fb8
 +
 +String WebExtensionControllerConfiguration::createTemporaryStorageDirectoryPath()
 +{
++#if USE(GLIB)
++    return FileSystem::createTemporaryDirectory("WebExtensions"_s);
++#else
 +    return FileSystem::createTemporaryDirectory();
++#endif
 +}
 +
 +Ref<WebExtensionControllerConfiguration> WebExtensionControllerConfiguration::copy() const
@@ -170234,10 +170327,10 @@ index 0000000000000000000000000000000000000000..40c97d504f4e0ae579ba248bfdbe53b8
 +#endif
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..a3a47daa0df9cafa9f67b24da5bbb32d0aeea64a
+index 0000000000000000000000000000000000000000..022dfcff2f838b5c7310b085c3e65ee95598b5dc
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionHaiku.cpp
-@@ -0,0 +1,339 @@
+@@ -0,0 +1,356 @@
 +/*
 + * Copyright (C) 2026 KunanyiOS contributors.
 + *
@@ -170285,6 +170378,11 @@ index 0000000000000000000000000000000000000000..a3a47daa0df9cafa9f67b24da5bbb32d
 +#include <WebCore/LocalFrame.h>
 +#include <WebCore/LocalizedStrings.h>
 +#include <WebCore/NativeImage.h>
++#if USE(GLIB)
++#include <WebCore/ImageUtilities.h>
++#include <gio/gio.h>
++#include <wtf/glib/GRefPtr.h>
++#endif
 +#include <WebCore/NetworkLoadMetrics.h>
 +#include <WebCore/Page.h>
 +#include <WebCore/PlatformStrategies.h>
@@ -170569,8 +170667,20 @@ index 0000000000000000000000000000000000000000..a3a47daa0df9cafa9f67b24da5bbb32d
 +        }
 +    }
 +
++#if USE(GLIB)
++    // GLib ports' icons are GIcons: the rasterized image as PNG.
++    if (!nativeImage)
++        return fail();
++    auto png = WebCore::encodeData(nativeImage, "image/png"_s);
++    if (png.isEmpty())
++        return fail();
++    GRefPtr<GBytes> bytes = adoptGRef(g_bytes_new(png.span().data(), png.size()));
++    if (RefPtr icon = WebCore::Icon::create(adoptGRef(g_bytes_icon_new(bytes.get()))))
++        return icon.releaseNonNull();
++#else
 +    if (RefPtr icon = WebCore::Icon::create(WTF::move(nativeImage)))
 +        return icon.releaseNonNull();
++#endif
 +    return fail();
 +}
 +
@@ -173273,7 +173383,7 @@ index 0000000000000000000000000000000000000000..13a09625d6f8fdbdfb7be5857fcc2fc6
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && USE(SUMMIT_EXTENSIONS)
 diff --git a/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionURLSchemeHandlerHaiku.cpp b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionURLSchemeHandlerHaiku.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..349b25678d7904d4a761759277afe86ba3500232
+index 0000000000000000000000000000000000000000..bbcb7ec4b8d9601ddbc2c6b0e6b10a063d6a3e54
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/haiku/WebExtensionURLSchemeHandlerHaiku.cpp
 @@ -0,0 +1,246 @@
@@ -173324,7 +173434,7 @@ index 0000000000000000000000000000000000000000..349b25678d7904d4a761759277afe86b
 +#include <wtf/URLParser.h>
 +#include <wtf/text/Base64.h>
 +#include <wtf/text/StringToIntegerConversion.h>
-+#include <Errors.h>
++#include "SummitHaikuTypes.h"
 +#include <WebCore/HTTPHeaderNames.h>
 +#include <WebCore/MIMETypeRegistry.h>
 +#include <WebCore/ResourceError.h>
@@ -173816,10 +173926,10 @@ index 0000000000000000000000000000000000000000..1dc51608bc8e184db211112b57aae6cf
 +#endif
 diff --git a/Source/WebKit/UIProcess/Extensions/wpe/NativeBrowserCommandWPE.h b/Source/WebKit/UIProcess/Extensions/wpe/NativeBrowserCommandWPE.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..f4e9bf8fea0314a4d4dc59f25a62e9829ddcfd8c
+index 0000000000000000000000000000000000000000..a1904fb580c1455ff45e9a473ab868954f753854
 --- /dev/null
 +++ b/Source/WebKit/UIProcess/Extensions/wpe/NativeBrowserCommandWPE.h
-@@ -0,0 +1,110 @@
+@@ -0,0 +1,114 @@
 +/*
 + * Copyright (C) 2026 air/OS contributors
 + *
@@ -173918,6 +174028,10 @@ index 0000000000000000000000000000000000000000..f4e9bf8fea0314a4d4dc59f25a62e982
 +    status_t AddMessage(const char* name, const NativeBrowserCommand*);
 +
 +    bool HasField(const char* name) const;
++    // BMessage's HasType(name): whether the field exists (its type is not kept).
++    bool HasUInt64(const char* name) const { return HasField(name); }
++    bool HasInt64(const char* name) const { return HasField(name); }
++    bool HasString(const char* name) const { return HasField(name); }
 +    // {"what": n, "fields": {name: [values...]}}: every field is a list, as a
 +    // BMessage field can hold several values; targets are {"target": id}.
 +    Ref<JSON::Object> toJSON() const;
@@ -173959,6 +174073,22 @@ index 0000000000000000000000000000000000000000..05d162b70f2067b26a2fa012c5899918
 +// Summit: on WPE, the shared WebExtensions code includes the Haiku API header
 +// WebKitContext.h only for its message codes and the Haiku types it uses;
 +// this stands in for it.
++#include "SummitHaikuTypes.h"
++#include "WebKitBrowserCommandCodes.h"
+diff --git a/Source/WebKit/UIProcess/Extensions/wpe/WebKitExtensionPermission.h b/Source/WebKit/UIProcess/Extensions/wpe/WebKitExtensionPermission.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..a8679fd7da798116dca41d7c9c5685daded28b7b
+--- /dev/null
++++ b/Source/WebKit/UIProcess/Extensions/wpe/WebKitExtensionPermission.h
+@@ -0,0 +1,10 @@
++/*
++ * Copyright (C) 2026 air/OS contributors. SPDX-License-Identifier: BSD-2-Clause
++ */
++
++#pragma once
++
++// Summit: stands in on WPE for the Haiku API header of the same name, whose
++// message codes are generated into WebKitBrowserCommandCodes.h.
 +#include "SummitHaikuTypes.h"
 +#include "WebKitBrowserCommandCodes.h"
 diff --git a/Source/WebKit/UIProcess/Gamepad/UIGamepadProvider.cpp b/Source/WebKit/UIProcess/Gamepad/UIGamepadProvider.cpp
@@ -179001,7 +179131,7 @@ index f0a894576a62be24a8e7e5b8009d63128b210aa7..85264fa2c360e44d115c8604754c9e0c
  #if ENABLE(WEBDRIVER_BIDI)
          if (RefPtr page = m_page.get()) {
 diff --git a/Source/WebKit/UIProcess/WebPageProxy.cpp b/Source/WebKit/UIProcess/WebPageProxy.cpp
-index abc66b25d5be6d2b961364268f19eb3762ab2c3a..54272461a452db93bf84f0100242e0f05a985155 100644
+index abc66b25d5be6d2b961364268f19eb3762ab2c3a..8dce3e052eb5599c05260d9cb9c51238677ce643 100644
 --- a/Source/WebKit/UIProcess/WebPageProxy.cpp
 +++ b/Source/WebKit/UIProcess/WebPageProxy.cpp
 @@ -65,7 +65,9 @@
@@ -179029,7 +179159,7 @@ index abc66b25d5be6d2b961364268f19eb3762ab2c3a..54272461a452db93bf84f0100242e0f0
 -#if ENABLE(WK_WEB_EXTENSIONS) && PLATFORM(COCOA)
 +#if ENABLE(WK_WEB_EXTENSIONS) && (PLATFORM(COCOA) || USE(SUMMIT_EXTENSIONS))
  #include "WebExtensionController.h"
-+#if PLATFORM(HAIKU)
++#if USE(SUMMIT_EXTENSIONS)
 +#include "WebExtensionFrameParameters.h"
 +#include "haiku/WebExtensionPrivacyControllerHaiku.h"
 +#endif
@@ -205679,10 +205809,10 @@ index 0000000000000000000000000000000000000000..401fd26e95458184155a9a4091a38378
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && USE(SUMMIT_EXTENSIONS)
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPICookies.cpp b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPICookies.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..af5f3f0a7bfb30b8be88ed1c840245005f47d1d7
+index 0000000000000000000000000000000000000000..5200ba4ee231ef7c956d01003bdca17c8390dd60
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPICookies.cpp
-@@ -0,0 +1,147 @@
+@@ -0,0 +1,154 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "config.h"
 +#include "WebExtensionAPICookies.h"
@@ -205812,6 +205942,7 @@ index 0000000000000000000000000000000000000000..af5f3f0a7bfb30b8be88ed1c84024500
 +        m_onChanged = WebExtensionAPIEvent::create(*this, WebExtensionEventListenerType::CookiesOnChanged);
 +    return *m_onChanged;
 +}
++#if USE(CURL)
 +void WebExtensionContextProxy::dispatchCookiesChangedEvent(PAL::SessionID sessionID, const Vector<WebCore::CookieChange>& changes)
 +{
 +    if (!sessionID.isValid() || !hasPermission(WebExtensionPermission::cookies()))
@@ -205828,6 +205959,12 @@ index 0000000000000000000000000000000000000000..af5f3f0a7bfb30b8be88ed1c84024500
 +        });
 +    }
 +}
++#else
++void WebExtensionContextProxy::dispatchCookiesChangedEvent()
++{
++    // FIXME (Summit, WPE): cookies.onChanged needs the cookie changes from the soup network process.
++}
++#endif
 +}
 +#endif
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPICookies.h b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPICookies.h
@@ -208308,16 +208445,18 @@ index 0000000000000000000000000000000000000000..3da7931fb5f0a98f7f575adb5c756207
 +#endif // ENABLE(WK_WEB_EXTENSIONS) && USE(SUMMIT_EXTENSIONS)
 diff --git a/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIIdle.cpp b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIIdle.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..7d0c9fb8a0e96352701a7a1038126c03ba0cdfce
+index 0000000000000000000000000000000000000000..9939d3dece9b7877ec5fbd36e9b086c3439c2f37
 --- /dev/null
 +++ b/Source/WebKit/WebProcess/Extensions/API/WebExtensionAPIIdle.cpp
-@@ -0,0 +1,58 @@
+@@ -0,0 +1,67 @@
 +/* Copyright (C) 2026 KunanyiOS contributors. SPDX-License-Identifier: BSD-2-Clause */
 +#include "config.h"
 +#include "WebExtensionAPIIdle.h"
 +#if ENABLE(WK_WEB_EXTENSIONS) && USE(SUMMIT_EXTENSIONS)
 +#include "WebExtensionUtilities.h"
++#if PLATFORM(HAIKU)
 +#include <InterfaceDefs.h>
++#endif
 +#include <wtf/JSONValues.h>
 +
 +namespace WebKit {
@@ -208327,8 +208466,15 @@ index 0000000000000000000000000000000000000000..7d0c9fb8a0e96352701a7a1038126c03
 +
 +static String stateForInterval(Seconds interval)
 +{
++#if PLATFORM(HAIKU)
 +    // The native input server reports the time since the last keyboard or pointer event.
 +    return Seconds::fromMicroseconds(idle_time()) >= interval ? "idle"_s : "active"_s;
++#else
++    // FIXME (Summit, Android): the web process cannot see the device's input;
++    // the UI process should report when the screen is off or the app hidden.
++    UNUSED_PARAM(interval);
++    return "active"_s;
++#endif
 +}
 +void WebExtensionAPIIdle::queryState(double detectionIntervalInSeconds, Ref<WebExtensionCallbackHandler>&& callback, String& outExceptionString)
 +{
